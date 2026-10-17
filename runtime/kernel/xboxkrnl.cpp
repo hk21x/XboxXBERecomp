@@ -673,6 +673,10 @@ KERNEL_EXPORT(246, ObReferenceObjectByHandle, 3) {
     uint32_t h = a[0];
     ObjectRef o = h == 0xFFFFFFFE ? CurrentRef() : FromHandle(h);
     if (!o) return kInvalidHandle;
+    if (o->type == ObjType::File) {
+        W32(a[2], FileObjectBody(o));
+        return kSuccess;
+    }
     if (!o->guest) {
         uint32_t body = mem::AllocSystem(32);
         Bind(o, body);
@@ -986,8 +990,8 @@ KERNEL_EXPORT(269, RtlCompareMemoryUlong, 3) {
     return n;
 }
 
-KERNEL_EXPORT(301, RtlNtStatusToDosError, 1) {
-    switch (a[0]) {
+static uint32_t DosError(uint32_t status) {
+    switch (status) {
         case kSuccess: return 0;
         case kPending: return 997;
         case kTimeout: return 1460;
@@ -1010,8 +1014,19 @@ KERNEL_EXPORT(301, RtlNtStatusToDosError, 1) {
         case kNotADirectory: return 267;
         case 0xC000007F: return 112;  // disk full
         case kDeviceNotConnected: return 1167;
-        default: return (a[0] & 0xC0000000) ? 317 : 0;
+        default: return (status & 0xC0000000) ? 317 : 0;
     }
+}
+
+KERNEL_EXPORT(301, RtlNtStatusToDosError, 1) { return DosError(a[0]); }
+
+// the APC routine XAPI's ReadFileEx and WriteFileEx give the kernel: the context is the title's completion routine,
+// called as routine(error, bytes, overlapped), the OVERLAPPED holding the status block at its start
+KERNEL_EXPORT(232, NtUserIoApcDispatcher, 3) {
+    uint32_t routine = a[0], iosb = a[1];
+    uint32_t status = R32(iosb), bytes = R32(iosb + 4);
+    CallGuest(ctx, routine, {DosError(status), status & 0xC0000000 ? 0 : bytes, iosb});
+    return 0;
 }
 
 // exceptions, debug, shutdown

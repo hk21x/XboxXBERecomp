@@ -78,6 +78,7 @@ struct File : Object {
     size_t next = 0;
     bool listed = false;
     bool delete_on_close = false;
+    int partition = 0;  // a hard disk partition opened whole: raw volume I/O, 1 to 5
     std::mutex io;  // threads sharing a handle: seek and transfer stay together
     File() : Object(ObjType::File) {}
     ~File() override {
@@ -190,6 +191,9 @@ std::string ReadCString(uint32_t va, size_t max) {
     return s;
 }
 
+// the hard disk's partitions, \Device\Harddisk0\Partition1 to 5, each a host folder
+const std::string kPartitionPrefix = "\\DEVICE\\HARDDISK0\\PARTITION";
+
 void MountDefaults(const std::string& game_dir, const std::string& data_dir) {
     std::lock_guard<std::mutex> lock(g_links_lock);
     fs::path d = data_dir;
@@ -232,6 +236,7 @@ struct Target {
     std::string host;                    // empty on the disc image or unmapped
     bool disc = false;                   // on the mounted disc image
     const Disc::Entry* entry = nullptr;  // there: the file or folder, null when missing
+    int partition = 0;                   // the path is a whole hard disk partition, 1 to 5
 };
 
 Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
@@ -273,7 +278,10 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
         if (part.find(':') != std::string::npos) return {};
     if (best->first == kCdRom)
         if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts)};
-    return {MatchCase(best->second, parts).string()};
+    int partition = 0;
+    if (parts.empty() && best->first.compare(0, kPartitionPrefix.size(), kPartitionPrefix) == 0)
+        partition = best->first.back() - '0';
+    return {MatchCase(best->second, parts).string(), false, nullptr, partition};
 }
 
 // the disc image is read only: nothing on it is created, replaced or written
@@ -359,6 +367,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
         f->host = host;
         f->xbox = Normalize(name);
         f->dir = true;
+        f->partition = t.partition;
         W32(handle_out, NewHandle(f));
         IoStatus(iosb, kSuccess, info);
         return kSuccess;
@@ -442,6 +451,7 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     f->host = host;
     f->xbox = Normalize(name);
     f->dir = fs::is_directory(host, ec);
+    f->partition = t.partition;
     if (!f->dir) {
         f->fp = std::fopen(host.c_str(), "r+b");
         if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
@@ -467,10 +477,41 @@ static uint64_t Offset(File& f, uint32_t off) {
     return o >= 0 ? uint64_t(o) : f.pos;
 }
 
+// A partition opened whole is a raw volume, but its files live in a host folder. Reads return zeros, writes are
+// accepted and dropped, except that a new FATX volume header written at the start formats the partition: the
+// folder is emptied, as the console's file system would be.
+static uint32_t RawVolume(File& f, bool write, uint32_t buf, uint32_t len, uint64_t pos, uint32_t pages) {
+    constexpr uint32_t kFatxSignature = 0x58544146;  // "FATX"
+    if (!write) {
+        for (uint32_t n = 0; n < len;) {
+            uint32_t at = pages ? R32(pages + n / 0x1000 * 8) + n % 0x1000 : buf + n;
+            uint32_t chunk = pages ? std::min(len - n, 0x1000 - n % 0x1000) : len;
+            std::memset(HostPtr(at), 0, chunk);
+            n += chunk;
+        }
+        return len;
+    }
+    uint32_t first = pages ? R32(pages) : buf;
+    if (pos == 0 && len >= 4 && R32(first) == kFatxSignature) {
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(f.host, ec)) fs::remove_all(e.path(), ec);
+        LOGI("files: partition %d formatted, %s emptied", f.partition, f.host.string().c_str());
+    }
+    return len;
+}
+
 // pages is the FILE_SEGMENT_ELEMENT array for scatter and gather, 0 for one buffer
 static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     uint32_t h = a[0], event = a[1], apc = a[2], apc_ctx = a[3], iosb = a[4], buf = a[5], len = a[6], off = a[7];
     auto f = FileFromHandle(h);
+    if (f && f->partition) {
+        ResetEvent(*f);
+        std::lock_guard<std::mutex> lock(f->io);
+        uint64_t pos = Offset(*f, off);
+        uint32_t n = RawVolume(*f, write, buf, len, pos, pages);
+        f->pos = pos + n;
+        return Finish(*f, kSuccess, n, event, apc, apc_ctx, iosb);
+    }
     if (!f || (!f->fp && !f->entry)) return kInvalidHandle;
     if (write && f->entry) return kAccessDenied;
     ResetEvent(*f);
@@ -587,16 +628,17 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
     return kSuccess;
 }
 
-KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
-    uint32_t iosb = a[1], out = a[2], len = a[3], cls = a[4];
+// volume information of class cls into out; the bytes written in *written
+static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* written) {
     std::memset(HostPtr(out), 0, len);
+    *written = 0;
     switch (cls) {
         case 3:  // FileFsSizeInformation: 16 GiB total, 8 GiB free in 16 KiB units
             W64(out, 0x100000);
             W64(out + 8, 0x80000);
             W32(out + 0x10, 32);
             W32(out + 0x14, 512);
-            IoStatus(iosb, kSuccess, 0x18);
+            *written = 0x18;
             return kSuccess;
         case 7:  // FileFsFullSizeInformation
             W64(out, 0x100000);
@@ -604,23 +646,67 @@ KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
             W64(out + 0x10, 0x80000);
             W32(out + 0x18, 32);
             W32(out + 0x1C, 512);
-            IoStatus(iosb, kSuccess, 0x20);
+            *written = 0x20;
             return kSuccess;
         case 1:  // FileFsVolumeInformation
             W32(out + 8, 0x12345678);  // VolumeSerialNumber
-            IoStatus(iosb, kSuccess, 0x18);
+            *written = 0x18;
             return kSuccess;
         case 5:  // FileFsAttributeInformation: attributes, max name, name length, "FATX"
             W32(out, 0);
             W32(out + 4, 42);
             W32(out + 8, 4);
             std::memcpy(HostPtr(out + 12), "FATX", 4);
-            IoStatus(iosb, kSuccess, 16);
+            *written = 16;
             return kSuccess;
         default:
-            LOG_FIRST(8, "NtQueryVolumeInformationFile: class %u", cls);
+            LOG_FIRST(8, "volume information class %u", cls);
             return kInvalidParameter;
     }
+}
+
+KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
+    uint32_t iosb = a[1], out = a[2], len = a[3], cls = a[4], n;
+    uint32_t status = QueryVolume(out, len, cls, &n);
+    if (status == kSuccess) IoStatus(iosb, kSuccess, n);
+    return status;
+}
+
+// File objects handed to the title by ObReferenceObjectByHandle: a FILE_OBJECT sized body with FsContext (+8)
+// pointing at a zeroed block, so code that reads the file system's context (XGetFilePhysicalSortKey) finds one.
+// Not a dispatcher object, so not stamped like one: the body is found again through this map.
+namespace {
+std::mutex g_file_objects_lock;
+std::map<uint32_t, std::weak_ptr<Object>> g_file_objects;
+}  // namespace
+
+uint32_t FileObjectBody(const ObjectRef& o) {
+    constexpr uint32_t kFileObjectBytes = 0x40, kFsContextBytes = 0x40, kFsContext = 8;
+    std::lock_guard<std::mutex> lock(g_file_objects_lock);
+    if (!o->guest) {
+        uint32_t body = mem::AllocSystem(kFileObjectBytes), context = mem::AllocSystem(kFsContextBytes);
+        std::memset(HostPtr(body), 0, kFileObjectBytes);
+        std::memset(HostPtr(context), 0, kFsContextBytes);
+        W32(body + kFsContext, context);
+        o->guest = body;
+        g_file_objects[body] = o;
+    }
+    return o->guest;
+}
+
+// IoQueryVolumeInformation(FileObject, FsInformationClass, Length, FsInformation, ReturnedLength)
+KERNEL_EXPORT(76, IoQueryVolumeInformation, 5) {
+    ObjectRef o;
+    {
+        std::lock_guard<std::mutex> lock(g_file_objects_lock);
+        auto it = g_file_objects.find(a[0]);
+        if (it != g_file_objects.end()) o = it->second.lock();
+    }
+    if (!o || o->type != ObjType::File) return kInvalidHandle;
+    uint32_t n;
+    uint32_t status = QueryVolume(a[3], a[2], a[1], &n);
+    if (a[4]) W32(a[4], n);
+    return status;
 }
 
 KERNEL_EXPORT(207, NtQueryDirectoryFile, 10) {
@@ -632,7 +718,9 @@ KERNEL_EXPORT(207, NtQueryDirectoryFile, 10) {
         LOG_FIRST(8, "NtQueryDirectoryFile: class %u", cls);
         return kInvalidParameter;
     }
-    std::string pat = mask ? ReadAnsiString(mask) : "*";
+    // no name or an empty one matches everything: XAPI's FindFirstFile sends "*.*" as an empty name
+    std::string pat = mask ? ReadAnsiString(mask) : "";
+    if (pat.empty()) pat = "*";
     if (!f->listed || (restart & 0xFF)) {
         f->entries.clear();
         f->disc_entries.clear();
@@ -714,6 +802,18 @@ KERNEL_EXPORT(196, NtDeviceIoControlFile, 10) {
         W32(out + 12, 255);
         W32(out + 16, 63);
         W32(out + 20, 512);
+    }
+    auto f = FileFromHandle(a[0]);
+    if (code == 0x74004 && out_len >= 0x20 && f && f->partition) {  // IOCTL_DISK_GET_PARTITION_INFO
+        // the retail layout: X, Y and Z (3 to 5) are the 750 MB caches, C (2) 500 MB, E (1) the data partition
+        constexpr uint64_t kStart[] = {0, 0xABE80000, 0x8CA80000, 0x00080000, 0x2EE80000, 0x5DC80000};
+        constexpr uint64_t kLength[] = {0, 0x1312D6000, 0x1F400000, 0x2EE00000, 0x2EE00000, 0x2EE00000};
+        W64(out, kStart[f->partition]);
+        W64(out + 8, kLength[f->partition]);
+        W32(out + 0x10, uint32_t(kStart[f->partition] / 512));  // HiddenSectors
+        W32(out + 0x14, uint32_t(f->partition));               // PartitionNumber
+        G<uint8_t>(out + 0x18) = 0x0C;                          // PartitionType, as XAPI's FATX volumes report it
+        G<uint8_t>(out + 0x1A) = 1;                             // RecognizedPartition
     }
     IoStatus(iosb, kSuccess, out_len);
     return kSuccess;
