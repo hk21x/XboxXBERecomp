@@ -39,6 +39,10 @@ using namespace kernel;
 #define SYM_D3DDevice_GetVertexShaderFunction FFFFFE03
 #define HAS_D3DDevice_GetVertexShaderFunction 0
 #endif
+#ifndef SYM_D3DDevice_Reset
+#define SYM_D3DDevice_Reset FFFFFE04
+#define HAS_D3DDevice_Reset 0
+#endif
 
 namespace d3d {
 
@@ -249,6 +253,49 @@ using namespace d3d;
 
 // device
 
+namespace {
+// the swap chain and auto depth buffer a D3DPRESENT_PARAMETERS at pp asks for, made the device's targets. The same
+// parameters again keep the buffers, so surfaces a title still holds stay valid; true when they are new.
+bool MakeFrameBuffers(uint32_t pp) {
+    uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
+    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
+    if (!w) w = 640;
+    if (!h) h = 480;
+    static uint32_t made[5];
+    uint32_t want[5] = {w, h, fmt, count, auto_depth ? depth_fmt : 0xFFFFFFFFu};
+    bool fresh = !g_buffers[1] || std::memcmp(made, want, sizeof made);
+    if (fresh) {
+        uint32_t color_fmt = gpu::LinearColorFormat(fmt);
+        g_buffer_count = std::min<uint32_t>(count + 1, 3);
+        for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
+        g_depth = 0;
+        if (auto_depth) {
+            uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
+            g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4);  // 0x30 LIN_D16, 0x31 LIN_F16
+        }
+        std::memcpy(made, want, sizeof made);
+    }
+    SetDev(kDevRenderTarget, g_buffers[1]);
+    SetDev(kDevDepth, g_depth);
+    SetDev(kDevBackBuffer, g_buffers[1]);
+    SetDev(kDevFrontBuffer, g_buffers[1]);
+    float one = 1.0f, zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
+    std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
+    std::memcpy(HostPtr(kDevice + kDevSuperY), &one, 4);
+    std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
+    // fields the library's init sets that inlined library code and the default states read
+    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
+    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &one, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &one, 4);
+    }
+    g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    g_state.rt = SurfaceOf(g_buffers[1]);
+    g_state.zs = SurfaceOf(g_depth);
+    return fresh;
+}
+}  // namespace
+
 HLE_STDCALL(Direct3D_CreateDevice, 6) {
     XDK_REQUIRE("d3d", XDK_DATA(D3D_Device), XDK_DATA(D3D_pDevice), XDK_DATA(D3D_DirtyFlags),
                 XDK_DATA(D3D_DeferredTextureState), XDK_DATA(D3D_RenderState), XDK_DATA(D3D_Streams),
@@ -272,35 +319,13 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     W32(kDevicePtr, kDevice);
     ScratchPush();
 
-    uint32_t color_fmt = gpu::LinearColorFormat(fmt);
-    g_buffer_count = std::min<uint32_t>(count + 1, 3);
-    for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
-    g_depth = 0;
-    if (auto_depth) {
-        uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
-        g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4);  // 0x30 LIN_D16, 0x31 LIN_F16
-    }
     if (!g_backend) {
         g_backend = gpu::CreateBackend();
         if (!g_backend->Init(w, h)) LOGE("d3d: renderer init failed");
         if (kRenderThread) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
     }
     g_state = gpu::State{};
-    g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
-    SetDev(kDevRenderTarget, g_buffers[1]);
-    SetDev(kDevDepth, g_depth);
-    SetDev(kDevBackBuffer, g_buffers[1]);
-    SetDev(kDevFrontBuffer, g_buffers[1]);
-    float one = 1.0f, zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
-    std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
-    std::memcpy(HostPtr(kDevice + kDevSuperY), &one, 4);
-    std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
-    // fields the library's init sets that inlined library code and the default states read
-    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
-    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
-        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &one, 4);
-        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &one, 4);
-    }
+    MakeFrameBuffers(pp);
     // 60 Hz, widescreen
     if (XDK_CDevice_DisplayFlags != xdk::kUnknown) SetDev(XDK_CDevice_DisplayFlags, 0x400000 | (app::Widescreen() ? 0x10000 : 0));
 #if HAS_D3D_FvfShader
@@ -314,11 +339,30 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
         if (!started) StartHostThread("vertical blank", VerticalBlank);
         started = true;
     }
-    g_state.rt = SurfaceOf(g_buffers[1]);
-    g_state.zs = SurfaceOf(g_depth);
     UpdateViewportConstants();
     ApplyDefaultStates(ctx);
     if (a[5]) W32(a[5], kDevice);
+    return 0;
+}
+
+// Reset(parameters): the frame buffers for the parameters become the target and are cleared, as the library's own
+// Reset does; render states stay. The renderer keeps the size it started with.
+HLE_STDCALL(D3DDevice_Reset, 1) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t pp = a[0];
+    LOGI("d3d: Reset %ux%u format %X buffers %u depth %u format %X interval %X flags %X", R32(pp), R32(pp + 4),
+         R32(pp + 8), R32(pp + 12), R32(pp + 0x20), R32(pp + 0x24), R32(pp + 0x30), R32(pp + 0x28));
+    uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
+    bool fresh = MakeFrameBuffers(pp);
+    // the device's references move to the new targets as SetRenderTarget moves them; new surfaces come with theirs
+    for (auto [now, old] : {std::pair{Dev(kDevRenderTarget), old_rt}, std::pair{Dev(kDevDepth), old_zs}}) {
+        if (now == old) continue;
+        if (!fresh) AddRef(ctx, now);
+        Release(ctx, old);
+    }
+    UpdateViewportConstants();
+    constexpr uint32_t kClearTarget = 1, kClearZBuffer = 2;
+    if (g_backend) g_backend->Clear(g_state, 0, nullptr, kClearTarget | kClearZBuffer, 0, 1.0f, 0);
     return 0;
 }
 
