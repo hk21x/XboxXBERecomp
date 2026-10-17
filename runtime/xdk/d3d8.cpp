@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <thread>
 #include <unordered_map>
@@ -42,6 +43,10 @@ using namespace kernel;
 #ifndef SYM_D3DDevice_Reset
 #define SYM_D3DDevice_Reset FFFFFE04
 #define HAS_D3DDevice_Reset 0
+#endif
+#ifndef SYM_D3DDevice_SetDepthClipPlanes
+#define SYM_D3DDevice_SetDepthClipPlanes FFFFFE05
+#define HAS_D3DDevice_SetDepthClipPlanes 0
 #endif
 
 namespace d3d {
@@ -367,6 +372,14 @@ HLE_STDCALL(D3DDevice_Reset, 1) {
 }
 
 HLE_STDCALL(D3DDevice_Release, 0) { return 1; }
+
+// SetDepthClipPlanes(near, far, flags): the hardware's Z clip planes. The library's own one rewrites device state the
+// host never set up. The renderer clips at the viewport's depth range, as the default planes do; other planes are
+// not applied yet.
+HLE_STDCALL(D3DDevice_SetDepthClipPlanes, 3) {
+    LOG_FIRST(4, "d3d: SetDepthClipPlanes %g %g flags %u is not applied", ArgF(a, 0), ArgF(a, 1), a[2]);
+    return 0;
+}
 
 // synchronisation, the renderer never runs behind
 
@@ -1083,7 +1096,31 @@ void EndPrimitive() {
     uint32_t prim = g_im_prim, count = uint32_t(g_im_vertices.size() / 64), handle = g_state.vs_handle;
     g_im_prim = 0;
     if (!prim || !count) return;
-    if (!(handle & 1) && (handle & 0xE) == 4) LOG_FIRST(1, "d3d: pretransformed immediate mode vertices are not supported");
+    if (!(handle & 1)) {
+        // an FVF: the slots packed in its own layout, drawn by the fixed pipeline (pretransformed XYZRHW included).
+        // A D3DCOLOR goes back to its bytes B, G, R, A from the slot's R, G, B, A.
+        constexpr uint32_t kColor = 0x40;
+        gpu::VertexShader fvf;
+        gpu::FvfInputs(handle, fvf);
+        uint32_t stride = fvf.stream_stride[0];
+        static std::vector<uint8_t> bytes;
+        bytes.assign(size_t(stride) * count, 0);
+        for (uint32_t v = 0; v < count; v++)
+            for (uint32_t r = 0; r < 16; r++) {
+                const auto& in = fvf.inputs[r];
+                if (in.stream < 0) continue;
+                const float* slot = &g_im_vertices[v * 64 + r * 4];
+                uint8_t* out = bytes.data() + size_t(v) * stride + in.offset;
+                if (in.type == kColor) {
+                    for (int c = 0; c < 4; c++)
+                        out[c] = uint8_t(std::lround(std::clamp(slot[c == 3 ? 3 : 2 - c], 0.0f, 1.0f) * 255.0f));
+                } else {
+                    std::memcpy(out, slot, std::min<uint32_t>(in.type >> 4, 4) * 4);
+                }
+            }
+        DrawUp(prim, count, bytes.data(), stride);
+        return;
+    }
     auto bound = g_state.vs, from = handle & 1 ? bound : nullptr;
     Made& m = made[{from.get(), g_im_mask}];
     if (!m.vs) {
