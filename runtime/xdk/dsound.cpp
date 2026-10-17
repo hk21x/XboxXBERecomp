@@ -67,6 +67,14 @@ X86Func* Find(uint32_t guest);
 #define SYM_IDirectSoundBuffer_StopEx FFFFFF0A
 #define HAS_IDirectSoundBuffer_StopEx 0
 #endif
+#ifndef SYM_IDirectSoundBuffer_PlayEx
+#define SYM_IDirectSoundBuffer_PlayEx FFFFFF0D
+#define HAS_IDirectSoundBuffer_PlayEx 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_Pause
+#define SYM_IDirectSoundBuffer_Pause FFFFFF0E
+#define HAS_IDirectSoundBuffer_Pause 0
+#endif
 #ifndef SYM_DirectSoundUseLightHRTF
 #define SYM_DirectSoundUseLightHRTF FFFFFF0B
 #define HAS_DirectSoundUseLightHRTF 0
@@ -435,7 +443,7 @@ static void AuditExports() {
         SYM(XAudioDownloadEffectsImage), SYM(DirectSoundCreateBuffer), SYM(IDirectSound_CreateSoundBuffer),
         SYM(IDirectSoundBuffer_Release), SYM(IDirectSoundBuffer_Unlock), SYM(IDirectSoundBuffer_SetBufferData),
         SYM(IDirectSoundBuffer_Play), SYM(IDirectSoundBuffer_Stop), SYM(IDirectSoundBuffer_SetLoopRegion),
-        SYM(IDirectSoundBuffer_GetStatus), SYM(IDirectSoundBuffer_GetCurrentPosition), SYM(IDirectSoundBuffer_SetCurrentPosition),
+        SYM(IDirectSoundBuffer_GetStatus), SYM(IDirectSoundBuffer_PlayEx), SYM(IDirectSoundBuffer_Pause), SYM(IDirectSoundBuffer_GetCurrentPosition), SYM(IDirectSoundBuffer_SetCurrentPosition),
         SYM(IDirectSoundBuffer_Lock), SYM(IDirectSoundBuffer_SetVolume), SYM(IDirectSoundBuffer_SetFrequency),
         SYM(IDirectSoundBuffer_SetFilter), SYM(IDirectSoundBuffer_SetHeadroom), SYM(IDirectSoundBuffer_SetMixBinVolumes),
         SYM(IDirectSoundBuffer_SetMixBins), SYM(IDirectSoundBuffer_SetMaxDistance), SYM(IDirectSoundBuffer_SetMinDistance),
@@ -623,6 +631,20 @@ BUFFER(SetBufferData, 3) {
     return 0;
 }
 BUFFER(Play, 4) {
+    v.playing = true;
+    v.looping = a[3] & 1;
+    if (a[3] & 2) v.pos = 0;
+    v.sync = a[3] & 4;
+    return 0;
+}
+// (this, how): 0 resumes, 1 pauses, 2 holds the voice until IDirectSound_SynchPlayback, as for a stream
+BUFFER(Pause, 2) {
+    v.paused = a[1] == 1;
+    v.sync = a[1] == 2;
+    return 0;
+}
+// (this, time low, time high, flags): plays now, the start time is not reproduced
+BUFFER(PlayEx, 4) {
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
