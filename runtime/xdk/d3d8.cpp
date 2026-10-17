@@ -1011,6 +1011,23 @@ void ApplyVisibilityMethod(uint32_t m, uint32_t v) {
     if (m == gpu::kMGetReport) g_backend->GetReport(mem::VirtualFromPhysical(v & kReportAddressMask));
 }
 
+// vertex shader constants pushed as raw commands: the load slot, then dwords written through the window from it.
+// The slot moves on by the constants of each method group, so a group of 16 dwords at the window start loads 4.
+uint32_t g_constant_load = 0;
+bool ApplyConstantMethod(uint32_t m, uint32_t v) {
+    if (m == gpu::kMConstantLoad) {
+        g_constant_load = v;
+        return true;
+    }
+    if (m < gpu::kMConstant || m >= gpu::kMConstantEnd) return false;
+    uint32_t slot = g_constant_load + (m - gpu::kMConstant) / 16;
+    if (slot < g_state.vsc.size()) std::memcpy(&g_state.vsc[slot][m / 4 & 3], &v, 4);
+    return true;
+}
+void EndConstantGroup(uint32_t method, uint32_t n) {
+    if (method >= gpu::kMConstant && method < gpu::kMConstantEnd) g_constant_load += n / 4;
+}
+
 // draws the open primitive: the slots it wrote are FLOAT4 inputs of the bound program, or of the fixed pipeline
 void EndPrimitive() {
     struct Made {
@@ -1050,7 +1067,7 @@ void EndPrimitive() {
 }
 
 // reads the commands pushed since the last call: vertex data between a begin and an end is drawn, visibility tests
-// are run, the rest is skipped
+// are run, vertex shader constants are loaded, the rest is skipped
 void Walk(uint32_t end) {
     if (!g_walk || end < g_walk || end > g_scratch_push + g_scratch_size) return;
     for (uint32_t p = g_walk; p + 4 <= end;) {
@@ -1064,6 +1081,7 @@ void Walk(uint32_t end) {
             bool last = true;  // the slot's last component
             std::memcpy(&f, &v, 4);
             ApplyVisibilityMethod(m, v);
+            if (ApplyConstantMethod(m, v)) continue;
             if (m == 0x17FC) {  // begin/end, 0 ends
                 if (v) {
                     g_im_prim = v;
@@ -1100,6 +1118,7 @@ void Walk(uint32_t end) {
             g_im_mask |= 1u << (a - g_im_attr) / 4;
             if (a == g_im_attr && last) g_im_vertices.insert(g_im_vertices.end(), g_im_attr, g_im_attr + 64);
         }
+        EndConstantGroup(method, n);
     }
     g_walk = end;
 }
@@ -1114,7 +1133,8 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
 }
 
 // BeginPush(dwords) hands out room for raw hardware commands, EndPush(end) runs what the title wrote there:
-// a primitive between two begin/end writes with its vertices inline, any other method as a simple state.
+// a primitive between two begin/end writes with its vertices inline, vertex shader constants, any other method as a
+// simple state.
 HLE_STDCALL(D3DDevice_BeginPush, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_push_begin = ScratchPush(a[0] * 4);
@@ -1137,6 +1157,7 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
         for (uint32_t i = 0; i < n; i++, p += 4) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4, v = R32(p);
             ApplyVisibilityMethod(m, v);
+            if (ApplyConstantMethod(m, v)) continue;
             if (m == kInlineArray) {
                 if (prim) vertices.push_back(v);
             } else if (m != kBeginEnd) {
@@ -1151,6 +1172,7 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
                 prim = 0;
             }
         }
+        EndConstantGroup(method, n);
     }
     g_push_begin = 0;
     ScratchPush();

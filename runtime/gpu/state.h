@@ -114,6 +114,10 @@ enum : uint32_t {
     kMClearReport = 0x17C8,
     kMCountEnable = 0x17CC,
     kMGetReport = 0x17D0,
+    // vertex shader constants, sent as raw commands: the slot to load, then a window of 32 dwords (8 constants)
+    kMConstantLoad = 0x1EA4,
+    kMConstant = 0xB80,
+    kMConstantEnd = 0xC00,
 };
 
 // texture stage state indices
