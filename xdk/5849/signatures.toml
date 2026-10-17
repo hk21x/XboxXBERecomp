@@ -68,6 +68,7 @@ D3DDevice_PersistDisplay = {sec = "D3D", len = 0x12E, hash = "0xE11F2BD1690229E8
 D3DDevice_Release = {sec = "D3D", len = 0x37, hash = "0x40549F7AA6D8F2DE", calls = [[0x1AC, "0xF4D59E1E0F69E196", [[0x11, "0x8D6E8C4F5C3417EB"], [0xB0, "0x36CCA1C0E446D13D"], [0x13, "0x235EF259267EA24E"], [0x11, "0xDF13E8CDCC5CA945"], [0x12F, "0xC0F7888881CD6B30"], [0x29, "0x6CF0A394AC9DA3C5"], [0x91, "0x2B608654E08CF536"], [0x91, "0x2B608654E08CF536"], [0x91, "0x2B608654E08CF536"], [0x91, "0x2B608654E08CF536"], [0x1A, "0x4912EEE9E91F1F15"], [0x1A, "0x4912EEE9E91F1F15"], [0x1A, "0x4912EEE9E91F1F15"], [0x1BC, "0xB3BBA59ADBDB1500"]]]], k = [0x928, 0x938, 0x938], ret = 0, regs = []}
 D3DDevice_Reset = {}
 D3DDevice_SelectVertexShader = {sec = "D3D", len = 0x9C, hash = "0x55D084BD2B53DD5D", calls = [[0xF, "0x992EC001666B3982", [[0x137, "0x16A0DE353852ECF2"]]], [0x1E5, "0x576697FFB974213F", [[0x122, "0x7A47D092CA1B20B0"]]], [0xF, "0x992EC001666B3982", [[0x137, "0x16A0DE353852ECF2"]]]], k = [0x70, 0x794, 0x794, 0x798, 0x79C, 0x1000, 0x41EA0, 0x81E94], ret = 8, regs = []}
+D3DDevice_SetDepthClipPlanes = {}
 D3DDevice_SetFlickerFilter = {sec = "D3D", len = 0x42, hash = "0x93CC130B0AB87AA5", k = [0x1C28], ret = 4, regs = []}
 D3DDevice_SetGammaRamp = {sec = "D3D", len = 0x83, hash = "0x166DCBE35C2F7ABD", calls = [[0x59, "0x8346A1C371490F0A", []]], k = [0xC0, 0xC0, 0x1DC, 0x1DC, 0x7DC, 0x7E4, 0x1C28, 0x240C, 0x2478], ret = 8, regs = []}
 D3DDevice_SetIndices = {sec = "D3D", len = 0x84, hash = "0x419BF980FABAD29A", calls = [[0x91, "0x2B608654E08CF536", [[0x78, "0x435EB75785E123C"], [0x4B, "0xDB57BC295008F50C"], [0x1A, "0x4912EEE9E91F1F15"], [0x1A, "0x4912EEE9E91F1F15"]]]], k = [0x7A0, 0x7A0, 0x7A0, 0x7A0, 0x80000, 0xFFF80000], ret = 8, regs = []}
@@ -149,7 +150,9 @@ DirectSoundUseLightHRTF = {xtlid = 0xB0031}
 IDirectSoundBuffer_GetCurrentPosition = {sec = "DSOUND", len = 0x20, hash = "0x58625E847EC088E7", xtlid = 0xB0053, calls = [[0x55, "0xE60F054C4E847816", [[0x1E, "0x77CF69460E7107DD"], [0xDF, "0xF5D997D8305769ED"]]]], ret = 12, regs = []}
 IDirectSoundBuffer_GetStatus = {sec = "DSOUND", len = 0x1C, hash = "0x3BA8DAE65E120FD6", xtlid = 0xB0054, deep = true, calls = [[0x51, "0xBCCF9F0C46F7ABDF", [[0x1E, "0x77CF69460E7107DD"], [0x42, "0xAC82B5929C476085"]]]], ret = 8, regs = []}
 IDirectSoundBuffer_Lock = {sec = "DSOUND", len = 0x30, hash = "0x5B6EA09A2CCF537D", xtlid = 0xB0056, calls = [[0xE2, "0x1E0C3D10AF47B37D", [[0x1E, "0x77CF69460E7107DD"], [0x55, "0xE60F054C4E847816"]]]], ret = 32, regs = []}
+IDirectSoundBuffer_Pause = {}
 IDirectSoundBuffer_Play = {sec = "DSOUND", len = 0x24, hash = "0x16089413899A14CC", xtlid = 0xB0059, calls = [[0x51, "0x9C8E2BA2A67E258F", [[0x1E, "0x77CF69460E7107DD"], [0xB0, "0x5D41E5249A8F3D04"]]]], ret = 16, regs = []}
+IDirectSoundBuffer_PlayEx = {}
 IDirectSoundBuffer_Release = {sec = "DSOUND", len = 0x16, hash = "0x4FA5AC4A92DAE1E3", xtlid = 0xB005D, ret = 4, regs = []}
 IDirectSoundBuffer_SetAllParameters = {xtlid = 0xB005F}
 IDirectSoundBuffer_SetBufferData = {sec = "DSOUND", len = 0x20, hash = "0x58625E847EC088E7", xtlid = 0xB0060, calls = [[0xAE, "0x69BB93C1FC1404CE", [[0x1E, "0x77CF69460E7107DD"], [0x31, "0xC96EAFC107098818"], [0x8C, "0x7CCE0F3D8E824EA6"], [0x1A, "0xBEAA27CDE7C45CEC"]]]], ret = 12, regs = []}
