@@ -71,6 +71,15 @@ public:
     void SyncLate(uint32_t) override {}
     void Flush() override {}
     void SetGamma(const uint8_t*) override {}
+    // visibility reports are written at once as the console's GPU writes them: time, count, then 0 for done. Nothing
+    // is rasterised here between reference frames, so no pixel is counted.
+    void GetReport(uint32_t report) override {
+        constexpr uint32_t kTime = 0, kTimeHigh = 4, kCount = 8, kStatus = 12;
+        kernel::W32(report + kTime, uint32_t(frames_));
+        kernel::W32(report + kTimeHigh, 0);
+        kernel::W32(report + kCount, 0);
+        kernel::W32(report + kStatus, 0);
+    }
 
 private:
     static std::string File(const char* fmt, unsigned long long n) {
