@@ -1,5 +1,6 @@
 // the host side without a window: settings at their defaults, the run folder as the exe folder
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
@@ -16,10 +17,19 @@ Settings& Get() {
 void Load() {}
 void Save() {}
 void ApplyDisplay() {}
-Mode Desktop() { return {1280, 720}; }
+// OUTPUT=WxH: the display the game is told about (1280x720 by default); narrower than 3:2 reports a 4:3 TV
+Mode Desktop() {
+    static const Mode m = [] {
+        unsigned w = 0, h = 0;
+        const char* e = std::getenv("OUTPUT");
+        if (e && std::sscanf(e, "%ux%u", &w, &h) == 2 && w && h) return Mode{w, h};
+        return Mode{1280, 720};
+    }();
+    return m;
+}
 Mode Output() { return Desktop(); }
 float RenderScale(uint32_t) { return 1.0f; }
-bool Widescreen() { return true; }
+bool Widescreen() { return Desktop().width * 2 >= Desktop().height * 3; }  // as on Windows: 3:2 or wider
 
 std::filesystem::path ExeDir() {
     static const std::filesystem::path dir = std::filesystem::current_path();

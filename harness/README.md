@@ -45,6 +45,8 @@ Environment:
   `init` may set it), 60 when that is 0
 - `WAV=file` the mixed output also written to that file in the run folder (48 kHz, 16 bit stereo); the log's
   `audio: output started` line is the time of its first sample
+- `OUTPUT=WxH` the display size the game is told about, 1280x720 by default: narrower than 3:2 the console reports
+  a 4:3 TV instead of a widescreen one
 - `XBE_PERF` as on Windows
 
 A frame drawn by the reference renderer takes long; a button held across one can auto repeat in the game's menus.
