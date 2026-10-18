@@ -951,6 +951,7 @@ void WatchConstants(const char* how, uint32_t first, uint32_t count, uint32_t re
 
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // the declaration's constants come after anything pushed before
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
@@ -970,7 +971,16 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     return 0;
 }
 
+// Constants set here land at once, constants the title pushed as raw commands when Walk reads them: those pushed
+// before this call are read first, so the later write wins as on the console (a title loading a matrix through
+// the push buffer, then its object's through SetVertexShaderConstantNotInlineFast, drew the object with the first)
+void WalkPending() {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+}
+
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1Fast, 0) {
+    WalkPending();
     uint32_t reg = a[0];
     if (reg < 192) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
     WatchConstants("SetVertexShaderConstant1Fast", reg, 1, R32(ctx.esp));
@@ -978,6 +988,7 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1Fast, 0) {
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1, 0) {
+    WalkPending();
     uint32_t reg = a[0];
     if (reg < 192) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
     WatchConstants("SetVertexShaderConstant1", reg, 1, R32(ctx.esp));
@@ -985,6 +996,7 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1, 0) {
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant4, 0) {
+    WalkPending();
     uint32_t reg = a[0], src = a[1];
     for (uint32_t i = 0; i < 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     WatchConstants("SetVertexShaderConstant4", reg, 4, R32(ctx.esp));
@@ -992,6 +1004,7 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstant4, 0) {
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
+    WalkPending();
     uint32_t reg = a[0], src = a[1], dwords = a[2];
     for (uint32_t i = 0; i < dwords / 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     WatchConstants("SetVertexShaderConstantNotInlineFast", reg, dwords / 4, R32(ctx.esp));
