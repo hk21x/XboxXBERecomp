@@ -602,7 +602,7 @@ HLE_STDCALL(DirectSoundCreateBuffer, 2) { return NewBuffer(a[0], a[1]); }
 HLE_STDCALL(IDirectSound_CreateSoundBuffer, 4) { return NewBuffer(a[1], a[2]); }
 
 // DirectSoundGetSampleTime(): the audio processor's global counter of 48 kHz samples (register 0xFE80200C), which
-// titles time things by (PGR2's menu animations). Counted from the first call.
+// titles time things by (menu animations, for one). Counted from the first call.
 HLE_STDCALL(DirectSoundGetSampleTime, 0) {
     constexpr uint64_t kSampleRate = 48000;
     static const auto start = std::chrono::steady_clock::now();

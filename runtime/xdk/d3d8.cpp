@@ -89,8 +89,8 @@ std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
 uint32_t g_depth = 0;
-// Swap with the copy flags and not FINISH starts the title's own copy of the back buffer to the front buffer (PGR2
-// draws it as a quad, downsampling a supersampled back buffer). The host renders at the back buffer's own size and
+// Swap with the copy flags and not FINISH starts the title's own copy of the back buffer to the front buffer (a title
+// may draw it as a quad, downsampling a supersampled back buffer). The host renders at the back buffer's own size and
 // shows it as it is, so that copy is drawn into this target, never shown, until FINISH.
 uint32_t g_copy_target = 0;
 bool g_copy_open = false;
@@ -247,7 +247,7 @@ void VerticalBlank(X86Context& ctx) {
             CallGuest(ctx, callback, {info});
         }
         // a swap shown at this blank: the swap callback gets D3DSWAPDATA (Swap, SwapVBlank, MissedVBlanks,
-        // TimeUntilSwapVBlank, TimeBetweenSwapVBlanks); titles time their frames by it (PGR2 0xD9010)
+        // TimeUntilSwapVBlank, TimeBetweenSwapVBlanks); titles timestamp their frames there
         if (XDK_CDevice_SwapCallback != xdk::kUnknown && swaps != shown)
             if (uint32_t callback = Dev(XDK_CDevice_SwapCallback)) {
                 W32(swap_data, swaps);
@@ -1162,8 +1162,8 @@ void EndPrimitive() {
     if (!prim || !count) return;
     if (!(handle & 1)) {
         // an FVF: the slots packed in its own layout, drawn by the fixed pipeline (pretransformed XYZRHW included).
-        // Immediate data goes to the vertex registers whatever the FVF says (PGR2's movies give texture coordinates
-        // under XYZRHW | DIFFUSE), so the FVF is widened by the slots written: diffuse 3, specular 4, texture
+        // Immediate data goes to the vertex registers whatever the FVF says (a movie player may give texture
+        // coordinates under XYZRHW | DIFFUSE), so the FVF is widened by the slots written: diffuse 3, specular 4, texture
         // coordinates 9 to 12 as four floats. A D3DCOLOR goes back to its bytes B, G, R, A from the slot's R, G, B, A.
         constexpr uint32_t kColor = 0x40, kFvfDiffuse = 0x40, kFvfSpecular = 0x80, kTexSlot = 9, kTexFloat4 = 2;
         uint32_t fvf_handle = handle;
