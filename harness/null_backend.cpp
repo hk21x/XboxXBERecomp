@@ -1,6 +1,7 @@
 // headless renderer: counts frames and draws, logs draw lists, draws chosen frames with the reference renderer
 // REF=N: every Nth frame drawn on the CPU into guest memory and saved as cap/ref_<frame>.tga
 // CAP=N: every Nth frame's draws listed in cap/draws_<frame>.txt
+// AUDIT=N: every Nth frame's shaders and textures as a GPU backend would get them, see audit.cpp
 // snap in the run folder: the next two frames drawn and saved as snap_1.tga and snap_2.tga, then snap is removed
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <string>
 
 #include "app/app.h"
+#include "audit.h"
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "gpu/texture.h"
@@ -34,6 +36,7 @@ public:
         draws_++;
         if (drawing_) reference::Draw(s, prim, start, count, indices);
         if (list_) List(s, prim, start, count);
+        harness::AuditDraw(s, prim, start, count, indices);
     }
     void Copy(const Surface& src, const Surface& dst, uint32_t n, uint32_t rects, uint32_t points) override {
         if (drawing_) reference::Copy(src, dst, n, rects, points);
@@ -64,6 +67,7 @@ public:
         drawing_ = snap_ || (every && (frames_ + 1) % every == 0);
         if (drawing_) reference::BeginFrame();
         harness::g_frames = frames_ + 1;
+        harness::AuditPresent();
         if (++frames_ % 60 == 0) LOGI("renderer: frame %llu, %llu draws, %llu empty frames", frames_, draws_, empty_);
         if (cap && frames_ % cap == 0) list_ = std::fopen(File("cap/draws_%05llu.txt", frames_).c_str(), "w");
     }

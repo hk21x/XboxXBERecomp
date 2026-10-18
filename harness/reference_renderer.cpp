@@ -72,8 +72,10 @@ struct Plane {
     uint32_t End() const { return data + pitch * h; }
     bool Depth16() const { return Depth16Format(format); }
 
+    // an 8 bit surface (L8, AL8, A8) is drawn as the console's B8: its byte is each pixel's blue
     Vec Load(uint32_t x, uint32_t y) const {
         const uint8_t* p = At(x, y);
+        if (bytes == 1) return V(p[0] / 255.f, p[0] / 255.f, p[0] / 255.f, 1);
         if (bytes != 4) {
             uint16_t c;
             std::memcpy(&c, p, 2);
@@ -89,6 +91,10 @@ struct Plane {
     void Store(uint32_t x, uint32_t y, Vec c, uint32_t mask) const {
         uint8_t* p = At(x, y);
         auto q = [](float v, float top) { return std::lround(Sat(v) * top); };
+        if (bytes == 1) {
+            if (mask & 1) p[0] = uint8_t(q(c[2], 255));
+            return;
+        }
         if (bytes != 4) {
             uint16_t v = uint16_t(q(c[0], 31)) << 11 | uint16_t(q(c[1], 63)) << 5 | uint16_t(q(c[2], 31));
             std::memcpy(p, &v, 2);
@@ -1331,6 +1337,35 @@ bool WriteTga(const Surface& s, const char* path) {
         std::fwrite(row.data(), 1, row.size(), f);
     }
     std::fclose(f);
+    return true;
+}
+
+// one level (one face) of a texture as rgba floats, DXT decoded; false for depth formats
+bool DecodeRgba(const TextureDesc& d, uint32_t level, uint32_t face, std::vector<float>& rgba, uint32_t& w, uint32_t& h) {
+    const FormatInfo& fi = Format(d.format);
+    if (fi.depth || fi.host == Host::None) return false;
+    w = d.linear ? d.width : std::max(d.width >> level, 1u);
+    h = d.linear ? d.height : std::max(d.height >> level, 1u);
+    std::vector<uint8_t> raw;
+    uint32_t pitch;
+    DecodeLevel(d, level, face, static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr, raw, pitch);
+    rgba.resize(size_t(w) * h * 4);
+    if (fi.compressed) {
+        TextureDesc ld = d;
+        ld.width = w;
+        ld.height = h;
+        std::vector<Vec> out;
+        DecodeBlocks(ld, fi.host, raw, out);
+        for (size_t i = 0; i < out.size(); i++)
+            for (int c = 0; c < 4; c++) rgba[i * 4 + c] = out[i][c];
+        return true;
+    }
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t* q = &raw[size_t(y) * pitch + x * 4];
+            float* o = &rgba[(size_t(y) * w + x) * 4];
+            o[0] = q[2] / 255.f, o[1] = q[1] / 255.f, o[2] = q[0] / 255.f, o[3] = q[3] / 255.f;
+        }
     return true;
 }
 
