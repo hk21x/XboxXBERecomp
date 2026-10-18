@@ -2850,6 +2850,11 @@ void D3D12Backend::StartCapture() {
     cap_dir_ = std::filesystem::weakly_canonical(app::ExeDir() / diag::CaptureDir() / stamp, ec);
     std::filesystem::create_directories(cap_dir_, ec);
     cap_ = _wfopen((cap_dir_ / "frame.txt").c_str(), L"w");
+    if (!cap_) {
+        LOGE("d3d12: cannot capture into %s (%s)", cap_dir_.string().c_str(), ec ? ec.message().c_str() : "frame.txt not created");
+        return;
+    }
+    LOGI("d3d12: capturing a frame into %s", cap_dir_.string().c_str());
     cap_i_ = cap_rt_ = 0;
     cap_seen_.clear();
     cap_sh_.clear();
@@ -3004,6 +3009,14 @@ void LogPerf() {
 
 void D3D12Backend::Present(const Surface& front) {
     PerfScope perf_present{g_perf.present};
+    // a file named capture beside the exe asks for a capture as F3 does, checked every 30 frames
+    if (presents_ % 30 == 0 && !diag::CaptureDir().empty()) {
+        std::error_code ec;
+        if (std::filesystem::remove(app::ExeDir() / "capture", ec)) {
+            LOGI("capture: requested by the capture file");
+            g_capture = true;
+        }
+    }
     if (cap_) {
         FinishCapture(front);
     } else if (g_capture.exchange(false) && CaptureOn()) {
