@@ -39,6 +39,8 @@ Environment:
 - `CAP=N` every Nth frame's draws listed in `cap/draws_<frame>.txt`
 - `PROBES="x,y x,y"` log every colour the reference renderer writes at those pixels of linear `PROBE_WIDTH` (640) wide
   targets; `TRACE="x,y"` logs the combiner registers there
+- `FPS=N` presents at most N frames a second, `FPS=0` unpaced; without it the settings' `fps_cap` (a game's
+  `init` may set it), 60 when that is 0
 - `XBE_PERF` as on Windows
 
 A frame drawn by the reference renderer takes long; a button held across one can auto repeat in the game's menus.
