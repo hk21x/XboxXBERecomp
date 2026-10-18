@@ -27,6 +27,7 @@ CDevice_Viewport          = 0xED0  # D3DDevice_SetViewport 0x1C3F60 to 0x1C3F8C 
 CDevice_ScreenSpaceOffset = 0xEE8  # D3DDevice_SetScreenSpaceOffset 0x1C4783 stores x + offset, 0x1C4793 y + offset at +4
 CDevice_AutoDepth         = 0x1A10 # the frame buffer init 0x1C964A stores the depth buffer, D3D_InitDefaultState 0x1C92D7 reads it
 CDevice_VBlankCallback    = 0x1DA8 # the vertical blank handler 0x1CA6DE calls [miniport + 0x190], the miniport is at +0x1C18 (0x1C4CEC, 0x1C9A87)
+CDevice_SwapCallback      = 0x1DA4 # D3DDevice_SetSwapCallback 0x1C3680 stores it at 0x1C368A, the vertical blank handler 0x1CAA02 calls [miniport + 0x18C]
 CDevice_VBlankEvent       = 0x1DAC # D3DDevice_BlockUntilVerticalBlank 0x1C36BD waits on it, 0x1C36AB clears its SignalState
 CDevice_DisplayFlags      = 0x1DCC # the vertical blank handler 0x1CA67D tests miniport + 0x1B4, the present 0x1C4C7B tests +0x1DCC
 CDevice_VBlankCount       = 0x1DD8 # the vertical blank handler 0x1CA641 stores miniport + 0x1C0 incremented; 0x1C4355 reads it

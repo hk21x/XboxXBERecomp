@@ -230,7 +230,7 @@ constexpr bool kVBlank = XDK_CDevice_VBlankCount != xdk::kUnknown && XDK_CDevice
 // what the library's vertical blank interrupt leaves for the title: count, event, callback
 void VerticalBlank(X86Context& ctx) {
     using clock = std::chrono::steady_clock;
-    uint32_t info = mem::AllocSystem(12), shown = 0;
+    uint32_t info = mem::AllocSystem(12), swap_data = mem::AllocSystem(20), shown = 0;
     auto next = clock::now();
     for (;;) {
         next = std::max(next + std::chrono::microseconds(16667), clock::now());
@@ -246,6 +246,17 @@ void VerticalBlank(X86Context& ctx) {
             W32(info + 8, swaps != shown);
             CallGuest(ctx, callback, {info});
         }
+        // a swap shown at this blank: the swap callback gets D3DSWAPDATA (Swap, SwapVBlank, MissedVBlanks,
+        // TimeUntilSwapVBlank, TimeBetweenSwapVBlanks); titles time their frames by it (PGR2 0xD9010)
+        if (XDK_CDevice_SwapCallback != xdk::kUnknown && swaps != shown)
+            if (uint32_t callback = Dev(XDK_CDevice_SwapCallback)) {
+                W32(swap_data, swaps);
+                W32(swap_data + 4, count);
+                W32(swap_data + 8, 0);
+                W32(swap_data + 12, 0);
+                W32(swap_data + 16, 0);
+                CallGuest(ctx, callback, {swap_data});
+            }
         shown = swaps;
         // the title clears the event in its own memory before a wait, which the host object does not see
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

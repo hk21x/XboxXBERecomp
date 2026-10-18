@@ -111,6 +111,9 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_VBlankCallback
 #define XDK_CDevice_VBlankCallback 0xFFFFFFFFu
 #endif
+#ifndef XDK_CDevice_SwapCallback
+#define XDK_CDevice_SwapCallback 0xFFFFFFFFu
+#endif
 #ifndef XDK_CDevice_VBlankEvent
 #define XDK_CDevice_VBlankEvent 0xFFFFFFFFu
 #endif
