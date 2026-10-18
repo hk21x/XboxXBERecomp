@@ -2,7 +2,8 @@
 // here. The title's XNet object stays null, so the XNet calls not replaced (Live QoS and the like) fail with
 // WSANOTINITIALISED on their own, and the XOnline calls with XONLINE_E_NOT_INITIALIZED.
 // Addresses: an XNADDR's ina is the peer's real IPv4, so secure addresses map to IPs one to one.
-// With --instance N the game binds 127.0.0.N and a broadcast goes to the other loopback instances.
+// With --instance N the game binds 127.0.0.N and a broadcast goes to the other loopback instances (ports below
+// 1024 shifted up on hosts that keep them for root).
 // Join IP (a host past the LAN): the system link search's broadcasts also go to that address, and the host's
 // broadcasts (a LAN discovery may answer every search with one, to 255.255.255.255) go to the public addresses
 // that have reached it. With one peer (co-op) a LAN address in an XNADDR, which only means something on its
@@ -85,6 +86,23 @@ std::mutex g_nat_lock;
 std::unordered_map<uint64_t, uint16_t> g_nat;  // (peer address, our port) -> the port its packets come from
 std::vector<uint32_t> g_public;                // public addresses packets came from, the latest last
 constexpr size_t kMaxPublic = 8;
+
+// Loopback instances on a host that keeps ports below 1024 for root (Linux): such a guest port is bound and
+// addressed kLowPortShift higher, and read back lowered. Ports in network order.
+#ifdef _WIN32
+constexpr uint16_t kLowPortShift = 0;
+#else
+constexpr uint16_t kLowPortShift = 20000;
+#endif
+constexpr uint16_t kLowPorts = 1024;
+uint16_t HostPort(uint16_t port) {
+    uint16_t p = ntohs(port);
+    return g_instance && kLowPortShift && p && p < kLowPorts ? htons(uint16_t(p + kLowPortShift)) : port;
+}
+uint16_t GuestPort(uint16_t port) {
+    uint16_t p = ntohs(port);
+    return g_instance && kLowPortShift && p > kLowPortShift && p < kLowPortShift + kLowPorts ? htons(uint16_t(p - kLowPortShift)) : port;
+}
 
 std::string Ip(uint32_t a) {
     char s[32];
@@ -226,6 +244,7 @@ int Recv(uint32_t sock, SOCKET s, const std::vector<Span>& spans, uint32_t from,
         g_public.push_back(peer);
         if (g_public.size() > kMaxPublic) g_public.erase(g_public.begin());
     }
+    src.sin_port = GuestPort(src.sin_port);
     if (from) std::memcpy(HostPtr(from), &src, sizeof(src));
     if (fromlen) W32(fromlen, sizeof(src));
     return done;
@@ -234,6 +253,7 @@ int Recv(uint32_t sock, SOCKET s, const std::vector<Span>& spans, uint32_t from,
 int SendOnce(SOCKET s, const uint8_t* data, int len, const sockaddr_in* to) {
     if (!to) return ::send(s, reinterpret_cast<const char*>(data), len, 0);
     sockaddr_in d = *to;
+    d.sin_port = HostPort(d.sin_port);
     if (d.sin_addr.s_addr == INADDR_BROADCAST) {
         std::vector<sockaddr_in> also;
         if (uint32_t join = JoinAddress()) {
@@ -537,6 +557,7 @@ HLE_STDCALL(getsockname, 3) {
     sockaddr_in me{};
     int len = sizeof(me);
     if (::getsockname(k.s, reinterpret_cast<sockaddr*>(&me), &len) != 0) return Fail(HostError());
+    me.sin_port = GuestPort(me.sin_port);
     std::memcpy(HostPtr(a[1]), &me, sizeof(me));
     W32(a[2], sizeof(me));
     return 0;
@@ -546,6 +567,7 @@ HLE_STDCALL(bind, 3) {
     if (k.s == INVALID_SOCKET) return Fail(WSAENOTSOCK);
     sockaddr_in at = GuestAddr(a[1]);
     if (g_instance && at.sin_addr.s_addr == INADDR_ANY) at.sin_addr.s_addr = g_local;
+    at.sin_port = HostPort(at.sin_port);
     if (::bind(k.s, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0) {
         int e = HostError();
         LOGW("xnet: bind %X to %s failed (%d)", a[0], Addr(at).c_str(), e);
@@ -563,6 +585,7 @@ HLE_STDCALL(connect, 3) {
     Socket k = Find(a[0]);
     if (k.s == INVALID_SOCKET) return Fail(WSAENOTSOCK);
     sockaddr_in to = GuestAddr(a[1]);
+    to.sin_port = HostPort(to.sin_port);
     if (::connect(k.s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0) return 0;
     int e = HostError();
     if (e != WSAEWOULDBLOCK || k.nonblocking) return Fail(e);
@@ -584,6 +607,7 @@ HLE_STDCALL(accept, 3) {
         int len = sizeof(from);
         SOCKET s = ::accept(k.s, reinterpret_cast<sockaddr*>(&from), &len);
         if (s != INVALID_SOCKET) {
+            from.sin_port = GuestPort(from.sin_port);
             if (a[1]) std::memcpy(HostPtr(a[1]), &from, sizeof(from));
             if (a[2]) W32(a[2], sizeof(from));
             LOGI("xnet: accept %X from %s", a[0], Addr(from).c_str());
