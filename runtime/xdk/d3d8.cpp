@@ -89,6 +89,11 @@ std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
 uint32_t g_depth = 0;
+// Swap with the copy flags and not FINISH starts the title's own copy of the back buffer to the front buffer (PGR2
+// draws it as a quad, downsampling a supersampled back buffer). The host renders at the back buffer's own size and
+// shows it as it is, so that copy is drawn into this target, never shown, until FINISH.
+uint32_t g_copy_target = 0;
+bool g_copy_open = false;
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
 uint32_t g_walk = 0;  // first scratch command not read yet
 bool g_report_asked = false;  // a visibility report asked for since the last flush
@@ -274,6 +279,7 @@ bool MakeFrameBuffers(uint32_t pp) {
         uint32_t color_fmt = gpu::LinearColorFormat(fmt);
         g_buffer_count = std::min<uint32_t>(count + 1, 3);
         for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
+        g_copy_target = NewSurface(w, h, color_fmt, 4);
         g_depth = 0;
         if (auto_depth) {
             uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
@@ -551,7 +557,30 @@ namespace {
 std::atomic<uint32_t> g_presents{0};
 }  // namespace
 
+// Swap(flags): D3DSWAP_COPY 1 and D3DSWAP_BYPASSCOPY 2 without D3DSWAP_FINISH 4 open the copy to the front buffer
+// (the target becomes the front, texture 0 the back buffer, as the library sets them); FINISH shows the frame and
+// gives the back buffer and depth back as the target. 0 is COPY | FINISH. The count moves on once a frame.
 HLE_STDCALL(D3DDevice_Swap, 1) {
+    constexpr uint32_t kCopy = 1, kBypassCopy = 2, kFinish = 4;
+    uint32_t flags = a[0] ? a[0] : kCopy | kFinish;
+    if (!(flags & kFinish)) {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        if (!(flags & (kCopy | kBypassCopy)) || !g_copy_target) return Dev(kDevSwapCount);
+        Walk(Dev(kDevPush));
+        if (!g_copy_open) SetDev(kDevSwapCount, Dev(kDevSwapCount) + 1);
+        g_copy_open = true;
+        SetDev(kDevRenderTarget, g_copy_target);
+        SetDev(kDevDepth, 0);
+        g_state.rt = SurfaceOf(g_copy_target);
+        g_state.zs = SurfaceOf(0);
+        for (uint32_t i = 0; i < 4; i++) g_state.textures[i] = i ? 0 : g_buffers[1];
+        W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
+        uint32_t w, h;
+        gpu::SurfaceSize(g_state.rt, w, h);
+        g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+        UpdateViewportConstants();
+        return Dev(kDevSwapCount);
+    }
     app::SplashFirstFrame();
     // handed over from the previous instance: the window opens on the second frame, the first picture with
     // anything drawn over it right after
@@ -585,10 +614,23 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     W32(g_buffers[0] + 4, data);
     W32(g_buffers[0] + 8, lk);
+    if (g_copy_open) {
+        // the copy is done: the back buffer and the auto depth buffer are the target again, as after the library's
+        g_copy_open = false;
+        for (uint32_t i = 0; i < 4; i++) g_state.textures[i] = Dev(kDevTextures + i * 4);  // what the title bound
+        W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
+        SetDev(kDevRenderTarget, g_buffers[1]);
+        SetDev(kDevDepth, g_depth);
+        g_state.zs = SurfaceOf(g_depth);
+        uint32_t w, h;
+        gpu::SurfaceSize(SurfaceOf(g_buffers[1]), w, h);
+        g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+        UpdateViewportConstants();
+    } else {
+        SetDev(kDevSwapCount, Dev(kDevSwapCount) + 1);
+    }
     g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
-    uint32_t n = Dev(kDevSwapCount) + 1;
-    SetDev(kDevSwapCount, n);
-    return n;
+    return Dev(kDevSwapCount);
 }
 
 HLE_STDCALL(D3DDevice_Clear, 6) {
