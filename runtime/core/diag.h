@@ -27,18 +27,24 @@ inline const std::filesystem::path& CaptureDir() {
     return dir;
 }
 
-// XBE_CAPTURE_DRAWS="1600-1640": a capture also saves the colour target after each draw in that range (frame.txt's
-// draw numbers); first > last when unset
+// XBE_CAPTURE_DRAWS: a capture also saves the colour target after some draws: "1600-1640" those draw numbers (as
+// frame.txt counts them), "vs:B01019E1" every draw with that vertex shader handle (and the target once before the
+// first of them)
 struct DrawRange {
     unsigned first = 1, last = 0;
+    uint32_t vs = 0;
 };
 inline DrawRange CaptureDraws() {
     static const DrawRange r = [] {
         DrawRange d;
         if (const char* v = std::getenv("XBE_CAPTURE_DRAWS")) {
             unsigned a = 0, b = 0;
-            int n = std::sscanf(v, "%u-%u", &a, &b);
-            if (n >= 1) d = {a, n == 2 ? b : a};
+            if (std::sscanf(v, "vs:%x", &a) == 1) {
+                d.vs = a;
+            } else if (int n = std::sscanf(v, "%u-%u", &a, &b); n >= 1) {
+                d.first = a;
+                d.last = n == 2 ? b : a;
+            }
         }
         return d;
     }();

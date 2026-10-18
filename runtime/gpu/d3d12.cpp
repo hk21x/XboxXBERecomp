@@ -672,6 +672,7 @@ private:
     uint32_t cap_rt_ = 0;
     Surface cap_zs_;     // the depth target drawn with, saved when the frame moves on from it
     uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
+    bool cap_vs_before_ = false;  // XBE_CAPTURE_DRAWS=vs: the target saved before the first such draw
     std::unordered_set<uint32_t> cap_seen_;
     std::unordered_set<uint64_t> cap_sh_;
     struct CapTex {
@@ -2518,6 +2519,16 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
     if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
+    // XBE_CAPTURE_DRAWS=vs:...: the target once before the first draw with that shader, before this draw binds anything
+    if (cap_ && !cap_vs_before_ && diag::CaptureDraws().vs && s.vs_handle == diag::CaptureDraws().vs) {
+        cap_vs_before_ = true;
+        if (Target* t = FindTarget(s.rt, false)) {
+            char name[40];
+            snprintf(name, sizeof(name), "%04u_before_%08X", cap_i_, t->data);
+            CapSave(*t, name);
+            bound_rt_ = bound_ds_ = nullptr;  // the save may have drawn: the targets are bound again
+        }
+    }
     if (DepthCopy(s)) return;
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
@@ -2575,7 +2586,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (cap_ && draw_rt_) {
         diag::DrawRange r = diag::CaptureDraws();
         uint32_t i = cap_i_ - 1;
-        if (i >= r.first && i <= r.last) {
+        if ((i >= r.first && i <= r.last) || (r.vs && s.vs_handle == r.vs)) {
             char name[32];
             snprintf(name, sizeof(name), "%04u_draw_%08X", i, draw_rt_->data);
             CapSave(*draw_rt_, name);
@@ -2870,6 +2881,7 @@ void D3D12Backend::StartCapture() {
     }
     LOGR("d3d12: capturing a frame into %s", cap_dir_.string().c_str());
     cap_i_ = cap_rt_ = cap_vs_ = 0;
+    cap_vs_before_ = false;
     cap_zs_ = {};
     cap_seen_.clear();
     cap_sh_.clear();
