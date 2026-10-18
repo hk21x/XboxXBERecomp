@@ -91,6 +91,7 @@ uint32_t g_buffer_count = 2;
 uint32_t g_depth = 0;
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
 uint32_t g_walk = 0;  // first scratch command not read yet
+bool g_report_asked = false;  // a visibility report asked for since the last flush
 
 uint32_t Dev(uint32_t off) { return R32(kDevice + off); }
 void SetDev(uint32_t off, uint32_t v) { W32(kDevice + off, v); }
@@ -448,8 +449,15 @@ HLE_STDCALL(D3DDevice_IsFencePending, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     return g_backend && g_backend->FencePending(a[0]) ? 1 : 0;
 }
+// The library's GetVisibilityTestResult sets a fence when the test's own one is current, so the GPU runs on to the
+// report, and titles poll it in a loop without presenting: the report is written here.
 HLE_STDCALL(D3D_SetFence, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    if (g_backend && g_report_asked) {
+        g_report_asked = false;
+        g_backend->Flush();
+    }
     return g_backend ? g_backend->Fence() : 0;
 }
 HLE_STDCALL(D3D_KickOffAndWaitForIdle, 0) {
@@ -1065,7 +1073,10 @@ void ApplyVisibilityMethod(uint32_t m, uint32_t v) {
     if (m == gpu::kMCountEnable) g_state.simple[gpu::kMCountEnable >> 2] = v;
     if (!g_backend) return;
     if (m == gpu::kMClearReport) g_backend->ClearReport();
-    if (m == gpu::kMGetReport) g_backend->GetReport(mem::VirtualFromPhysical(v & kReportAddressMask));
+    if (m == gpu::kMGetReport) {
+        g_backend->GetReport(mem::VirtualFromPhysical(v & kReportAddressMask));
+        g_report_asked = true;
+    }
 }
 
 // vertex shader constants pushed as raw commands: the load slot, then dwords written through the window from it.

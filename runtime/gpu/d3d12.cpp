@@ -916,7 +916,11 @@ void D3D12Backend::Submit(bool wait) {
     }
 }
 
-void D3D12Backend::Flush() { Submit(true); }
+// waits for the GPU, so every report asked for so far is written too (titles poll a visibility test inside a frame)
+void D3D12Backend::Flush() {
+    Submit(true);
+    DeliverReports();
+}
 
 void D3D12Backend::WaitFence(uint64_t value) {
     fence_->SetEventOnCompletion(value, event_);
