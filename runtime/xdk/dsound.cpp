@@ -75,6 +75,10 @@ X86Func* Find(uint32_t guest);
 #define SYM_IDirectSoundBuffer_Pause FFFFFF0E
 #define HAS_IDirectSoundBuffer_Pause 0
 #endif
+#ifndef SYM_DirectSoundGetSampleTime
+#define SYM_DirectSoundGetSampleTime FFFFFF0F
+#define HAS_DirectSoundGetSampleTime 0
+#endif
 #ifndef SYM_DirectSoundUseLightHRTF
 #define SYM_DirectSoundUseLightHRTF FFFFFF0B
 #define HAS_DirectSoundUseLightHRTF 0
@@ -596,6 +600,15 @@ HLE_STDCALL(IDirectSound_GetOutputLevels, 3) {
 
 HLE_STDCALL(DirectSoundCreateBuffer, 2) { return NewBuffer(a[0], a[1]); }
 HLE_STDCALL(IDirectSound_CreateSoundBuffer, 4) { return NewBuffer(a[1], a[2]); }
+
+// DirectSoundGetSampleTime(): the audio processor's global counter of 48 kHz samples (register 0xFE80200C), which
+// titles time things by (PGR2's menu animations). Counted from the first call.
+HLE_STDCALL(DirectSoundGetSampleTime, 0) {
+    constexpr uint64_t kSampleRate = 48000;
+    static const auto start = std::chrono::steady_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+    return uint32_t(uint64_t(us) * kSampleRate / 1000000);
+}
 
 #define BUFFER(name, nargs)                                 \
     static uint32_t buf_##name(Voice& v, const Args& a);    \

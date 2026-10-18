@@ -145,6 +145,7 @@ DirectSoundCreate = {sec = "DSOUND", len = 0x47, hash = "0x3BBCDFE434237F24", xt
 DirectSoundCreateBuffer = {sec = "DSOUND", len = 0x57, hash = "0xC2431935FBC2C56E", xtlid = 0xB0003, calls = [[0x1E, "0x77CF69460E7107DD", []], [0x6D, "0x5B6DF29981072B31", [[0x15, "0xA06C401FA8F9EA12"], [0x11, "0x2B6130851883E06E"], [0x1D, "0x936A8E6B64B4B1F7"], [0x139, "0x2EA6C150A764F0C8"]]], [0x9C, "0x71DC342A694E3431", [[0x1E, "0x77CF69460E7107DD"], [0x11, "0x2B6130851883E06E"], [0x18, "0x7267DDD0F33D17E1"], [0xE7, "0x4386FBCF796CD309"]]]], ret = 8, regs = []}
 DirectSoundCreateStream = {sec = "DSOUND", len = 0x57, hash = "0xC2431935FBC2C56E", xtlid = 0xB0004, calls = [[0x1E, "0x77CF69460E7107DD", []], [0x6D, "0x5B6DF29981072B31", [[0x15, "0xA06C401FA8F9EA12"], [0x11, "0x2B6130851883E06E"], [0x1D, "0x936A8E6B64B4B1F7"], [0x139, "0x2EA6C150A764F0C8"]]], [0x91, "0xA8084C901AC7275A", [[0x1E, "0x77CF69460E7107DD"], [0x11, "0x2B6130851883E06E"], [0x25, "0xA8574C55272D2AC1"], [0xAA, "0x4BB4CB7B01AD6A56"]]]], ret = 8, regs = []}
 DirectSoundDoWork = {sec = "DSOUND", len = 0x29, hash = "0x3F0CD1C7D0D542BB", xtlid = 0xB000F, calls = [[0x1E, "0x77CF69460E7107DD", []], [0x31, "0x5A90CBA1AACC1ADD", [[0x1E, "0x77CF69460E7107DD"], [0x92, "0xA27D3FDC1C6FC8BE"]]]], ret = 0, regs = []}
+DirectSoundGetSampleTime = {sec = "DSOUND", len = 0x10, hash = "0xB4F811B70FAE6226", xtlid = 0xB0011, k = [0xFE80200C], ret = 0, regs = []}
 DirectSoundUseFullHRTF = {}
 DirectSoundUseLightHRTF = {}
 IDirectSoundBuffer_GetCurrentPosition = {}
