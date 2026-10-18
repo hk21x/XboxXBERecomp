@@ -2571,6 +2571,16 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     uint32_t query = BeginCountedDraw(s);
     DrawGeometry(a);
     EndCountedDraw(query);
+    // XBE_CAPTURE_DRAWS: the target after each draw in the range (cap_i_ moved on past this draw's number)
+    if (cap_ && draw_rt_) {
+        diag::DrawRange r = diag::CaptureDraws();
+        uint32_t i = cap_i_ - 1;
+        if (i >= r.first && i <= r.last) {
+            char name[32];
+            snprintf(name, sizeof(name), "%04u_draw_%08X", i, draw_rt_->data);
+            CapSave(*draw_rt_, name);
+        }
+    }
 }
 
 // a guest rect scaled to the target and clamped to it

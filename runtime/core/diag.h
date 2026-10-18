@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 
@@ -24,6 +25,24 @@ inline const std::filesystem::path& CaptureDir() {
         return v ? std::filesystem::path(v) : std::filesystem::path();
     }();
     return dir;
+}
+
+// XBE_CAPTURE_DRAWS="1600-1640": a capture also saves the colour target after each draw in that range (frame.txt's
+// draw numbers); first > last when unset
+struct DrawRange {
+    unsigned first = 1, last = 0;
+};
+inline DrawRange CaptureDraws() {
+    static const DrawRange r = [] {
+        DrawRange d;
+        if (const char* v = std::getenv("XBE_CAPTURE_DRAWS")) {
+            unsigned a = 0, b = 0;
+            int n = std::sscanf(v, "%u-%u", &a, &b);
+            if (n >= 1) d = {a, n == 2 ? b : a};
+        }
+        return d;
+    }();
+    return r;
 }
 
 // XBE_VSC="56 54": vertex shader constants (D3D numbering, -96..95) whose writes are logged: each distinct value
