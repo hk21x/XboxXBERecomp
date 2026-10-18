@@ -320,6 +320,7 @@ struct Tex {
     uint64_t sig = 0;
     uint64_t frame = 0;
     uint64_t palette = 0;  // hash of the colours a P8 texture was decoded with
+    uint64_t faces = 0;    // a cube's frame its faces drawn on the GPU were last copied in
     uint8_t flags = 0;  // Extension::Decoded's
 };
 
@@ -502,6 +503,7 @@ private:
     ID3D12Resource* BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                      DrawTextures& stages);
     bool CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, uint64_t key);
+    void CopyCubeTargets(Tex& tx, const TextureDesc& d);
     void UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint8_t* p, const uint32_t* colours,
                        bool same);
     void UploadTextureLevel(Tex& tx, uint32_t f, uint32_t l, const std::vector<uint8_t>& px, uint32_t pitch);
@@ -1098,6 +1100,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
     // an empty pool drops the new resource with t
     if (!CreateTargetView(t)) return nullptr;
     t.data = slot.data;
+    TextureDesc d;
+    t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
     t.bytes = GuestPitch(slot.gw) * slot.gh;
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
@@ -1564,6 +1568,19 @@ TexKind TextureKind(const TextureDesc& d) {
 
 constexpr float kUpscaledMin = 1.01f;  // host texels per console texel past rounding: the target is upscaled
 
+// The console draws an 8 bit surface (L8, AL8, A8) as B8, keeping each pixel's blue byte; the target here keeps all
+// four. Read as one of those formats, its blue channel is that byte, spread as the format's texel decode spreads it.
+UINT OneByteMapping(uint32_t format) {
+    constexpr UINT kB = D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2;
+    constexpr UINT kOne = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1;
+    switch (format) {
+        case 0x00: case 0x13: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(kB, kB, kB, kOne);   // L8, LIN_L8
+        case 0x01: case 0x1B: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(kB, kB, kB, kB);     // AL8, LIN_AL8
+        case 0x19: case 0x1F: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(kOne, kOne, kOne, kB);  // A8, LIN_A8
+        default: return D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    }
+}
+
 ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const TextureDesc& d, Target& t, bool box,
                                                 DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
@@ -1586,6 +1603,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     }
     if (ext_) ext_->Sampled(d, &t, 0, info);
     sv.Format = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.fmt;
+    if (!t.depth && t.fmt == kBgra) sv.Shader4ComponentMapping = OneByteMapping(d.format);
     // the console reads the pixels it is about to overwrite: give the draw a copy
     if (feedback) return Feedback(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1746,10 +1764,37 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             UploadTexture(tx, d, fi, p, palette.va ? palette.colours : nullptr, same);
         }
     }
+    if (d.cube && !fi.depth) CopyCubeTargets(tx, d);
     FillTextureView(tx, d, stages.sv[stage]);
     if (fi.depth) info.shadow = ShadowDepthKind(d.format);
     if (ext_) ext_->Sampled(d, nullptr, tx.flags, info);
     return tx.res.Get();
+}
+
+// A cube's faces are only ever read from guest memory, but the title may draw a face (an environment map rendered
+// each frame): those faces drawn on the GPU replace level 0 of the face in the texture, once a frame
+void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
+    if (tx.fmt != kBgra || tx.faces == presents_ + 1) return;
+    tx.faces = presents_ + 1;
+    for (uint32_t f = 0; f < 6; f++) {
+        uint32_t face = d.data + f * FaceSize(d);
+        auto it = targets_.find(TargetMapKey(face, false));
+        if (it == targets_.end() || TargetStale(face)) continue;
+        Target& t = it->second;
+        if (t.depth || t.gw != d.width || t.gh != d.height) continue;
+        CopySource src = PrepareCopySource(t, {});
+        if (!src.res) continue;
+        D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION dl{tx.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        dl.SubresourceIndex = f * tx.levels;
+        D3D12_TEXTURE_COPY_LOCATION sl{src.res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        sl.SubresourceIndex = 0;
+        cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+        Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        // a shrunk copy is read by the recorded copy: kept until the frame is done
+        if (src.down) CurrentFrame().garbage.push_back(src.down);
+    }
 }
 
 ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTextures& stages) {
@@ -3027,6 +3072,11 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
     if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
+    // pixels written back are 32 bit linear rows: over a narrower or swizzled surface they would run past it
+    if (!it->second.linear32) {
+        LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit linear surface", data);
+        return;
+    }
     PerfScope perf_sync{g_perf.sync};
     g_perf.syncs++;
     if (diag::Perf()) {
@@ -3144,7 +3194,7 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
 
 void D3D12Backend::RecordLate(uint32_t data) {
     auto it = targets_.find(TargetMapKey(data, false));
-    if (it == targets_.end() || TargetStale(data)) return;
+    if (it == targets_.end() || TargetStale(data) || !it->second.linear32) return;
     Target& t = it->second;
     PerfScope perf_sync{g_perf.sync};
     g_perf.lates++;
