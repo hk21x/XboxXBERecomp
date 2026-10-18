@@ -19,6 +19,9 @@ sdk/harness/build.sh -r <repo> -g <generated/image> -o <out> [-n exe] [-x regex]
 ```
 
 `-x` leaves sources out, `-e` adds sources, `-G` shares the generated objects between builds.
+Environment, to build as the Windows exe is built: `RAW=1` the guest's own vertices for the backend (the reference
+renderer converts its own), `RT_THREAD=1` the render thread, `GEN_OPT=-O2` the generated code's optimisation
+(default -O1; give such a build its own `-o` folder).
 
 ## Run
 

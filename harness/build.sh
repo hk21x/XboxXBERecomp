@@ -22,13 +22,13 @@ EXE=${EXE:-$(basename "$GEN")}; GEN_OBJ=${GEN_OBJ:-$OUT/gen}; mkdir -p "$GEN_OBJ
 H=$(dirname "$(realpath "$0")"); RT=$REPO/sdk/runtime
 CXX=${CXX:-clang++}; JOBS=${JOBS:-$(nproc)}
 BASE="-std=c++20 -march=x86-64-v2 -fno-strict-aliasing"
-HOST="$BASE -O1 -g -I$REPO/src -I$RT -I$GEN -I$H -I$H/compat -DXBE_RAW_VERTICES=0 -DXBE_RENDER_THREAD=0"
+HOST="$BASE -O1 -g -I$REPO/src -I$RT -I$GEN -I$H -I$H/compat -DXBE_RAW_VERTICES=${RAW:-0} -DXBE_RENDER_THREAD=${RT_THREAD:-0}"
 
 # generated code, an object rebuilt only when its partition is newer
-export CXX BASE RT GEN GEN_OBJ
+export CXX BASE RT GEN GEN_OBJ GEN_OPT
 ls "$GEN"/x86_recomp.*.cpp "$GEN"/x86_func_mapping.cpp | xargs -P "$JOBS" -I{} sh -c '
     o="$GEN_OBJ/$(basename {} .cpp).o"; [ "$o" -nt {} ] && exit 0
-    $CXX $BASE -O1 -g0 -w -I"$RT" -I"$GEN" -c {} -o "$o.tmp" && mv "$o.tmp" "$o"'
+    $CXX $BASE ${GEN_OPT:--O1} -g0 -w -I"$RT" -I"$GEN" -c {} -o "$o.tmp" && mv "$o.tmp" "$o"'
 
 others=$(ls "$GEN/.." | grep -vx "$(basename "$GEN")" | paste -sd'|' -)
 SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/gpu/d3d12.cpp|/audio/xaudio2.cpp")

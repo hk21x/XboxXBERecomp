@@ -1067,7 +1067,12 @@ void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t rects
 void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     uint32_t draw = g_draws++;
     Assembled as;
-    if (!Assemble(s, prim, start, count, indices, as) || as.topology != Topology::Triangles) return;
+    // the CPU reads float4 vertices: converted, whatever the build gives the GPU backend
+    bool raw = g_raw_vertices;
+    g_raw_vertices = false;
+    bool ok = Assemble(s, prim, start, count, indices, as);
+    g_raw_vertices = raw;
+    if (!ok || as.topology != Topology::Triangles) return;
     Plane rt = OpenPlane(s.rt);
     Plane zs = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? OpenPlane(s.zs) : Plane{};
     if (!rt.ok && !zs.ok) return;
