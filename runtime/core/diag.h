@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 
 // diagnostics switched on by environment variables, read once
@@ -49,6 +50,27 @@ inline DrawRange CaptureDraws() {
         return d;
     }();
     return r;
+}
+
+// XBE_DRAW_TEST="B01019E1:alphakill,cull,depth": an experiment, the draws with that vertex shader handle drawn
+// without those tests (alpha kill, back face culling, the depth test); to find which one drops a draw
+struct DrawTest {
+    uint32_t vs = 0;
+    bool alphakill = false, cull = false, depth = false;
+};
+inline const DrawTest& DrawTests() {
+    static const DrawTest t = [] {
+        DrawTest d;
+        const char* v = std::getenv("XBE_DRAW_TEST");
+        unsigned h = 0;
+        if (!v || std::sscanf(v, "%x", &h) != 1) return d;
+        d.vs = h;
+        d.alphakill = std::strstr(v, "alphakill") != nullptr;
+        d.cull = std::strstr(v, "cull") != nullptr;
+        d.depth = std::strstr(v, "depth") != nullptr;
+        return d;
+    }();
+    return t;
 }
 
 // XBE_VSC="56 54": vertex shader constants (D3D numbering, -96..95) whose writes are logged: each distinct value

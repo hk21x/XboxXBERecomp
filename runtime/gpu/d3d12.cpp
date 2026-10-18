@@ -2549,6 +2549,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     DrawTextures stages;
     if (!BindStageTexturesAndTargets(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
+    const diag::DrawTest& test = diag::DrawTests();
+    bool tested = test.vs && s.vs_handle == test.vs;
+    if (tested && test.alphakill) pk.alphakill = 0;
     pk.quad = sh.quad;
     sh.pkey = Hash(&pk, sizeof(pk));
     EnsurePixelShader(pk, sh);
@@ -2557,6 +2560,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // pipeline
     PsoKey k;
     BuildPipelineKey(s, a, sh.vh, sh.ph, k);
+    if (tested && test.cull) k.cull = 0;
+    if (tested && test.depth) k.zen = k.zwrite = 0;
+    if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
     cl_->SetPipelineState(pso);
