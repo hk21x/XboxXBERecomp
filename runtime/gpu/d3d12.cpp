@@ -104,7 +104,7 @@ struct PerfScope {
 
 // F3 captures only with diag::CaptureDir set
 bool CaptureOn() {
-    if (diag::CaptureDir().empty()) LOG_FIRST(1, "capture: set XBE_CAPTURE_DIR");
+    if (diag::CaptureDir().empty()) LOGR("capture: set XBE_CAPTURE_DIR");
     return !diag::CaptureDir().empty();
 }
 
@@ -2838,7 +2838,7 @@ void D3D12Backend::FinishCapture(const Surface& front) {
     fclose(cap_);
     cap_ = nullptr;
     cap_tex_.clear();
-    LOGI("d3d12: frame captured to %s", cap_dir_.string().c_str());
+    LOGR("d3d12: frame captured to %s", cap_dir_.string().c_str());
 }
 
 void D3D12Backend::StartCapture() {
@@ -2854,7 +2854,7 @@ void D3D12Backend::StartCapture() {
         LOGE("d3d12: cannot capture into %s (%s)", cap_dir_.string().c_str(), ec ? ec.message().c_str() : "frame.txt not created");
         return;
     }
-    LOGI("d3d12: capturing a frame into %s", cap_dir_.string().c_str());
+    LOGR("d3d12: capturing a frame into %s", cap_dir_.string().c_str());
     cap_i_ = cap_rt_ = 0;
     cap_seen_.clear();
     cap_sh_.clear();
@@ -3013,7 +3013,7 @@ void D3D12Backend::Present(const Surface& front) {
     if (presents_ % 30 == 0 && !diag::CaptureDir().empty()) {
         std::error_code ec;
         if (std::filesystem::remove(app::ExeDir() / "capture", ec)) {
-            LOGI("capture: requested by the capture file");
+            LOGR("capture: requested by the capture file");
             g_capture = true;
         }
     }

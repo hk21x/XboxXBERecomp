@@ -70,7 +70,7 @@ LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
 }
 
 void DumpThreads() {
-    LOGI("F3: thread stacks%s", diag::CaptureDir().empty() ? " (no capture: XBE_CAPTURE_DIR is not set)" : ", the next frame captured");
+    LOGR("F3: thread stacks%s", diag::CaptureDir().empty() ? " (no capture: XBE_CAPTURE_DIR is not set)" : ", the next frame captured");
     gpu::g_capture = true;
     for (auto& t : kernel::Threads())
         if (t->ctx) {

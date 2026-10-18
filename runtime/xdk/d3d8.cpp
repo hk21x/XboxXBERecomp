@@ -940,7 +940,8 @@ void WatchConstants(const char* how, uint32_t first, uint32_t count, uint32_t re
     for (uint32_t r = first; r < first + count && r < 192; r++) {
         if (!diag::WatchedConstant(int(r) - 96)) continue;
         const auto& v = g_state.vsc[r];
-        LOG_FIRST(200, "d3d: c%d = %g %g %g %g by %s from %08X", int(r) - 96, v[0], v[1], v[2], v[3], how, ret);
+        static std::atomic<int> logged{0};  // reported in release builds too: asked for by XBE_VSC
+        if (logged++ < 200) LOGR("d3d: c%d = %g %g %g %g by %s from %08X", int(r) - 96, v[0], v[1], v[2], v[3], how, ret);
     }
 }
 
