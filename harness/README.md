@@ -5,7 +5,7 @@ the SDK runtime as they are, with these stand ins.
 
 - `app_headless.cpp` the app side: default settings, the run folder as the exe folder, no splash or handover
 - `pad_script.cpp` port 0 from a script, then `GameInfo::pad` as on Windows
-- `null_audio.cpp` the mixer pulled every 10 ms, output dropped
+- `null_audio.cpp` the mixer pulled every 10 ms, output dropped or written to a WAV file
 - `null_backend.cpp` counts frames, lists draws, draws chosen frames with `reference_renderer.cpp` (CPU, into guest memory)
 - `main_test.cpp` runs `GameInfo::init` and `window` (with no window), then boots the image
 - `compat/` the few Win32, Winsock and DXGI names portable sources use
@@ -43,6 +43,8 @@ Environment:
   targets; `TRACE="x,y"` logs the combiner registers there
 - `FPS=N` presents at most N frames a second, `FPS=0` unpaced; without it the settings' `fps_cap` (a game's
   `init` may set it), 60 when that is 0
+- `WAV=file` the mixed output also written to that file in the run folder (48 kHz, 16 bit stereo); the log's
+  `audio: output started` line is the time of its first sample
 - `XBE_PERF` as on Windows
 
 A frame drawn by the reference renderer takes long; a button held across one can auto repeat in the game's menus.
