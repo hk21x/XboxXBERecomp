@@ -34,9 +34,11 @@ Instance k runs in `<out>/k` with its own `logs`, `hdd` and `cap`. With more tha
 
 Environment:
 
-- `SCRIPT` pad script: lines of `frame buttons [frames held]` (default 8), `#` comments, buttons joined with `+`:
-  `UP DOWN LEFT RIGHT START BACK A B X Y LT RT LS LSD LSL LSR`. Frames are presented frames.
-- `cmd` file in the run folder: `buttons [frames held]`, pressed once when read
+- `SCRIPT` pad script: lines of `vblank buttons [vblanks held]` (default 8), `#` comments, buttons joined with `+`:
+  `UP DOWN LEFT RIGHT START BACK A B X Y LT RT LS LSD LSL LSR`. Times count vertical blanks, 60 a second: each
+  presented frame adds the vertical blanks its present interval asked for (at least one), so a title that runs its
+  menus at 60 and its races at 30 keeps one clock. `renderer: frame` log lines carry the count.
+- `cmd` file in the run folder: `buttons [vblanks held]`, pressed once when read
 - `REF=N` every Nth frame drawn by the reference renderer into `cap/ref_<frame>.tga`
 - `snap` file in the run folder: the next two frames drawn into `snap_1.tga` and `snap_2.tga`
 - `CAP=N` every Nth frame's draws listed in `cap/draws_<frame>.txt`
@@ -45,7 +47,8 @@ Environment:
 - `PROBES="x,y x,y"` log every colour the reference renderer writes at those pixels of linear `PROBE_WIDTH` (640) wide
   targets; `TRACE="x,y"` logs the combiner registers there
 - `FPS=N` presents at most N frames a second, `FPS=0` unpaced; without it the settings' `fps_cap` (a game's
-  `init` may set it), 60 when that is 0
+  `init` may set it), 60 when that is 0; within that, the title's present interval (`D3D_PresentInterval`): 60 a
+  second over the number of vertical blanks it asks for
 - `WAV=file` the mixed output also written to that file in the run folder (48 kHz, 16 bit stereo); the log's
   `audio: output started` line is the time of its first sample
 - `OUTPUT=WxH` the display size the game is told about, 1280x720 by default: narrower than 3:2 the console reports

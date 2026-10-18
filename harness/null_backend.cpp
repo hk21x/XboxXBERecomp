@@ -68,7 +68,8 @@ public:
         if (drawing_) reference::BeginFrame();
         harness::g_frames = frames_ + 1;
         harness::AuditPresent();
-        if (++frames_ % 60 == 0) LOGI("renderer: frame %llu, %llu draws, %llu empty frames", frames_, draws_, empty_);
+        if (++frames_ % 60 == 0) LOGI("renderer: frame %llu, %llu draws, %llu empty frames, vblank %llu", frames_, draws_, empty_,
+                                         (unsigned long long)harness::g_vblanks.load());
         if (cap && frames_ % cap == 0) list_ = std::fopen(File("cap/draws_%05llu.txt", frames_).c_str(), "w");
     }
     void Sync(uint32_t, uint32_t) override {}

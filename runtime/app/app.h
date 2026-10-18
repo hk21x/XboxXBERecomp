@@ -19,7 +19,7 @@ struct Settings {
     DisplayMode display_mode = DisplayMode::Borderless;
     uint32_t width = 0, height = 0;  // 0 is the desktop mode
     uint32_t render_percent = 100;   // of the output height
-    uint32_t fps_cap = 60;           // 0 unlimited
+    uint32_t fps_cap = 60;           // 0: only the title's present interval
     bool vsync = true;
     uint32_t aniso = 0;              // 0 as the game asks
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
@@ -93,7 +93,14 @@ struct GameInfo {
 };
 extern const GameInfo kGame;
 
-// sleeps out the rest of the frame for the fps cap
-void Pace();
+// sleeps out the rest of the frame: the title's present interval (vertical blanks a frame at 60 Hz, 0 unpaced)
+// within the fps cap
+void Pace(uint32_t vblanks = 1);
+// frames a second for a title asking for vblanks within cap (0 unlimited); 0 unpaced
+inline uint32_t PaceRate(uint32_t cap, uint32_t vblanks) {
+    if (!vblanks) return cap;
+    uint32_t fps = 60 / vblanks;
+    return cap && cap < fps ? cap : fps;
+}
 
 }  // namespace app

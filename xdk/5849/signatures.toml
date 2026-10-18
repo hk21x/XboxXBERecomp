@@ -273,6 +273,7 @@ D3D_RenderState = {in = "D3DDevice_SetPixelShader", insn = 63, op = "imm"}
 D3D_SimpleRenderStateEncode = {in = "D3DDevice_SetRenderStateNotInline", insn = 4, op = "disp"}
 D3D_Streams = {in = "D3DDevice_SetStreamSource", insn = 24, op = "disp"}
 D3D_pDevice = {in = "CDevice_KickOff", insn = 10, op = "disp", xtlid = 0x80003}
+D3D_PresentInterval = {}
 DSound_StreamVtable = {in = "CDirectSoundStream_Constructor", insn = 9, op = "imm"}
 DSound_StreamVtable2 = {in = "DSound_StreamVtable2_ref", insn = 7, op = "imm"}
 XPP_GamepadType = {xtlid = 0x1007C}

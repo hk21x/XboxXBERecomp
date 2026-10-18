@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "app/app.h"
+#include "harness.h"
 
 namespace app {
 
@@ -58,16 +59,19 @@ std::recursive_mutex& UiLock() {
 }
 
 // FPS=N presents at most N frames a second, 0 unpaced; without it the settings' fps_cap as on Windows (a game's
-// init may set it), 60 when that is 0. Titles that time their menus by the milliseconds between frames stand still
-// when thousands of frames take no time at all.
-void Pace() {
+// init may set it), 60 when that is 0. Within that, the title's present interval as on Windows. Titles that time
+// their menus by the milliseconds between frames stand still when thousands of frames take no time at all.
+void Pace(uint32_t vblanks) {
     using clock = std::chrono::steady_clock;
-    static const long fps = [] {
+    static const long cap = [] {
         const char* e = std::getenv("FPS");
         if (e && *e) return std::atol(e);
         return Get().fps_cap ? long(Get().fps_cap) : 60L;
     }();
     static clock::time_point next = clock::now();
+    harness::g_vblanks += vblanks ? vblanks : 1;
+    if (cap <= 0) return;
+    long fps = PaceRate(uint32_t(cap), vblanks);
     if (fps <= 0) return;
     auto period = std::chrono::nanoseconds(1000000000LL / fps);
     auto now = clock::now();

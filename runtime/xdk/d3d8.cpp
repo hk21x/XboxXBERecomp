@@ -33,6 +33,10 @@ using namespace kernel;
 #ifndef HAS_D3D_FvfShader
 #define HAS_D3D_FvfShader 0
 #endif
+#ifndef HAS_D3D_PresentInterval
+#define SYM_D3D_PresentInterval 0
+#define HAS_D3D_PresentInterval 0
+#endif
 #ifndef SYM_D3DDevice_SetPalette
 #define SYM_D3DDevice_SetPalette FFFFFE02
 #define HAS_D3DDevice_SetPalette 0
@@ -585,6 +589,19 @@ HLE_STDCALL(D3DDevice_GetDepthStencilSurface2, 0) {
 
 namespace {
 std::atomic<uint32_t> g_presents{0};
+
+// vertical blanks a frame the title asked for (D3DPRESENT_PARAMETERS or SetPresentationInterval, kept in a library
+// global the swap reads): DEFAULT 0 and ONE 1 wait for one, TWO 2 to FOUR 4 for that many, IMMEDIATE 0x80000000
+// none, and the _OR_IMMEDIATE values 0x80000001 to 0x80000003 as many unless the frame is late. 1 when unknown.
+uint32_t PresentVblanks() {
+    if (!HAS_D3D_PresentInterval) return 1;
+    uint32_t v = R32(SYM(D3D_PresentInterval));
+    static uint32_t last = ~0u;
+    if (v != last) LOGR("d3d: present interval %08X", last = v);
+    if (v == 0x80000000) return 0;
+    v &= 0x7FFFFFFF;
+    return v >= 1 && v <= 4 ? v : 1;
+}
 }  // namespace
 
 // Swap(flags): D3DSWAP_COPY 1 and D3DSWAP_BYPASSCOPY 2 without D3DSWAP_FINISH 4 open the copy to the front buffer
@@ -635,7 +652,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
-    app::Pace();
+    app::Pace(PresentVblanks());
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {

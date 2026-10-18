@@ -1,7 +1,9 @@
 // pad 0 from a script, then GameInfo::pad as on Windows
-// SCRIPT file: lines of "frame buttons [frames held]", held 8 frames by default, # comments; buttons joined by +:
+// SCRIPT file: lines of "vblank buttons [vblanks held]", held 8 by default, # comments; buttons joined by +. Times
+// count vertical blanks at 60 a second, the frames the title asked for (a frame at 30 a second is two), so a script
+// keeps its timing when a title changes its frame rate between screens:
 // UP DOWN LEFT RIGHT START BACK A B X Y LT RT LS LSD LSL LSR (left stick up, down, left, right)
-// cmd in the run folder: "buttons [frames held]" pressed once from the frame it is read, then removed
+// cmd in the run folder: "buttons [vblanks held]" pressed once from when it is read, then removed
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -71,7 +73,7 @@ Pad Poll(int port) {
     Pad p;
     p.connected = port == 0;
     if (port == 0) {
-        double t = double(harness::g_frames.load());
+        double t = double(harness::g_vblanks.load());
         std::string cmd = (app::ExeDir() / "cmd").string();
         if (FILE* f = std::fopen(cmd.c_str(), "r")) {
             char b[64] = {};
