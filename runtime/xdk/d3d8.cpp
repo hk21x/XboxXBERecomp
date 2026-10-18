@@ -1151,10 +1151,22 @@ void EndPrimitive() {
     if (!prim || !count) return;
     if (!(handle & 1)) {
         // an FVF: the slots packed in its own layout, drawn by the fixed pipeline (pretransformed XYZRHW included).
-        // A D3DCOLOR goes back to its bytes B, G, R, A from the slot's R, G, B, A.
-        constexpr uint32_t kColor = 0x40;
+        // Immediate data goes to the vertex registers whatever the FVF says (PGR2's movies give texture coordinates
+        // under XYZRHW | DIFFUSE), so the FVF is widened by the slots written: diffuse 3, specular 4, texture
+        // coordinates 9 to 12 as four floats. A D3DCOLOR goes back to its bytes B, G, R, A from the slot's R, G, B, A.
+        constexpr uint32_t kColor = 0x40, kFvfDiffuse = 0x40, kFvfSpecular = 0x80, kTexSlot = 9, kTexFloat4 = 2;
+        uint32_t fvf_handle = handle;
+        if (g_im_mask >> 3 & 1) fvf_handle |= kFvfDiffuse;
+        if (g_im_mask >> 4 & 1) fvf_handle |= kFvfSpecular;
+        uint32_t declared = fvf_handle >> 8 & 15, written = 0;
+        for (uint32_t t = 0; t < 4; t++)
+            if (g_im_mask >> (kTexSlot + t) & 1) written = t + 1;
+        if (written > declared) {
+            for (uint32_t t = declared; t < written; t++) fvf_handle |= kTexFloat4 << (16 + t * 2);
+            fvf_handle = (fvf_handle & ~0xF00u) | written << 8;
+        }
         gpu::VertexShader fvf;
-        gpu::FvfInputs(handle, fvf);
+        gpu::FvfInputs(fvf_handle, fvf);
         uint32_t stride = fvf.stream_stride[0];
         static std::vector<uint8_t> bytes;
         bytes.assign(size_t(stride) * count, 0);
@@ -1171,7 +1183,9 @@ void EndPrimitive() {
                     std::memcpy(out, slot, std::min<uint32_t>(in.type >> 4, 4) * 4);
                 }
             }
+        g_state.vs_handle = fvf_handle;
         DrawUp(prim, count, bytes.data(), stride);
+        g_state.vs_handle = handle;
         return;
     }
     auto bound = g_state.vs, from = handle & 1 ? bound : nullptr;
