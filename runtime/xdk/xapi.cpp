@@ -7,6 +7,12 @@
 
 using namespace kernel;
 
+// configs written before the SDK knew the name
+#ifndef SYM_XapiVerifyMediaInDrive
+#define SYM_XapiVerifyMediaInDrive FFFFFC00
+#define HAS_XapiVerifyMediaInDrive 0
+#endif
+
 namespace {
 
 // XPP device type records: CurrentConnected, ChangeConnected, PreviousConnected
@@ -136,3 +142,8 @@ X86_FUNC(GUEST(XLaunchNewImageA)) {
     LOGW("xapi: launch of %s refused, it is not recompiled", path.c_str());
     Return(ctx, 2, 2);  // ERROR_FILE_NOT_FOUND
 }
+
+// XAPI's startup check of the disc in the drive (the name is ours, the XDK's is not known): an authentication mode
+// page, then for titles whose certificate asks for it the signed security sector. The game runs from the player's
+// own files, so there is no drive or disc to authenticate; the check passes as it does with the disc inserted.
+HLE_STDCALL(XapiVerifyMediaInDrive, 0) { return 0; }
