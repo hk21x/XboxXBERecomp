@@ -3,7 +3,7 @@
 //   cap/vertices.txt                       each draw assembled both ways, raw (as D3D12 gets it) and converted on the CPU
 //                                           (as the reference renderer gets it), every corner fetched as an input
 //                                           assembler fetches it and compared: draws, mismatches, vertex types
-//   AUDIT_TEX=<hex address>: that texture as its guest memory decodes, every face of level 0, into
+//   AUDIT_TEX=<hex address>: that texture as its guest memory decodes (depth as grey), every face of level 0, into
 //                                           cap/tex_<address>_<frame>.tga once every 300 frames (between reference frames
 //                                           nothing draws into guest memory here, so this is what a GPU backend reads)
 //   cap/textures.txt                       each texture sampled: format, size, levels, uses, and how far each mip level
@@ -28,6 +28,7 @@
 #include "gpu/texture.h"
 #include "gpu/vertex.h"
 #include "harness.h"
+#include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "reference_renderer.h"
 
@@ -246,8 +247,21 @@ bool CompareVertices(const State& s, const Assembled& raw, const Assembled& conv
 void WriteTexture(const TextureDesc& d) {
     uint32_t faces = d.cube ? 6 : 1, w = 0, h = 0;
     std::vector<std::vector<float>> px(faces);
-    for (uint32_t f = 0; f < faces; f++)
-        if (!reference::DecodeRgba(d, 0, f, px[f], w, h)) return;
+    for (uint32_t f = 0; f < faces; f++) {
+        if (reference::DecodeRgba(d, 0, f, px[f], w, h)) continue;
+        if (!Format(d.format).depth) return;
+        // depth as grey, 0 black to 1 white
+        std::vector<uint8_t> raw;
+        uint32_t pitch;
+        DecodeLevel(d, 0, f, static_cast<const uint8_t*>(kernel::HostPtr(d.data)), nullptr, raw, pitch);
+        w = d.linear ? d.width : d.width, h = d.height;
+        px[f].resize(size_t(w) * h * 4);
+        for (size_t i = 0; i < size_t(w) * h; i++) {
+            float z;
+            std::memcpy(&z, &raw[i * 4], 4);
+            px[f][i * 4] = px[f][i * 4 + 1] = px[f][i * 4 + 2] = z;
+        }
+    }
     char name[64];
     std::snprintf(name, sizeof name, "tex_%08X_%05llu.tga", d.data, (unsigned long long)g_frames.load());
     FILE* out = std::fopen((app::ExeDir() / "cap" / name).string().c_str(), "wb");

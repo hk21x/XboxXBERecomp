@@ -1240,6 +1240,17 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             int y0 = std::max(top, int(std::floor(std::min({p0.y, p1.y, p2.y})))), y1 = std::min(bottom - 1, int(std::ceil(std::max({p0.y, p1.y, p2.y}))));
             if (x0 > x1 || y0 > y1) continue;
             float inv_area = 1 / area;
+            // polygon offset (solid fill): units in depth buffer steps plus the slope scale times the larger of the
+            // triangle's depth gradients in x and y
+            float zoff = 0;
+            if (s.simple[kMSolidOffsetEnable >> 2]) {
+                float dzdx = ((p1.z - p0.z) * (p2.y - p0.y) - (p2.z - p0.z) * (p1.y - p0.y)) * inv_area;
+                float dzdy = ((p2.z - p0.z) * (p1.x - p0.x) - (p1.z - p0.z) * (p2.x - p0.x)) * inv_area;
+                float slope, units;
+                std::memcpy(&slope, &s.simple[kMSlopeScale >> 2], 4);
+                std::memcpy(&units, &s.simple[kMDepthOffset >> 2], 4);
+                zoff = slope * std::max(std::fabs(dzdx), std::fabs(dzdy)) + units;
+            }
             for (int y = y0; y <= y1; y++)
                 for (int x = x0; x <= x1; x++) {
                     // barycentrics at the pixel centre
@@ -1250,6 +1261,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     if (b0 < 0 || b1 < 0 || b2 < 0) continue;
                     float z = b0 * p0.z + b1 * p1.z + b2 * p2.z;
                     if (z < 0 || z > s.zscale) continue;
+                    z = std::clamp(z + zoff, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
                     Vec attr[kAttrs];
                     for (int a = 0; a < kAttrs; a++)
