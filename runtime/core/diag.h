@@ -26,7 +26,8 @@ inline const std::filesystem::path& CaptureDir() {
     return dir;
 }
 
-// XBE_VSC="56 54": vertex shader constants (D3D numbering, -96..95) whose writes are logged, the first 200
+// XBE_VSC="56 54": vertex shader constants (D3D numbering, -96..95) whose writes are logged: each distinct value
+// and caller once
 inline bool WatchedConstant(int d3d_register) {
     static const std::array<uint64_t, 3> mask = [] {
         std::array<uint64_t, 3> m{};

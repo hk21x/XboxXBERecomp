@@ -567,7 +567,7 @@ private:
     ComPtr<ID3D12Resource> Shrink(ID3D12Resource* src, D3D12_RESOURCE_STATES& st, DXGI_FORMAT fmt, uint32_t w,
                                   uint32_t h, const ShrinkOptions& o = {});
     bool ReadBack(ID3D12Resource* res, uint32_t w, uint32_t h, std::vector<uint8_t>& out);
-    void CapStep(const Surface& rt);
+    void CapStep(const Surface& rt, const Surface& zs = {});
     // a resource CapSave shrinks to w x h and writes, in state *state, colour times mul
     struct CapImage {
         ID3D12Resource* res;
@@ -670,6 +670,8 @@ private:
     std::filesystem::path cap_dir_;
     uint32_t cap_i_ = 0;
     uint32_t cap_rt_ = 0;
+    Surface cap_zs_;     // the depth target drawn with, saved when the frame moves on from it
+    uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
     std::unordered_set<uint32_t> cap_seen_;
     std::unordered_set<uint64_t> cap_sh_;
     struct CapTex {
@@ -2297,7 +2299,9 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
 
 // small draws: their inputs and constants; then ends the draw's line
 void D3D12Backend::EndDrawCapture(const State& s, const Assembled& a, uint32_t count, const DrawConstants& c) {
-    if (count <= kQuadVertices) CaptureInputs(s, a, c);
+    // small draws, and the first draw with each vertex shader, list their inputs and constants
+    if (count <= kQuadVertices || s.vs_handle != cap_vs_) CaptureInputs(s, a, c);
+    cap_vs_ = s.vs_handle;
     fputc('\n', cap_);
 }
 
@@ -2513,7 +2517,7 @@ void D3D12Backend::DeliverReports() {
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
-    if (cap_) CapStep(s.rt);
+    if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
     if (DepthCopy(s)) return;
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
@@ -2611,7 +2615,7 @@ void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
                          uint32_t stencil) {
     PerfScope perf_clear{g_perf.clear};
     if (cap_) {
-        CapStep(s.rt);
+        CapStep(s.rt, s.zs);
         fprintf(cap_, "%04u clear rt %08X ds %08X flags %X color %08X z %.3f\n", cap_i_++, s.rt.data, s.zs.data, flags,
                 color, z);
     }
@@ -2855,7 +2859,8 @@ void D3D12Backend::StartCapture() {
         return;
     }
     LOGR("d3d12: capturing a frame into %s", cap_dir_.string().c_str());
-    cap_i_ = cap_rt_ = 0;
+    cap_i_ = cap_rt_ = cap_vs_ = 0;
+    cap_zs_ = {};
     cap_seen_.clear();
     cap_sh_.clear();
 }
@@ -3325,22 +3330,25 @@ void D3D12Backend::CapSave(Target& t, const char* name) {
 }
 
 // the frame moves to another target: save the one it leaves
-void D3D12Backend::CapStep(const Surface& rt) {
+void D3D12Backend::CapStep(const Surface& rt, const Surface& zs) {
     uint32_t d = rt.header ? mem::VirtualFromPhysical(rt.data) : 0;
-    if (d == cap_rt_) return;
+    uint32_t z = zs.header ? mem::VirtualFromPhysical(zs.data) : 0;
+    uint32_t cz = cap_zs_.header ? mem::VirtualFromPhysical(cap_zs_.data) : 0;
+    if (d == cap_rt_ && z == cz) return;
     auto it = targets_.find(TargetMapKey(cap_rt_, false));
-    if (cap_rt_ && it != targets_.end()) {
+    if (cap_rt_ && d != cap_rt_ && it != targets_.end()) {
         char name[32];
         snprintf(name, sizeof(name), "%04u_%08X", cap_i_, cap_rt_);
         CapSave(it->second, name);
     }
-    auto z = targets_.find(TargetMapKey(cap_rt_, true));
-    if (cap_rt_ && z != targets_.end()) {
+    // a depth only pass (a shadow map) is saved too: its depth target found at its own size
+    if (Target* t = cz && z != cz ? FindTarget(cap_zs_, true) : nullptr) {
         char name[32];
-        snprintf(name, sizeof(name), "%04u_%08X_z", cap_i_, cap_rt_);
-        CapSave(z->second, name);
+        snprintf(name, sizeof(name), "%04u_%08X_z", cap_i_, cz);
+        CapSave(*t, name);
     }
     cap_rt_ = d;
+    cap_zs_ = zs;
 }
 
 void D3D12Backend::Capture(Target& t, const char* tag, float mul) {

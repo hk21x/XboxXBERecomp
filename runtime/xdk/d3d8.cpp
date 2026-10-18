@@ -12,6 +12,7 @@
 #include "app/app.h"
 #include "core/diag.h"
 #include "gpu/backend.h"
+#include "gpu/shaders.h"
 #include "gpu/texture.h"
 #include "gpu/vertex.h"
 #include "xdk/d3d8.h"
@@ -940,8 +941,11 @@ void WatchConstants(const char* how, uint32_t first, uint32_t count, uint32_t re
     for (uint32_t r = first; r < first + count && r < 192; r++) {
         if (!diag::WatchedConstant(int(r) - 96)) continue;
         const auto& v = g_state.vsc[r];
-        static std::atomic<int> logged{0};  // reported in release builds too: asked for by XBE_VSC
-        if (logged++ < 200) LOGR("d3d: c%d = %g %g %g %g by %s from %08X", int(r) - 96, v[0], v[1], v[2], v[3], how, ret);
+        // each distinct register, value and caller once, the first 500; reported in release builds too
+        static std::unordered_set<uint64_t> seen;
+        uint64_t key = gpu::Hash(v.data(), sizeof(float) * 4, uint64_t(r) << 32 | ret);
+        if (seen.size() < 500 && seen.insert(key).second)
+            LOGR("d3d: c%d = %g %g %g %g by %s from %08X", int(r) - 96, v[0], v[1], v[2], v[3], how, ret);
     }
 }
 
