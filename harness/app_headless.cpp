@@ -47,13 +47,15 @@ std::recursive_mutex& UiLock() {
     return m;
 }
 
-// FPS=N presents at most N frames a second (default 60, as the console shows them; 0 runs unpaced). Titles that time
-// their menus by the milliseconds between frames stand still when thousands of frames take no time at all.
+// FPS=N presents at most N frames a second, 0 unpaced; without it the settings' fps_cap as on Windows (a game's
+// init may set it), 60 when that is 0. Titles that time their menus by the milliseconds between frames stand still
+// when thousands of frames take no time at all.
 void Pace() {
     using clock = std::chrono::steady_clock;
     static const long fps = [] {
         const char* e = std::getenv("FPS");
-        return e && *e ? std::atol(e) : 60L;
+        if (e && *e) return std::atol(e);
+        return Get().fps_cap ? long(Get().fps_cap) : 60L;
     }();
     static clock::time_point next = clock::now();
     if (fps <= 0) return;
