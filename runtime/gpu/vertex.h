@@ -52,6 +52,10 @@ struct Assembled {
     std::array<std::vector<uint8_t>, 16> gathered;  // raw vertices copied in draw order when the indices are sparse
 };
 
+// the guest's own vertices go to the input assembler when it can read them, else each is converted on the CPU;
+// XBE_RAW_VERTICES sets it, the harness audit switches it to compare both
+extern bool g_raw_vertices;
+
 // the FVF bits translated to the register layout the XDK's declarations use
 void FvfInputs(uint32_t fvf, VertexShader& out);
 

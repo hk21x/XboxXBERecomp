@@ -79,7 +79,6 @@ void Convert(uint32_t type, const uint8_t* p, float* o) {
 #ifndef XBE_RAW_VERTICES
 #define XBE_RAW_VERTICES 1
 #endif
-constexpr bool kRawVertices = XBE_RAW_VERTICES;
 
 // D3DVSDT type as the input assembler reads it: DXGI format, what the vertex shader does after, bytes the format reads
 struct HostElement {
@@ -293,16 +292,17 @@ void GatherVertices(const State& s, const DrawRange& d, const uint8_t* data, uin
     }
 }
 
-// returns the buffer slot the stream got
+// returns the buffer slot the stream got; overhang: bytes the stream's elements read past the last vertex's stride
+// (a declaration longer than the stride reads the next vertex's bytes, as the console does), dense buffers only
 int AddRawBuffer(const State& s, const VertexShader& layout, const VertexShader::Input& in, const DrawRange& d,
-                 bool dense, Assembled& out) {
+                 bool dense, uint32_t overhang, Assembled& out) {
     using namespace kernel;
     const auto& st = s.streams[size_t(in.stream)];
     uint32_t stride = StrideOf(s, layout, in);
     const uint8_t* data = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(st.vb + kResData))));
     int slot = int(out.buffer_count);
     if (dense) {
-        out.buffers[out.buffer_count++] = {data + size_t(d.first_vertex) * stride, d.span * stride, stride};
+        out.buffers[out.buffer_count++] = {data + size_t(d.first_vertex) * stride, d.span * stride + overhang, stride};
     } else {
         auto& g = out.gathered[out.buffer_count];
         GatherVertices(s, d, data, stride, g);
@@ -356,11 +356,17 @@ bool AssembleRaw(const State& s, const Inputs& inputs, const DrawRange& d, Assem
     bool dense = uint64_t(d.span) <= uint64_t(d.count) * kDenseSpanPerVertex + kDenseSpanSlack;
     int slot[16];
     std::fill(std::begin(slot), std::end(slot), -1);
+    uint32_t end[16] = {};  // per stream: the furthest byte an element reads, from the vertex's start
+    for (int k = 0; k < inputs.nregs; k++) {
+        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
+        end[in.stream] = std::max(end[in.stream], in.offset + HostFormat(in.type).bytes);
+    }
     for (int k = 0; k < inputs.nregs; k++) {
         int reg = inputs.regs[k];
         const auto& in = inputs.layout.inputs[size_t(reg)];
         if (slot[in.stream] < 0) {
-            slot[in.stream] = AddRawBuffer(s, inputs.layout, in, d, dense, out);
+            uint32_t stride = StrideOf(s, inputs.layout, in);
+            slot[in.stream] = AddRawBuffer(s, inputs.layout, in, d, dense, end[in.stream] > stride ? end[in.stream] - stride : 0, out);
         }
         HostElement he = HostFormat(in.type);
         out.elements[size_t(reg)] = {he.format, uint8_t(slot[in.stream]), uint16_t(in.offset)};
@@ -408,6 +414,8 @@ bool AssembleConverted(const State& s, const Inputs& inputs, const DrawRange& d,
 }
 
 }  // namespace
+
+bool g_raw_vertices = XBE_RAW_VERTICES;
 
 void FvfInputs(uint32_t fvf, VertexShader& vs) {
     vs.inputs.fill({});
@@ -467,7 +475,7 @@ bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, con
     Inputs inputs = {*layout, regs, nregs};
 
     // the guest's own vertices when the input assembler can read every element of them
-    bool raw = kRawVertices && RawReadable(s, inputs);
+    bool raw = g_raw_vertices && RawReadable(s, inputs);
     if (raw) return AssembleRaw(s, inputs, d, out);
     return AssembleConverted(s, inputs, d, out);
 }
