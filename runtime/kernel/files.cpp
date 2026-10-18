@@ -803,6 +803,25 @@ KERNEL_EXPORT(196, NtDeviceIoControlFile, 10) {
         W32(out + 16, 63);
         W32(out + 20, 512);
     }
+    if (code == 0x4D014 && a[6] && a[7] >= 0x2C) {  // IOCTL_SCSI_PASS_THROUGH_DIRECT to the DVD drive
+        // SCSI_PASS_THROUGH_DIRECT: transfer length +0x0C, data buffer +0x14, CDB +0x1C
+        uint32_t spt = a[6], bytes = R32(spt + 0x0C), data = R32(spt + 0x14);
+        constexpr uint8_t kModeSense10 = 0x5A, kAuthenticationPage = 0x3E;
+        if (G<uint8_t>(spt + 0x1C) == kModeSense10 && (G<uint8_t>(spt + 0x1E) & 0x3F) == kAuthenticationPage && data &&
+            bytes >= 13) {
+            // XAPI's startup checks for an authenticated Xbox game disc: the mode page after the 8 byte header with
+            // PartitionArea, CDFValid and Authentication set
+            std::memset(HostPtr(data), 0, bytes);
+            G<uint8_t>(data + 1) = uint8_t(bytes - 2);  // mode data length
+            G<uint8_t>(data + 8) = kAuthenticationPage;
+            G<uint8_t>(data + 9) = uint8_t(bytes - 10);
+            G<uint8_t>(data + 10) = 1;  // PartitionArea: the game partition
+            G<uint8_t>(data + 11) = 1;  // CDFValid
+            G<uint8_t>(data + 12) = 1;  // Authentication
+        } else {
+            LOG_FIRST(8, "NtDeviceIoControlFile: SCSI command %02X not answered", G<uint8_t>(spt + 0x1C));
+        }
+    }
     auto f = FileFromHandle(a[0]);
     if (code == 0x74004 && out_len >= 0x20 && f && f->partition) {  // IOCTL_DISK_GET_PARTITION_INFO
         // the retail layout: X, Y and Z (3 to 5) are the 750 MB caches, C (2) 500 MB, E (1) the data partition
