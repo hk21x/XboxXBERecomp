@@ -83,6 +83,10 @@ X86Func* Find(uint32_t guest);
 #define SYM_DirectSoundUseLightHRTF FFFFFF0B
 #define HAS_DirectSoundUseLightHRTF 0
 #endif
+#ifndef SYM_CDirectSoundStream_SetDopplerFactor
+#define SYM_CDirectSoundStream_SetDopplerFactor FFFFFF10
+#define HAS_CDirectSoundStream_SetDopplerFactor 0
+#endif
 #ifndef SYM_IDirectSoundStream_SetEG
 #define SYM_IDirectSoundStream_SetEG FFFFFF0C
 #define HAS_IDirectSoundStream_SetEG 0
@@ -459,7 +463,8 @@ static void AuditExports() {
         SYM(CDirectSoundStream_SetFrequency), SYM(CDirectSoundStream_SetFilter), SYM(CDirectSoundStream_SetHeadroom),
         SYM(CDirectSoundStream_SetMixBinVolumes), SYM(CDirectSoundStream_SetMixBins), SYM(CDirectSoundStream_SetMaxDistance),
         SYM(CDirectSoundStream_SetMinDistance), SYM(CDirectSoundStream_SetPosition), SYM(CDirectSoundStream_SetVelocity),
-        SYM(CDirectSoundStream_SetI3DL2Source), SYM(IDirectSoundStream_SetEG)};
+        SYM(CDirectSoundStream_SetI3DL2Source), SYM(CDirectSoundStream_SetDopplerFactor), SYM(IDirectSoundStream_SetEG),
+        SYM(DirectSoundGetSampleTime)};
     std::string left;
     // the library's own section: the WMA decoder shares the export ids and touches no DSOUND object
     uint32_t lo = 0, hi = 0;
@@ -920,6 +925,8 @@ STREAM(SetMinDistance, 3) {
     v.min_dist = F32(a[1]);
     return 0;
 }
+// accepted, the mixer has no Doppler: the library's own writes through the voice it never made
+STREAM(SetDopplerFactor, 3) { return 0; }
 STREAM(SetPosition, 5) {
     for (int i = 0; i < 3; i++) v.p[i] = F32(a[1 + i]);
     return 0;
