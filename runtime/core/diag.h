@@ -1,4 +1,6 @@
 #pragma once
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 
@@ -22,6 +24,24 @@ inline const std::filesystem::path& CaptureDir() {
         return v ? std::filesystem::path(v) : std::filesystem::path();
     }();
     return dir;
+}
+
+// XBE_VSC="56 54": vertex shader constants (D3D numbering, -96..95) whose writes are logged, the first 200
+inline bool WatchedConstant(int d3d_register) {
+    static const std::array<uint64_t, 3> mask = [] {
+        std::array<uint64_t, 3> m{};
+        const char* v = std::getenv("XBE_VSC");
+        for (char* p = const_cast<char*>(v); p && *p;) {
+            char* e;
+            long r = std::strtol(p, &e, 10) + 96;
+            if (e == p) break;
+            if (r >= 0 && r < 192) m[r / 64] |= 1ull << (r % 64);
+            p = e;
+        }
+        return m;
+    }();
+    int r = d3d_register + 96;
+    return r >= 0 && r < 192 && (mask[r / 64] >> (r % 64) & 1);
 }
 
 }  // namespace diag

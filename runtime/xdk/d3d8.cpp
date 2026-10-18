@@ -44,6 +44,10 @@ using namespace kernel;
 #define SYM_D3DDevice_Reset FFFFFE04
 #define HAS_D3DDevice_Reset 0
 #endif
+#ifndef SYM_D3DDevice_SetRenderTargetFast
+#define SYM_D3DDevice_SetRenderTargetFast FFFFFE06
+#define HAS_D3DDevice_SetRenderTargetFast 0
+#endif
 #ifndef SYM_D3DDevice_SetDepthClipPlanes
 #define SYM_D3DDevice_SetDepthClipPlanes FFFFFE05
 #define HAS_D3DDevice_SetDepthClipPlanes 0
@@ -525,9 +529,8 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
 
 // targets and presentation
 
-HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    uint32_t rt = a[0] ? a[0] : Dev(kDevRenderTarget), zs = a[1];
+// the device's targets and the renderer's, references moved from the old ones
+void SetTargets(X86Context& ctx, uint32_t rt, uint32_t zs) {
     AddRef(ctx, rt);
     uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
     SetDev(kDevRenderTarget, rt);
@@ -537,10 +540,25 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     Release(ctx, old_zs);
     g_state.rt = SurfaceOf(rt);
     g_state.zs = SurfaceOf(zs);
+}
+
+HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    SetTargets(ctx, a[0] ? a[0] : Dev(kDevRenderTarget), a[1]);
     // SetRenderTarget resets the viewport to the whole target
     uint32_t w, h;
     gpu::SurfaceSize(g_state.rt, w, h);
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    UpdateViewportConstants();
+    return 0;
+}
+
+// the same without the viewport reset; flags (D3DSRTF_*) only steer the library's own push buffer writes. The
+// library's version wrote the surfaces to the hardware directly: draws went on into the previous target (a title
+// drawing a cube map's six faces through it filled face 0 six times).
+HLE_STDCALL(D3DDevice_SetRenderTargetFast, 3) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    SetTargets(ctx, a[0] ? a[0] : Dev(kDevRenderTarget), a[1]);
     UpdateViewportConstants();
     return 0;
 }
@@ -917,6 +935,15 @@ HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
     return 0;
 }
 
+// XBE_VSC: writes to the watched constants, with the caller (ret 0: a raw push buffer write)
+void WatchConstants(const char* how, uint32_t first, uint32_t count, uint32_t ret) {
+    for (uint32_t r = first; r < first + count && r < 192; r++) {
+        if (!diag::WatchedConstant(int(r) - 96)) continue;
+        const auto& v = g_state.vsc[r];
+        LOG_FIRST(200, "d3d: c%d = %g %g %g %g by %s from %08X", int(r) - 96, v[0], v[1], v[2], v[3], how, ret);
+    }
+}
+
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t h = a[0];
@@ -927,8 +954,10 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
         if (it != g_vs.end()) {
             g_state.vs = it->second;
             // constants declared with the shader load when it is selected
-            for (auto& [reg, v] : it->second->constants)
+            for (auto& [reg, v] : it->second->constants) {
                 if (reg < 192) g_state.vsc[reg] = v;
+                WatchConstants("SetVertexShader declaration", reg, 1, R32(ctx.esp));
+            }
         } else {
             LOG_FIRST(8, "d3d: SetVertexShader with unknown handle %08X", h);
         }
@@ -939,24 +968,28 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1Fast, 0) {
     uint32_t reg = a[0];
     if (reg < 192) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
+    WatchConstants("SetVertexShaderConstant1Fast", reg, 1, R32(ctx.esp));
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1, 0) {
     uint32_t reg = a[0];
     if (reg < 192) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
+    WatchConstants("SetVertexShaderConstant1", reg, 1, R32(ctx.esp));
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant4, 0) {
     uint32_t reg = a[0], src = a[1];
     for (uint32_t i = 0; i < 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
+    WatchConstants("SetVertexShaderConstant4", reg, 4, R32(ctx.esp));
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
     uint32_t reg = a[0], src = a[1], dwords = a[2];
     for (uint32_t i = 0; i < dwords / 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
+    WatchConstants("SetVertexShaderConstantNotInlineFast", reg, dwords / 4, R32(ctx.esp));
     return 0;
 }
 
@@ -1143,6 +1176,7 @@ bool ApplyConstantMethod(uint32_t m, uint32_t v) {
     if (m < gpu::kMConstant || m >= gpu::kMConstantEnd) return false;
     uint32_t slot = g_constant_load + (m - gpu::kMConstant) / 16;
     if (slot < g_state.vsc.size()) std::memcpy(&g_state.vsc[slot][m / 4 & 3], &v, 4);
+    if ((m / 4 & 3) == 3) WatchConstants("push buffer", slot, 1, 0);
     return true;
 }
 void EndConstantGroup(uint32_t method, uint32_t n) {
