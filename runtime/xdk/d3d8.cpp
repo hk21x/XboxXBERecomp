@@ -1254,29 +1254,25 @@ void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* 
     static uint32_t last_frame = ~0u, draw = 0;
     uint32_t frame = g_presents.load();
     if (!f) {
-        // F4, or a file named framelog beside the exe (looked for every 30 frames), starts it; once
-        if (first == ~0u) return;
+        // F4, or a file named framelog beside the exe (looked for every 30 frames), starts it; again for the next
+        // file (framelog.txt, framelog_2.txt, ...)
         if (!diag::g_framelog_request && frame % 30 == 0 && frame != last_frame) {
             last_frame = frame;
             std::error_code ec;
             if (std::filesystem::remove(app::ExeDir() / "framelog", ec)) diag::g_framelog_request = true;
         }
         if (!diag::g_framelog_request.exchange(false)) return;
-        f = std::fopen((app::ExeDir() / "logs" / "framelog.txt").string().c_str(), "w");
-        if (!f) {
-            first = ~0u;
-            return;
-        }
+        static int run = 0;
+        std::string name = ++run == 1 ? "framelog.txt" : "framelog_" + std::to_string(run) + ".txt";
+        f = std::fopen((app::ExeDir() / "logs" / name).string().c_str(), "w");
+        if (!f) return;
         first = frame;
-        LOGR("d3d: XBE_FRAMELOG writing %ld frames to logs/framelog.txt", frames);
+        LOGR("d3d: XBE_FRAMELOG writing %ld frames to logs/%s", frames, name.c_str());
     }
     if (frame - first >= uint32_t(frames)) {
-        if (first != ~0u) {
-            std::fclose(f);
-            f = nullptr;
-            first = ~0u;
-            LOGR("d3d: XBE_FRAMELOG done");
-        }
+        std::fclose(f);
+        f = nullptr;
+        LOGR("d3d: XBE_FRAMELOG done");
         return;
     }
     if (frame != last_frame) {
