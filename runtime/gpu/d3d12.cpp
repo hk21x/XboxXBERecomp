@@ -2542,6 +2542,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         }
     }
     if (DepthCopy(s)) return;
+    if (diag::SkippedDraw(s.vs_handle)) {
+        static bool said = false;
+        if (!said) LOGR("d3d12: XBE_DRAW_SKIP leaves out vertex shader %08X", s.vs_handle);
+        said = true;
+        return;
+    }
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
     Assembled& a = asm_;

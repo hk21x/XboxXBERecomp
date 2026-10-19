@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <vector>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -71,6 +73,27 @@ inline const DrawTest& DrawTests() {
         return d;
     }();
     return t;
+}
+
+// XBE_DRAW_SKIP="B0101C41 B0101931": an experiment, the draws with those vertex shader handles left out (to find
+// which layer of a scene flickers)
+inline bool SkippedDraw(uint32_t vs) {
+    static const std::vector<uint32_t> skip = [] {
+        std::vector<uint32_t> v;
+        if (const char* e = std::getenv("XBE_DRAW_SKIP"))
+            for (const char* p = e; *p;) {
+                char* end = nullptr;
+                unsigned long h = std::strtoul(p, &end, 16);
+                if (end == p) {
+                    p++;
+                    continue;
+                }
+                v.push_back(uint32_t(h));
+                p = end;
+            }
+        return v;
+    }();
+    return !skip.empty() && std::find(skip.begin(), skip.end(), vs) != skip.end();
 }
 
 // XBE_VSC="56 54": vertex shader constants (D3D numbering, -96..95) whose writes are logged: each distinct value
