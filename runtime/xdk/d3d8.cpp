@@ -1316,7 +1316,22 @@ void ApplyVisibilityMethod(uint32_t m, uint32_t v) {
     if (!g_backend) return;
     if (m == gpu::kMClearReport) g_backend->ClearReport();
     if (m == gpu::kMGetReport) {
-        g_backend->GetReport(mem::VirtualFromPhysical(v & kReportAddressMask));
+        // XBE_VISIBLE_ALL=1 (experiment): every test written at once as visible (time, count, then 0 for done)
+        static const bool all = [] {
+            const char* e = std::getenv("XBE_VISIBLE_ALL");
+            bool on = e && *e == '1';
+            if (on) LOGR("d3d: XBE_VISIBLE_ALL=1, every visibility test reports visible at once");
+            return on;
+        }();
+        uint32_t report = mem::VirtualFromPhysical(v & kReportAddressMask);
+        if (all) {
+            W32(report, 0);
+            W32(report + 4, 0);
+            W32(report + 8, 0x100000);
+            W32(report + 12, 0);
+            return;
+        }
+        g_backend->GetReport(report);
         g_report_asked = true;
     }
 }
