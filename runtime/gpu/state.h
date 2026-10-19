@@ -196,6 +196,7 @@ struct State {
 struct DrawAdjust {
     bool depth_test = true;
     bool skip = false;
+    int32_t depth_bias = 0;  // added to the polygon offset, in 24 bit depth units; negative draws nearer
 };
 using DrawFilter = void (*)(const State&, DrawAdjust&);
 inline DrawFilter g_draw_filter = nullptr;

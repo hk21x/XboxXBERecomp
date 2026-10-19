@@ -977,6 +977,9 @@ const Probes& Watch() {
 
 uint32_t g_draws = 0;  // this frame's
 FILE* g_drawlog = nullptr;  // REF_DRAWLOG: this frame's draw list
+// REF_ZOWNER=handle: for that vertex shader's failed depth tests, which shader wrote the depth that won, by miss
+std::map<uint64_t, uint32_t> g_zowner;                      // depth target data << 32 | y << 16 | x -> vertex shader
+std::map<uint32_t, std::array<uint32_t, 8>> g_zowner_miss;  // winner -> misses by up to 256, 1k, 4k, 16k, 64k, 256k, 1M, more
 
 // what one draw changed, for REF_DRAWLOG
 struct DrawStats {
@@ -1012,8 +1015,14 @@ struct Screen {
 void BeginFrame() {
     g_images.clear();
     g_draws = 0;
-    if (g_drawlog) std::fclose(g_drawlog);
+    if (g_drawlog) {
+        for (auto& [vs, m] : g_zowner_miss)
+            std::fprintf(g_drawlog, "zowner %08X misses %u %u %u %u %u %u %u %u\n", vs, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+        std::fclose(g_drawlog);
+    }
     g_drawlog = nullptr;
+    g_zowner.clear();
+    g_zowner_miss.clear();
     if (std::getenv("REF_DRAWLOG")) {
         char name[64];
         std::snprintf(name, sizeof name, "cap/drawlog_%05llu.txt", (unsigned long long)harness::g_frames.load());
@@ -1105,6 +1114,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                              st.zmiss[3], st.zmiss[4], st.zmiss[5]);
             if (st.x1 >= 0) std::fprintf(g_drawlog, " box %d,%d-%d,%d", st.x0, st.y0, st.x1, st.y1);
             std::fprintf(g_drawlog, " %s", what.c_str());
+            TextureDesc zd;
+            if (s.zs.header && DescribeSurface(s.zs, zd)) std::fprintf(g_drawlog, " zsfmt %X", zd.format);
             // c-96 to c95 hashed, and c0 to c3 and c14's x (a title's matrices are usually there)
             uint64_t h = 1469598103934665603ull;
             for (const auto& r : s.vsc)
@@ -1253,7 +1264,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     DrawAdjust adjust;
     if (g_draw_filter) g_draw_filter(s, adjust);
     if (adjust.skip) return;
-    if (!adjust.depth_test) ztest = zwrite = false;
+    if (!adjust.depth_test && !std::getenv("REF_ZOWNER")) ztest = zwrite = false;  // REF_ZOWNER measures with it
+    static const bool track_owner = std::getenv("REF_ZOWNER") != nullptr;
     uint32_t zfunc = simple(kMZFunc);
     bool stencil = zs.ok && s.rs[kRsStencilEnable];
     uint32_t sfunc = simple(kMStencilFunc), sref = simple(kMStencilRef) & 0xFF, smask = simple(kMStencilMask) & 0xFF,
@@ -1355,7 +1367,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     if (b0 < 0 || b1 < 0 || b2 < 0) continue;
                     float z = b0 * p0.z + b1 * p1.z + b2 * p2.z;
                     if (z < 0 || z > s.zscale) continue;
-                    z = std::clamp(z + zoff, 0.0f, s.zscale);
+                    z = std::clamp(z + zoff + float(adjust.depth_bias) * s.zscale / 16777215.0f, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
                     Vec attr[kAttrs];
                     for (int a = 0; a < kAttrs; a++)
@@ -1385,6 +1397,14 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     static const uint32_t zeps = uint32_t(std::atoi(std::getenv("REF_ZEPS") ? std::getenv("REF_ZEPS") : "0"));
                     bool near_equal = zeps && zfunc == 0x203 && zi > oz && zi - oz <= zeps;
                     if (ztest && !near_equal && !Passes(zfunc, zi, oz)) {
+                        static const uint32_t zowner_vs = uint32_t(std::strtoul(std::getenv("REF_ZOWNER") ? std::getenv("REF_ZOWNER") : "0", nullptr, 16));
+                        if (zowner_vs && s.vs_handle == zowner_vs && zi > oz) {
+                            uint32_t d = zi - oz;
+                            int b = 0;
+                            for (uint32_t lim = 256; b < 7 && d > lim; lim *= 4) b++;
+                            auto it = g_zowner.find(uint64_t(zs.data) << 32 | uint32_t(y) << 16 | uint32_t(x));
+                            g_zowner_miss[it == g_zowner.end() ? 0 : it->second][b]++;
+                        }
                         if (zfunc == 0x203 && zi > oz) {
                             uint32_t d = zi - oz, b = d <= 16 ? 0 : d <= 256 ? 1 : d <= 4096 ? 2 : d <= 65536 ? 3 : d <= 1048576 ? 4 : 5;
                             st.zfail++, st.zmiss[b]++;
@@ -1394,6 +1414,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                         continue;
                     }
                     if (zs.ok && (zwrite || stencil)) zs.StoreDepth(uint32_t(x), uint32_t(y), zwrite ? zi : oz, stencil ? stencil_op(op_pass) : os);
+                    if (zs.ok && zwrite && g_drawlog && track_owner) g_zowner[uint64_t(zs.data) << 32 | uint32_t(y) << 16 | uint32_t(x)] = s.vs_handle;
                     if (stencil && stencil_op(op_pass) != os) st.stencil++, st.At(x, y);
                     if (!rt.ok || !cmask) continue;
                     for (int j = 0; j < 4; j++) col[j] = Sat(col[j]);

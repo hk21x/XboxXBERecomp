@@ -2584,6 +2584,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (tested && test.cull) k.cull = 0;
     if (tested && test.depth) k.zen = k.zwrite = 0;
     if (!adjust.depth_test) k.zen = k.zwrite = 0;
+    k.zbias += adjust.depth_bias;
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
