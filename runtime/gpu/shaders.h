@@ -32,6 +32,7 @@ struct PixelKey {
     uint32_t flat = 0, two_sided = 0;
     uint32_t proj = 0;       // fixed function: bit per stage sampled at coordinates divided by w
     uint32_t quad = 0;       // a screen quad: QuadHlsl
+    uint32_t wbuf = 0;       // D3DZB_USEW: the depth written is the vertex w, linear on screen (DrawConstants::wdepth)
     bool operator==(const PixelKey& o) const;
 };
 
@@ -96,6 +97,7 @@ struct DrawConstants {
     float mat[5][4];     // material diffuse, ambient, specular, emissive, power
     float amb[4];        // D3DRS_AMBIENT
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
+    float wdepth[4];     // PixelKey::wbuf: polygon offset units, slope factor (per host pixel), 1 / depth buffer range, 0
 };
 
 }  // namespace gpu

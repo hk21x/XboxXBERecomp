@@ -32,6 +32,7 @@ struct VOut {
     float4 tc2 : TEXCOORD2;
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
+    noperspective float wlin : TEXCOORD6;
 };
 cbuffer VC : register(b0) { float4 c[192]; };
 cbuffer DC : register(b1) {
@@ -53,6 +54,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 mat[5];
     float4 amb;
     float4 lt[56];
+    float4 wdepth;
 };
 )";
 
@@ -240,6 +242,7 @@ const char* kVsEpilogue = R"(
     o.tc2 = oT2;
     o.tc3 = oT3;
     o.fogamt = fogfactor(oFog.x);
+    o.wlin = p.w;
     return o;
 }
 )";
@@ -788,6 +791,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     o.tc2 = oT2;
     o.tc3 = oT3;
     o.fogamt = fogfactor(abs(cp.z));
+    o.wlin = cp.w;
     return o;
 }
 )";
@@ -802,7 +806,15 @@ std::string PixelHlsl(const PixelKey& k) {
         const char* type = t.shadow ? "Texture2D<float>" : t.kind == kTex3D ? "Texture3D" : t.kind == kTexCube ? "TextureCube" : "Texture2D";
         s += F("%s tex%d : register(t%d);\n%s smp%d : register(s%d);\n", type, i, i, t.shadow ? "SamplerComparisonState" : "SamplerState", i, i);
     }
-    s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
+    if (k.wbuf) {
+        // the NV2A's Z_PERSPECTIVE: w interpolated linearly on the screen, the polygon offset in its units and its
+        // slope, stored whole (after xemu)
+        s += "float4 main(VOut i, bool front : SV_IsFrontFace, out float depth : SV_Depth) : SV_Target {\n";
+        s += "    float wz = i.wlin + wdepth.x + wdepth.y * max(abs(ddx(i.wlin)), abs(ddy(i.wlin)));\n";
+        s += "    depth = saturate(floor(max(wz, 0)) * wdepth.z);\n";
+    } else {
+        s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
+    }
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
     s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";

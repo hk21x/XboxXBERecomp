@@ -674,6 +674,7 @@ private:
     Surface cap_zs_;     // the depth target drawn with, saved when the frame moves on from it
     uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
     bool cap_vs_before_ = false;  // XBE_CAPTURE_DRAWS=vs: the target saved before the first such draw
+    std::unordered_map<uint32_t, uint32_t> reloads_;  // targets reloaded from guest memory, for the log
     uint32_t cap_frame_ = 0, cap_frames_ = 1;  // XBE_CAPTURE_FRAMES=N: N frames in a row, this one's number
     char cap_stamp_[16] = {};
     std::unordered_set<uint32_t> cap_seen_;
@@ -1122,7 +1123,11 @@ bool D3D12Backend::BindTargets(const State& s) {
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
     if (rt) {
-        if (LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt);
+        if (LatchCpuWrite(*rt)) {
+            if (++reloads_[rt->data] <= 3) LOGR("d3d12: target %08X %ux%u reloaded from guest memory before drawing (frame %llu)", rt->data,
+                               rt->gw, rt->gh, (unsigned long long)presents_);
+            UploadTarget(*rt, s.rt);
+        }
         Transition(rt->res.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rt->drawn = true;
     }
@@ -1594,10 +1599,22 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     if (&t == draw_ds_) return nullptr;
     bool feedback = &t == draw_rt_;
     stages.rt[stage] = true;
+    // XBE_NO_TARGET_UPLOAD=1 (experiment): a sampled target keeps what the GPU drew even when its guest memory changed
+    static const bool no_upload = [] {
+        const char* e = std::getenv("XBE_NO_TARGET_UPLOAD");
+        bool on = e && *e == '1';
+        if (on) LOGR("d3d12: XBE_NO_TARGET_UPLOAD=1, sampled targets are not reloaded from guest memory");
+        return on;
+    }();
     if (!t.depth && LatchCpuWrite(t)) {
-        Surface su;
-        su.header = s.textures[size_t(stage)];
-        UploadTarget(t, su);
+        // logged in release builds, the first three of each target: a reload replaces what the GPU drew
+        if (++reloads_[t.data] <= 3) LOGR("d3d12: sampled target %08X %ux%u reloaded from guest memory (frame %llu)%s", t.data, t.gw, t.gh,
+                           (unsigned long long)presents_, no_upload ? ", skipped" : "");
+        if (!no_upload) {
+            Surface su;
+            su.header = s.textures[size_t(stage)];
+            UploadTarget(t, su);
+        }
     }
     info.kind = kTex2D;
     // a pass shrinking it averages each tap over a console texel, else upscaled taps skip texels and ghost
@@ -2574,6 +2591,14 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     bool tested = test.vs && s.vs_handle == test.vs;
     if (tested && test.alphakill) pk.alphakill = 0;
     pk.quad = sh.quad;
+    // XBE_WBUFFER=1 (experiment): D3DZB_USEW draws write w as their depth, as the console does
+    static const bool wbuffer = [] {
+        const char* e = std::getenv("XBE_WBUFFER");
+        bool on = e && *e == '1';
+        if (on) LOGR("d3d12: XBE_WBUFFER=1, W-buffered draws write w as their depth");
+        return on;
+    }();
+    pk.wbuf = wbuffer && s.rs[kRsZEnable] == 2 && bound_ds_ ? 1 : 0;
     sh.pkey = Hash(&pk, sizeof(pk));
     EnsurePixelShader(pk, sh);
     if (!sh.vs_code || !sh.ps_code) return;
@@ -2585,6 +2610,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (tested && test.depth) k.zen = k.zwrite = 0;
     if (!adjust.depth_test) k.zen = k.zwrite = 0;
     k.zbias += adjust.depth_bias;
+    // W-buffered: the pixel shader adds the polygon offset to w, the rasterizer's bias would act on the unused z
+    float wdepth[4] = {float(k.zbias), k.zslope, 1.0f / 16777216.0f, 0};
+    if (pk.wbuf) k.zbias = 0, k.zslope = 0;
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
@@ -2594,6 +2622,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
+    std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     UploadConstants(s, sh, k, stages, size, c);
 
     if (cap_) {
