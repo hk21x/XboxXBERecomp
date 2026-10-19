@@ -2009,6 +2009,15 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
     if (a.topology == Topology::Triangles && SimpleState(s, kMSolidOffsetEnable)) {
         k.zbias = int32_t(std::lround(Bits(SimpleState(s, kMDepthOffset)) * kDepth24Max / s.zscale));
         k.zslope = Bits(SimpleState(s, kMSlopeScale)) * (bound_ds_ ? float(bound_ds_->w) / bound_ds_->gw : 1.0f);
+        // XBE_ZBIAS=N (experiment): both parts of every polygon offset times N
+        static const float zmul = [] {
+            const char* e = std::getenv("XBE_ZBIAS");
+            float v = e && *e ? float(std::atof(e)) : 1.0f;
+            if (v != 1.0f) LOGR("d3d12: XBE_ZBIAS=%g, polygon offsets scaled", v);
+            return v;
+        }();
+        k.zbias = int32_t(std::lround(k.zbias * zmul));
+        k.zslope *= zmul;
     }
 }
 
@@ -2892,6 +2901,9 @@ void D3D12Backend::StartCapture() {
         return;
     }
     LOGR("d3d12: capturing a frame into %s", cap_dir_.string().c_str());
+    // the targets as they stand: guest size against host size shows the render scale each got
+    for (auto& [key, t] : targets_)
+        fprintf(cap_, "target %08X %s guest %ux%u host %ux%u\n", t.data, t.depth ? "depth" : "colour", t.gw, t.gh, t.w, t.h);
     cap_i_ = cap_rt_ = cap_vs_ = 0;
     cap_vs_before_ = false;
     cap_zs_ = {};

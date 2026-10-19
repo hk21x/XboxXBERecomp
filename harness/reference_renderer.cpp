@@ -1101,6 +1101,25 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                          count, s.rt.data, s.zs.data, st.colour, st.stencil);
             if (st.x1 >= 0) std::fprintf(g_drawlog, " box %d,%d-%d,%d", st.x0, st.y0, st.x1, st.y1);
             std::fprintf(g_drawlog, " %s", what.c_str());
+            // c-96 to c95 hashed, and c0 to c3 and c14's x (a title's matrices are usually there)
+            uint64_t h = 1469598103934665603ull;
+            for (const auto& r : s.vsc)
+                for (float v : r) {
+                    uint32_t b;
+                    std::memcpy(&b, &v, 4);
+                    h = (h ^ b) * 1099511628211ull;
+                }
+            std::fprintf(g_drawlog, " vsc %016llX c0 %g %g %g %g c3w %g c14x %g", (unsigned long long)h, s.vsc[96][0],
+                         s.vsc[96][1], s.vsc[96][2], s.vsc[96][3], s.vsc[99][3], s.vsc[110][0]);
+            // REF_DRAWLOG=2: the constants changed since the frame's previous draw
+            static const bool changes = std::getenv("REF_DRAWLOG") && std::atoi(std::getenv("REF_DRAWLOG")) == 2;
+            static std::array<std::array<float, 4>, 192> prev{};
+            if (changes) {
+                for (int r = 0; r < 192; r++)
+                    if (s.vsc[r] != prev[r])
+                        std::fprintf(g_drawlog, " c%d=%g,%g,%g,%g", r - 96, s.vsc[r][0], s.vsc[r][1], s.vsc[r][2], s.vsc[r][3]);
+                prev = s.vsc;
+            }
             for (int t = 0; t < 4; t++) {
                 TextureDesc d;
                 if (s.textures[t] && Describe(s.textures[t], d))
@@ -1342,7 +1361,10 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                         if (stencil_op(op_fail) != os) st.stencil++, st.At(x, y);
                         continue;
                     }
-                    if (ztest && !Passes(zfunc, zi, oz)) {
+                    // REF_ZEPS=N (experiment): depth within N units of the stored one passes a less or equal test
+                    static const uint32_t zeps = uint32_t(std::atoi(std::getenv("REF_ZEPS") ? std::getenv("REF_ZEPS") : "0"));
+                    bool near_equal = zeps && zfunc == 0x203 && zi > oz && zi - oz <= zeps;
+                    if (ztest && !near_equal && !Passes(zfunc, zi, oz)) {
                         if (stencil) zs.StoreDepth(uint32_t(x), uint32_t(y), oz, stencil_op(op_zfail));
                         if (stencil && stencil_op(op_zfail) != os) st.stencil++, st.At(x, y);
                         continue;
