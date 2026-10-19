@@ -1231,12 +1231,104 @@ HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
     return 0;
 }
 
+
+// XBE_FRAMELOG=N: the next N frames' draws into logs/framelog.txt at full speed, one line each: frame, draw, shader,
+// primitive, count, texture data, and hashes of the vertex bytes the draw reads, its indices, each texture's level 0
+// (up to 64 KB) and the stage, pixel constant and deferred render states. Static scenery hashes the same every frame:
+// what alternates between frames shows in which input it alternates.
+namespace {
+uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h = 1469598103934665603ull) {
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    static const long frames = [] {
+        const char* e = std::getenv("XBE_FRAMELOG");
+        return e && *e ? std::atol(e) : 0L;
+    }();
+    if (frames <= 0 || !count) return;
+    static FILE* f = nullptr;
+    static uint32_t first = 0, last_frame = ~0u, draw = 0;
+    uint32_t frame = g_presents.load();
+    if (!f) {
+        // F4, or a file named framelog beside the exe (looked for every 30 frames), starts it; once
+        if (first == ~0u) return;
+        if (!diag::g_framelog_request && frame % 30 == 0 && frame != last_frame) {
+            last_frame = frame;
+            std::error_code ec;
+            if (std::filesystem::remove(app::ExeDir() / "framelog", ec)) diag::g_framelog_request = true;
+        }
+        if (!diag::g_framelog_request.exchange(false)) return;
+        f = std::fopen((app::ExeDir() / "logs" / "framelog.txt").string().c_str(), "w");
+        if (!f) {
+            first = ~0u;
+            return;
+        }
+        first = frame;
+        LOGR("d3d: XBE_FRAMELOG writing %ld frames to logs/framelog.txt", frames);
+    }
+    if (frame - first >= uint32_t(frames)) {
+        if (first != ~0u) {
+            std::fclose(f);
+            f = nullptr;
+            first = ~0u;
+            LOGR("d3d: XBE_FRAMELOG done");
+        }
+        return;
+    }
+    if (frame != last_frame) {
+        last_frame = frame;
+        draw = 0;
+    }
+    // the vertex range read
+    uint32_t lo = start, hi = start + count - 1;
+    uint64_t ih = 0;
+    if (indices) {
+        lo = 0xFFFFFFFF;
+        hi = 0;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t v = uint32_t(indices[i * 2]) | uint32_t(indices[i * 2 + 1]) << 8;
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+        lo += g_state.base_vertex;
+        hi += g_state.base_vertex;
+        ih = Fnv(indices, size_t(count) * 2);
+    }
+    const auto& streams = g_state.input_active ? g_state.input_streams : g_state.streams;
+    uint64_t vh = 1469598103934665603ull;
+    for (const auto& st : streams) {
+        if (!st.vb || !st.stride || hi - lo > 65535) continue;
+        uint32_t data = mem::VirtualFromPhysical(R32(st.vb + 4));
+        if (!mem::IsCommitted(data + lo * st.stride) || !mem::IsCommitted(data + (hi + 1) * st.stride - 1)) continue;
+        vh = Fnv(static_cast<const uint8_t*>(HostPtr(data + lo * st.stride)), size_t(hi - lo + 1) * st.stride, vh);
+    }
+    uint64_t th[4] = {};
+    uint32_t td[4] = {};
+    for (int i = 0; i < 4; i++) {
+        gpu::TextureDesc d;
+        if (!g_state.textures[i] || !gpu::Describe(g_state.textures[i], d)) continue;
+        td[i] = d.data;
+        uint32_t n = std::min<uint32_t>(gpu::LevelSize(d, 0), 65536);
+        if (n && mem::IsCommitted(d.data) && mem::IsCommitted(d.data + n - 1)) th[i] = Fnv(static_cast<const uint8_t*>(HostPtr(d.data)), n);
+    }
+    uint64_t sh = Fnv(reinterpret_cast<const uint8_t*>(g_state.tss.data()), sizeof(g_state.tss));
+    sh = Fnv(reinterpret_cast<const uint8_t*>(g_state.psc.data()), sizeof(g_state.psc), sh);
+    sh = Fnv(reinterpret_cast<const uint8_t*>(&g_state.rs[gpu::kRsDeferredFirst]), (gpu::kRsComplexFirst - gpu::kRsDeferredFirst) * 4, sh);
+    std::fprintf(f, "%u %u vs %08X prim %u n %u rt %08X tex %08X %08X %08X %08X vb %016llX ib %016llX th %016llX %016llX %016llX %016llX st %016llX\n",
+                 frame - first, draw++, g_state.vs_handle, prim, count, g_state.rt.data, td[0], td[1], td[2], td[3],
+                 (unsigned long long)vh, (unsigned long long)ih, (unsigned long long)th[0], (unsigned long long)th[1],
+                 (unsigned long long)th[2], (unsigned long long)th[3], (unsigned long long)sh);
+}
+}  // namespace
+
 // drawing
 
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
+    FrameLogDraw(a[0], a[1], a[2], nullptr);
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
     return 0;
 }
@@ -1246,6 +1338,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     Walk(Dev(kDevPush));
     SyncDeferred();
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
+    FrameLogDraw(a[0], 0, a[1], indices);
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
     return 0;
 }

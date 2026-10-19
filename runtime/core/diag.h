@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <algorithm>
 #include <vector>
 #include <array>
@@ -10,6 +11,9 @@
 
 // diagnostics switched on by environment variables, read once
 namespace diag {
+
+// XBE_FRAMELOG: F4 (or a file named framelog beside the exe) starts the frame log
+inline std::atomic<bool> g_framelog_request{false};
 
 // XBE_PERF set: perf log lines once a second and the read-backs named
 inline bool Perf() {

@@ -130,6 +130,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_KEYDOWN:
             if (wp == VK_F3) DumpThreads();
+            if (wp == VK_F4) {
+                LOGR("F4: frame log requested");
+                diag::g_framelog_request = true;
+            }
             return 0;
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE) {
