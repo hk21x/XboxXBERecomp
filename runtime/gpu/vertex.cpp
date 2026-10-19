@@ -1,6 +1,7 @@
 #include "gpu/vertex.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #include <dxgiformat.h>
@@ -415,7 +416,11 @@ bool AssembleConverted(const State& s, const Inputs& inputs, const DrawRange& d,
 
 }  // namespace
 
-bool g_raw_vertices = XBE_RAW_VERTICES;
+// the environment variable XBE_RAW_VERTICES=0 or 1 overrides the build's choice
+bool g_raw_vertices = [] {
+    const char* e = std::getenv("XBE_RAW_VERTICES");
+    return e && *e ? *e != '0' : bool(XBE_RAW_VERTICES);
+}();
 
 void FvfInputs(uint32_t fvf, VertexShader& vs) {
     vs.inputs.fill({});

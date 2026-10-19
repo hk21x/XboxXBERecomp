@@ -40,7 +40,10 @@ Environment:
   menus at 60 and its races at 30 keeps one clock. `renderer: frame` log lines carry the count.
 - `cmd` file in the run folder: `buttons [vblanks held]`, pressed once when read
 - `REF=N` every Nth frame drawn by the reference renderer into `cap/ref_<frame>.tga`
-- `snap` file in the run folder: the next two frames drawn into `snap_1.tga` and `snap_2.tga`
+- `snap` file in the run folder: the next two frames drawn into `snap_1.tga` and `snap_2.tga` (`SNAP_FRAMES=N`: N
+  frames, `snap_1.tga` to `snap_N.tga`)
+- `REF_DRAWLOG` each drawn frame's draws in `cap/drawlog_<frame>.txt`: pixels and stencil values written, their box,
+  depth/stencil/blend state, textures; diff two frames' lists to find what flickers
 - `CAP=N` every Nth frame's draws listed in `cap/draws_<frame>.txt`
 - `AUDIT=N` every Nth frame's draws: each shader the D3D12 backend would generate into `cap/hlsl/`, each texture
   sampled into `cap/textures.txt` with how far each mip level is from its parent shrunk (`audit.cpp`)

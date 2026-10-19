@@ -2,7 +2,9 @@
 // REF=N: every Nth frame drawn on the CPU into guest memory and saved as cap/ref_<frame>.tga
 // CAP=N: every Nth frame's draws listed in cap/draws_<frame>.txt
 // AUDIT=N: every Nth frame's shaders and textures as a GPU backend would get them, see audit.cpp
-// snap in the run folder: the next two frames drawn and saved as snap_1.tga and snap_2.tga, then snap is removed
+// snap in the run folder: the next two frames (SNAP_FRAMES) drawn and saved as snap_1.tga, snap_2.tga ..., then snap
+// is removed
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -50,15 +52,17 @@ public:
         if (draws_ == last_draws_) empty_++;
         last_draws_ = draws_;
         if (drawing_ && !snap_) reference::WriteTga(front, File("cap/ref_%05llu.tga", frames_).c_str());
-        // snap asks for the next two frames drawn
+        // snap asks for the next frames drawn: two, or SNAP_FRAMES
         std::string snap = (app::ExeDir() / "snap").string();
-        if (snap_ == 2) {
-            reference::WriteTga(front, (app::ExeDir() / "snap_2.tga").string().c_str());
-            std::remove(snap.c_str());
-            snap_ = 0;
-        } else if (snap_ == 1) {
-            reference::WriteTga(front, (app::ExeDir() / "snap_1.tga").string().c_str());
-            snap_ = 2;
+        static const long snaps = std::max(2L, harness::Env("SNAP_FRAMES", 2));
+        if (snap_) {
+            std::string name = "snap_" + std::to_string(snap_) + ".tga";
+            reference::WriteTga(front, (app::ExeDir() / name).string().c_str());
+            if (snap_ < snaps) snap_++;
+            else {
+                std::remove(snap.c_str());
+                snap_ = 0;
+            }
         } else if (FILE* f = std::fopen(snap.c_str(), "r")) {
             std::fclose(f);
             snap_ = 1;

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <thread>
 #include <unordered_map>
@@ -62,11 +63,20 @@ namespace d3d {
 
 namespace {
 
-// A/B switch: 0 draws on the title's thread, as before
+// A/B switch: 0 draws on the title's thread, as before; the environment variable XBE_RENDER_THREAD=0 or 1
+// overrides the build's choice
 #ifndef XBE_RENDER_THREAD
 #define XBE_RENDER_THREAD 1
 #endif
-constexpr bool kRenderThread = XBE_RENDER_THREAD;
+bool RenderThread() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_RENDER_THREAD");
+        bool v = e && *e ? *e != '0' : XBE_RENDER_THREAD;
+        if (e && *e) LOGR("d3d: render thread %s (XBE_RENDER_THREAD)", v ? "on" : "off");
+        return v;
+    }();
+    return on;
+}
 
 // D3D globals of this build
 constexpr uint32_t kDevice = SYM(D3D_Device);        // the static CDevice, g_pDevice points at it
@@ -280,6 +290,9 @@ std::recursive_mutex& Lock() { return g_lock; }
 
 }  // namespace d3d
 
+void WalkPending();  // below, with the vertex shader constants
+void WalkBeforeState();
+
 using namespace d3d;
 
 // device
@@ -354,7 +367,7 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     if (!g_backend) {
         g_backend = gpu::CreateBackend();
         if (!g_backend->Init(w, h)) LOGE("d3d: renderer init failed");
-        if (kRenderThread) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+        if (RenderThread()) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
     }
     g_state = gpu::State{};
     MakeFrameBuffers(pp);
@@ -526,6 +539,7 @@ HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
 HLE_STDCALL(D3DDevice_FlushVertexCache, 0) { return 0; }
 
 HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
+    WalkBeforeState();
     uint8_t ramp[768];
     std::memcpy(ramp, HostPtr(a[1]), 768);
     if (g_backend) g_backend->SetGamma(ramp);
@@ -548,6 +562,7 @@ void SetTargets(X86Context& ctx, uint32_t rt, uint32_t zs) {
 }
 
 HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     SetTargets(ctx, a[0] ? a[0] : Dev(kDevRenderTarget), a[1]);
     // SetRenderTarget resets the viewport to the whole target
@@ -562,6 +577,7 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
 // library's version wrote the surfaces to the hardware directly: draws went on into the previous target (a title
 // drawing a cube map's six faces through it filled face 0 six times).
 HLE_STDCALL(D3DDevice_SetRenderTargetFast, 3) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     SetTargets(ctx, a[0] ? a[0] : Dev(kDevRenderTarget), a[1]);
     UpdateViewportConstants();
@@ -681,6 +697,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
 }
 
 HLE_STDCALL(D3DDevice_Clear, 6) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     const uint8_t* rects = a[0] && a[1] ? static_cast<const uint8_t*>(HostPtr(a[1])) : nullptr;
     if (g_backend) g_backend->Clear(g_state, a[0], rects, a[2], a[3], ArgF(a, 4), a[5]);
@@ -688,12 +705,14 @@ HLE_STDCALL(D3DDevice_Clear, 6) {
 }
 
 HLE_STDCALL(D3DDevice_CopyRects, 5) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_backend) g_backend->Copy(SurfaceOf(a[0]), SurfaceOf(a[3]), a[2], a[1], a[4]);
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetViewport, 1) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t v = a[0];
     g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
@@ -703,6 +722,7 @@ HLE_STDCALL(D3DDevice_SetViewport, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetScissors, 3) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_state.scissor_count = std::min<uint32_t>(a[0], 8);
     for (uint32_t i = 0; i < g_state.scissor_count * 4; i++) g_state.scissors[i] = R32(a[2] + i * 4);
@@ -710,6 +730,7 @@ HLE_STDCALL(D3DDevice_SetScissors, 3) {
 }
 
 HLE_STDCALL(D3DDevice_SetScreenSpaceOffset, 2) {
+    WalkBeforeState();
     g_state.ss_offset_x = ArgF(a, 0);
     g_state.ss_offset_y = ArgF(a, 1);
     UpdateViewportConstants();
@@ -719,12 +740,14 @@ HLE_STDCALL(D3DDevice_SetScreenSpaceOffset, 2) {
 // render states
 
 HLE_FASTCALL(D3DDevice_SetRenderState_Simple, 0) {
+    WalkBeforeState();
     uint32_t method = a[0] & 0x1FFC, value = a[1];
     g_state.simple[method >> 2] = value;
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetRenderStateNotInline, 2) {
+    WalkBeforeState();
     uint32_t rs = a[0], v = a[1];
     if (rs < gpu::kRsDeferredFirst) {
         uint32_t method = R32(kSimpleEncode + rs * 4) & 0x1FFC;
@@ -772,23 +795,28 @@ COMPLEX_STATE(RopZRead, gpu::kRsRopZRead)
 COMPLEX_STATE(DoNotCullUncompressed, gpu::kRsDoNotCullUncompressed)
 
 HLE_STDCALL(D3DDevice_SetTextureState_TexCoordIndex, 2) {
+    WalkBeforeState();
     g_state.tss[a[0] & 3][gpu::kTssTexCoordIndex] = a[1];
     W32(kTextureState + ((a[0] & 3) * kStageStates + gpu::kTssTexCoordIndex) * 4, a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BumpEnv, 3) {
+    WalkBeforeState();
     if (a[1] >= gpu::kTssBumpEnvMat00 && a[1] <= gpu::kTssBumpEnvLOffset) g_state.tss[a[0] & 3][a[1]] = a[2];
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BorderColor, 2) {
+    WalkBeforeState();
     g_state.tss[a[0] & 3][gpu::kTssBorderColor] = a[1];
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_ColorKeyColor, 2) {
+    WalkBeforeState();
     g_state.tss[a[0] & 3][gpu::kTssColorKeyColor] = a[1];
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureStageStateNotInline, 3) {
+    WalkBeforeState();
     uint32_t stage = a[0] & 3, type = a[1], v = a[2];
     if (type < gpu::kTssCount) {
         g_state.tss[stage][type] = v;
@@ -800,6 +828,7 @@ HLE_STDCALL(D3DDevice_SetTextureStageStateNotInline, 3) {
 // the XDK's transform types: view 0, projection 1, texture 2-5, world 6-9; the renderer keeps Direct3D 8's numbers
 // (view 2, projection 3, texture 16, world 256). The device copy is what GetTransform reads.
 HLE_STDCALL(D3DDevice_SetTransform, 2) {
+    WalkBeforeState();
     uint32_t t = a[0];
     if (t >= 10) return 0;
     std::memcpy(HostPtr(kDevice + kDevTransforms + t * 64), HostPtr(a[1]), 64);
@@ -809,6 +838,7 @@ HLE_STDCALL(D3DDevice_SetTransform, 2) {
 }
 
 HLE_STDCALL(D3DDevice_SetMaterial, 1) {
+    WalkBeforeState();
     std::memcpy(g_state.material.data(), HostPtr(a[0]), 17 * 4);
     return 0;
 }
@@ -817,6 +847,7 @@ HLE_STDCALL(D3DDevice_SetMaterial, 1) {
 HLE_WRAP(D3DDevice_SetLight, 2) {
     uint32_t i = a[0], l = a[1];
     if (i < 8 && l) {
+        WalkBeforeState();
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         std::memcpy(g_state.lights[i].data(), HostPtr(l), 26 * 4);
     }
@@ -824,6 +855,7 @@ HLE_WRAP(D3DDevice_SetLight, 2) {
 HLE_WRAP(D3DDevice_LightEnable, 2) {
     uint32_t i = a[0], on = a[1];
     if (i < 8) {
+        WalkBeforeState();
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         g_state.light_enable = on ? g_state.light_enable | 1u << i : g_state.light_enable & ~(1u << i);
     }
@@ -832,6 +864,7 @@ HLE_WRAP(D3DDevice_LightEnable, 2) {
 // resources in use
 
 HLE_STDCALL(D3DDevice_SetTexture, 2) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t stage = a[0] & 3, tex = a[1];
     uint32_t old = Dev(kDevTextures + stage * 4);
@@ -845,6 +878,7 @@ HLE_STDCALL(D3DDevice_SetTexture, 2) {
 
 // SetPalette(stage, palette): the colours a P8 texture of the stage looks up
 HLE_STDCALL(D3DDevice_SetPalette, 2) {
+    WalkBeforeState();
     XDK_REQUIRE("d3d", XDK_KEY(CDevice_Palettes));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t stage = a[0] & 3, pal = a[1];
@@ -859,6 +893,7 @@ HLE_STDCALL(D3DDevice_SetPalette, 2) {
 // SwitchTexture(method, data, format), fastcall: a swizzled texture of the bound one's shape replaces it. It is
 // bound through a header of the stage's own holding the bound texture's fields with the new data and format.
 HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     static uint32_t headers[4];
     // texture methods from 0x1B00, 0x40 per stage
@@ -873,6 +908,7 @@ HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t n = a[0] & 15, vb = a[1], stride = a[2];
     uint32_t old = R32(kStreams + n * kStreamSize + XDK_Stream_Buffer);
@@ -885,6 +921,7 @@ HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
 }
 
 HLE_STDCALL(D3DDevice_SetIndices, 2) {
+    WalkBeforeState();
     XDK_REQUIRE("d3d", XDK_DATA(D3D_IndexData));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t ib = a[0];
@@ -988,12 +1025,24 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     return 0;
 }
 
-// Constants set here land at once, constants the title pushed as raw commands when Walk reads them: those pushed
-// before this call are read first, so the later write wins as on the console (a title loading a matrix through
-// the push buffer, then its object's through SetVertexShaderConstantNotInlineFast, drew the object with the first)
+// State set by these functions lands at once, state the title pushed as raw commands when Walk reads them: every
+// setter reads what was pushed before it first, so both apply in the title's order as on the console (a title
+// loading a matrix through the push buffer, then its object's through SetVertexShaderConstantNotInlineFast, drew
+// the object with the first; quads pushed into a shadow texture went to the back buffer when SetRenderTarget
+// switched back before Walk read them)
 void WalkPending() {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
+}
+// the same for the other setters; XBE_STATE_WALK=0 turns it off to compare
+void WalkBeforeState() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_STATE_WALK");
+        bool v = !(e && *e == '0');
+        if (!v) LOGR("d3d: XBE_STATE_WALK=0, state setters do not read pending pushed commands first");
+        return v;
+    }();
+    if (on) WalkPending();
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1Fast, 0) {
@@ -1029,14 +1078,17 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
 }
 
 HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
+    WalkBeforeState();
     LOG_FIRST(4, "d3d: LoadVertexShader %08X at %u is not supported", a[0], a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
+    WalkBeforeState();
     LOG_FIRST(4, "d3d: SelectVertexShader %08X at %u is not supported", a[0], a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_own_constants = a[0] & 0x10;  // D3DSCM_NORESERVEDCONSTANTS
     UpdateViewportConstants();
@@ -1061,6 +1113,7 @@ HLE_STDCALL(D3DDevice_DeletePixelShader, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_state.ps = nullptr;
     if (!a[0]) return 0;
@@ -1106,6 +1159,7 @@ HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
 }
 
 HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
+    WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t reg = a[0], src = a[1], n = a[2];
     for (uint32_t i = 0; i < n && reg + i < 16; i++) std::memcpy(g_state.psc[reg + i].data(), HostPtr(src + i * 16), 16);

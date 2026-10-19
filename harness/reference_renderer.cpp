@@ -2,6 +2,8 @@
 // evaluated per the XDK's definitions, decoded the way gpu/shaders.cpp decodes them for HLSL.
 // PROBES="x,y x,y": log each colour written at those pixels of linear PROBE_WIDTH (640) wide targets, the first
 // probe with its triangle's vertices; TRACE="x,y": log the combiner registers of fragments there.
+// REF_DRAWLOG set: each drawn frame's draws listed in cap/drawlog_<frame>.txt, one line each: the colour pixels
+// and stencil values written, their box, and the depth, stencil and blend state; diff two frames to find a flicker.
 #include "reference_renderer.h"
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "core/log.h"
@@ -20,6 +23,8 @@
 #include "gpu/vertex.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
+#include "app/app.h"
+#include "harness.h"
 
 namespace reference {
 
@@ -971,6 +976,16 @@ const Probes& Watch() {
 }
 
 uint32_t g_draws = 0;  // this frame's
+FILE* g_drawlog = nullptr;  // REF_DRAWLOG: this frame's draw list
+
+// what one draw changed, for REF_DRAWLOG
+struct DrawStats {
+    uint32_t colour = 0, stencil = 0;
+    int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
+    void At(int x, int y) {
+        x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+    }
+};
 
 // triangles
 
@@ -996,6 +1011,13 @@ struct Screen {
 void BeginFrame() {
     g_images.clear();
     g_draws = 0;
+    if (g_drawlog) std::fclose(g_drawlog);
+    g_drawlog = nullptr;
+    if (std::getenv("REF_DRAWLOG")) {
+        char name[64];
+        std::snprintf(name, sizeof name, "cap/drawlog_%05llu.txt", (unsigned long long)harness::g_frames.load());
+        g_drawlog = std::fopen((app::ExeDir() / name).string().c_str(), "w");
+    }
 }
 
 void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) {
@@ -1066,6 +1088,27 @@ void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t rects
 
 void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     uint32_t draw = g_draws++;
+    DrawStats st;
+    std::string what = "skipped";  // the state, once known
+    struct Log {
+        uint32_t draw, prim, count;
+        const State& s;
+        const DrawStats& st;
+        const std::string& what;
+        ~Log() {
+            if (!g_drawlog) return;
+            std::fprintf(g_drawlog, "%5u vs %08X prim %u n %u rt %08X zs %08X colour %u stencil %u", draw, s.vs_handle, prim,
+                         count, s.rt.data, s.zs.data, st.colour, st.stencil);
+            if (st.x1 >= 0) std::fprintf(g_drawlog, " box %d,%d-%d,%d", st.x0, st.y0, st.x1, st.y1);
+            std::fprintf(g_drawlog, " %s", what.c_str());
+            for (int t = 0; t < 4; t++) {
+                TextureDesc d;
+                if (s.textures[t] && Describe(s.textures[t], d))
+                    std::fprintf(g_drawlog, " t%d %08X %ux%u f%X", t, d.data, d.width, d.height, d.format);
+            }
+            std::fprintf(g_drawlog, "\n");
+        }
+    } log{draw, prim, count, s, st, what};
     Assembled as;
     // the CPU reads float4 vertices: converted, whatever the build gives the GPU backend
     bool raw = g_raw_vertices;
@@ -1195,6 +1238,13 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     bottom = std::min(bottom, int(gh));
     const Probes& probes = Watch();
     bool watched = probes.Watched(rt);
+    if (g_drawlog) {
+        char b[200];
+        std::snprintf(b, sizeof b, "z %d/%d f%X sten %d f%X ref %u m %X/%X ops %X %X %X blend %d %X %X op %X cw %X at %d cull %X",
+                      int(ztest), int(zwrite), zfunc, int(stencil), sfunc, sref, smask, swmask, op_fail, op_zfail, op_pass,
+                      int(blend), src_factor, dst_factor, blend_op, cmask, int(atest), cull);
+        what = b;
+    }
 
     const float near_w = 1e-6f;
     for (size_t ti = 0; ti + 2 < as.indices.size(); ti += 3) {
@@ -1289,13 +1339,16 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     auto stencil_op = [&](uint32_t op) { return (os & ~swmask) | (StencilResult(op, os, sref) & swmask); };
                     if (stencil && !Passes(sfunc, sref & smask, os & smask)) {
                         zs.StoreDepth(uint32_t(x), uint32_t(y), oz, stencil_op(op_fail));
+                        if (stencil_op(op_fail) != os) st.stencil++, st.At(x, y);
                         continue;
                     }
                     if (ztest && !Passes(zfunc, zi, oz)) {
                         if (stencil) zs.StoreDepth(uint32_t(x), uint32_t(y), oz, stencil_op(op_zfail));
+                        if (stencil && stencil_op(op_zfail) != os) st.stencil++, st.At(x, y);
                         continue;
                     }
                     if (zs.ok && (zwrite || stencil)) zs.StoreDepth(uint32_t(x), uint32_t(y), zwrite ? zi : oz, stencil ? stencil_op(op_pass) : os);
+                    if (stencil && stencil_op(op_pass) != os) st.stencil++, st.At(x, y);
                     if (!rt.ok || !cmask) continue;
                     for (int j = 0; j < 4; j++) col[j] = Sat(col[j]);
                     Vec shaded = col;
@@ -1328,6 +1381,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                                  shaded[1], shaded[2], shaded[3], col[0], col[1], col[2], col[3], unsigned(blend), src_factor, dst_factor, cmask);
                         }
                     rt.Store(uint32_t(x), uint32_t(y), col, cmask);
+                    st.colour++, st.At(x, y);
                 }
         }
     }

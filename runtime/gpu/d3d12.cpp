@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -673,6 +674,8 @@ private:
     Surface cap_zs_;     // the depth target drawn with, saved when the frame moves on from it
     uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
     bool cap_vs_before_ = false;  // XBE_CAPTURE_DRAWS=vs: the target saved before the first such draw
+    uint32_t cap_frame_ = 0, cap_frames_ = 1;  // XBE_CAPTURE_FRAMES=N: N frames in a row, this one's number
+    char cap_stamp_[16] = {};
     std::unordered_set<uint32_t> cap_seen_;
     std::unordered_set<uint64_t> cap_sh_;
     struct CapTex {
@@ -2876,7 +2879,10 @@ void D3D12Backend::StartCapture() {
     SYSTEMTIME tm;
     GetLocalTime(&tm);
     char stamp[32];
-    snprintf(stamp, sizeof(stamp), "%02u%02u%02u", tm.wHour, tm.wMinute, tm.wSecond);
+    // XBE_CAPTURE_FRAMES: one folder a frame, the run's start time and the frame's number
+    if (cap_frame_ == 0) snprintf(cap_stamp_, sizeof(cap_stamp_), "%02u%02u%02u", tm.wHour, tm.wMinute, tm.wSecond);
+    if (cap_frames_ > 1) snprintf(stamp, sizeof(stamp), "%s_%02u", cap_stamp_, cap_frame_ + 1);
+    else snprintf(stamp, sizeof(stamp), "%s", cap_stamp_);
     std::error_code ec;
     cap_dir_ = std::filesystem::weakly_canonical(app::ExeDir() / diag::CaptureDir() / stamp, ec);
     std::filesystem::create_directories(cap_dir_, ec);
@@ -3052,7 +3058,11 @@ void D3D12Backend::Present(const Surface& front) {
     }
     if (cap_) {
         FinishCapture(front);
+        if (++cap_frame_ < cap_frames_) StartCapture();
     } else if (g_capture.exchange(false) && CaptureOn()) {
+        const char* n = std::getenv("XBE_CAPTURE_FRAMES");
+        cap_frames_ = std::clamp(n ? std::atoi(n) : 1, 1, 30);
+        cap_frame_ = 0;
         StartCapture();
     }
     ResizeSwap();
