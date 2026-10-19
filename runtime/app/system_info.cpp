@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -97,13 +98,14 @@ void LogSystem() {
     LOGR("Desktop: %ux%u", desk.width, desk.height);
     LogSettings();
     // experiment and diagnostic switches stay set in a shell or the user's environment between runs: list them
-    std::string game = kGame.log;
-    for (char& c : game) c = char(std::toupper(static_cast<unsigned char>(c)));
-    game += "_";
-    if (char* env = GetEnvironmentStringsA()) {
-        for (const char* e = env; *e; e += std::strlen(e) + 1)
-            if (std::strncmp(e, "XBE_", 4) == 0 || std::strncmp(e, game.c_str(), game.size()) == 0) LOGR("Environment: %s", e);
-        FreeEnvironmentStringsA(env);
+    std::wstring game;
+    for (const char* c = kGame.log; *c; c++) game += wchar_t(std::toupper(static_cast<unsigned char>(*c)));
+    game += L"_";
+    // the wide block: the Windows SDK names the narrow one GetEnvironmentStrings only without UNICODE
+    if (wchar_t* env = GetEnvironmentStringsW()) {
+        for (const wchar_t* e = env; *e; e += std::wcslen(e) + 1)
+            if (std::wcsncmp(e, L"XBE_", 4) == 0 || std::wcsncmp(e, game.c_str(), game.size()) == 0) LOGR("Environment: %ls", e);
+        FreeEnvironmentStringsW(env);
     }
 }
 
