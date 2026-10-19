@@ -1313,6 +1313,16 @@ void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* 
         if (n && mem::IsCommitted(d.data) && mem::IsCommitted(d.data + n - 1)) th[i] = Fnv(static_cast<const uint8_t*>(HostPtr(d.data)), n);
     }
     uint64_t tssh = Fnv(reinterpret_cast<const uint8_t*>(g_state.tss.data()), sizeof(g_state.tss));
+    // each stage table the first time it is seen: "tssdef hash stage: values by D3DTSS index"
+    static std::unordered_set<uint64_t> tss_seen;
+    if (tss_seen.insert(tssh).second) {
+        std::fprintf(f, "tssdef %016llX", (unsigned long long)tssh);
+        for (int st = 0; st < 4; st++) {
+            std::fprintf(f, " |%d:", st);
+            for (uint32_t i = 0; i < gpu::kTssCount; i++) std::fprintf(f, " %X", g_state.tss[st][i]);
+        }
+        std::fprintf(f, "\n");
+    }
     uint64_t rsh = Fnv(reinterpret_cast<const uint8_t*>(&g_state.rs[gpu::kRsDeferredFirst]), (gpu::kRsComplexFirst - gpu::kRsDeferredFirst) * 4);
     std::fprintf(f, "%u %u vs %08X prim %u n %u rt %08X tex %08X %08X %08X %08X vb %016llX ib %016llX th %016llX %016llX %016llX %016llX tss %016llX rs %016llX",
                  frame - first, draw++, g_state.vs_handle, prim, count, g_state.rt.data, td[0], td[1], td[2], td[3],
