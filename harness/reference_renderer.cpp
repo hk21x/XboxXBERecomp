@@ -1322,8 +1322,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     bool watched = probes.Watched(rt);
     if (g_drawlog) {
         char b[200];
-        std::snprintf(b, sizeof b, "z %d/%d f%X sten %d f%X ref %u m %X/%X ops %X %X %X blend %d %X %X op %X cw %X at %d cull %X",
-                      int(ztest), int(zwrite), zfunc, int(stencil), sfunc, sref, smask, swmask, op_fail, op_zfail, op_pass,
+        std::snprintf(b, sizeof b, "zen %u z %d/%d f%X sten %d f%X ref %u m %X/%X ops %X %X %X blend %d %X %X op %X cw %X at %d cull %X",
+                      s.rs[kRsZEnable], int(ztest), int(zwrite), zfunc, int(stencil), sfunc, sref, smask, swmask, op_fail, op_zfail, op_pass,
                       int(blend), src_factor, dst_factor, blend_op, cmask, int(atest), cull);
         what = b;
     }
@@ -1385,10 +1385,15 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             float inv_area = 1 / area;
             // polygon offset (solid fill): units in depth buffer steps plus the slope scale times the larger of the
             // triangle's depth gradients in x and y
+            // D3DZB_USEW (ZENABLE 2): the depth is the vertex w interpolated linearly on the screen, offsets added in its
+            // units (as the NV2A's Z_PERSPECTIVE mode, after xemu); otherwise z / w
+            const bool wbuf = s.rs[kRsZEnable] == 2 && !std::getenv("REF_NO_WBUFFER");
+            float w0 = 1 / p0.iw, w1 = 1 / p1.iw, w2 = 1 / p2.iw;
+            float zv0 = wbuf ? w0 : p0.z, zv1 = wbuf ? w1 : p1.z, zv2 = wbuf ? w2 : p2.z;
             float zoff = 0;
             if (s.simple[kMSolidOffsetEnable >> 2]) {
-                float dzdx = ((p1.z - p0.z) * (p2.y - p0.y) - (p2.z - p0.z) * (p1.y - p0.y)) * inv_area;
-                float dzdy = ((p2.z - p0.z) * (p1.x - p0.x) - (p1.z - p0.z) * (p2.x - p0.x)) * inv_area;
+                float dzdx = ((zv1 - zv0) * (p2.y - p0.y) - (zv2 - zv0) * (p1.y - p0.y)) * inv_area;
+                float dzdy = ((zv2 - zv0) * (p1.x - p0.x) - (zv1 - zv0) * (p2.x - p0.x)) * inv_area;
                 float slope, units;
                 std::memcpy(&slope, &s.simple[kMSlopeScale >> 2], 4);
                 std::memcpy(&units, &s.simple[kMDepthOffset >> 2], 4);
@@ -1402,8 +1407,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     float b1 = ((p2.x - cx) * (p0.y - cy) - (p0.x - cx) * (p2.y - cy)) * inv_area;
                     float b2 = 1 - b0 - b1;
                     if (b0 < 0 || b1 < 0 || b2 < 0) continue;
-                    float z = b0 * p0.z + b1 * p1.z + b2 * p2.z;
-                    if (z < 0 || z > s.zscale) continue;
+                    float z = b0 * zv0 + b1 * zv1 + b2 * zv2;
+                    if (z < 0 || (!wbuf && z > s.zscale)) continue;
                     z = std::clamp(z + zoff + float(adjust.depth_bias) * s.zscale / 16777215.0f, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
                     Vec attr[kAttrs];
