@@ -1312,13 +1312,20 @@ void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* 
         uint32_t n = std::min<uint32_t>(gpu::LevelSize(d, 0), 65536);
         if (n && mem::IsCommitted(d.data) && mem::IsCommitted(d.data + n - 1)) th[i] = Fnv(static_cast<const uint8_t*>(HostPtr(d.data)), n);
     }
-    uint64_t sh = Fnv(reinterpret_cast<const uint8_t*>(g_state.tss.data()), sizeof(g_state.tss));
-    sh = Fnv(reinterpret_cast<const uint8_t*>(g_state.psc.data()), sizeof(g_state.psc), sh);
-    sh = Fnv(reinterpret_cast<const uint8_t*>(&g_state.rs[gpu::kRsDeferredFirst]), (gpu::kRsComplexFirst - gpu::kRsDeferredFirst) * 4, sh);
-    std::fprintf(f, "%u %u vs %08X prim %u n %u rt %08X tex %08X %08X %08X %08X vb %016llX ib %016llX th %016llX %016llX %016llX %016llX st %016llX\n",
+    uint64_t tssh = Fnv(reinterpret_cast<const uint8_t*>(g_state.tss.data()), sizeof(g_state.tss));
+    uint64_t rsh = Fnv(reinterpret_cast<const uint8_t*>(&g_state.rs[gpu::kRsDeferredFirst]), (gpu::kRsComplexFirst - gpu::kRsDeferredFirst) * 4);
+    std::fprintf(f, "%u %u vs %08X prim %u n %u rt %08X tex %08X %08X %08X %08X vb %016llX ib %016llX th %016llX %016llX %016llX %016llX tss %016llX rs %016llX",
                  frame - first, draw++, g_state.vs_handle, prim, count, g_state.rt.data, td[0], td[1], td[2], td[3],
                  (unsigned long long)vh, (unsigned long long)ih, (unsigned long long)th[0], (unsigned long long)th[1],
-                 (unsigned long long)th[2], (unsigned long long)th[3], (unsigned long long)sh);
+                 (unsigned long long)th[2], (unsigned long long)th[3], (unsigned long long)tssh, (unsigned long long)rsh);
+    // the pixel shader constants as values, the vertex constants as a hash per block of 16 registers (c-96 up)
+    std::fprintf(f, " psc");
+    auto byte = [](float v) { return uint32_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255)); };
+    for (const auto& c : g_state.psc) std::fprintf(f, " %08X", byte(c[0]) << 24 | byte(c[1]) << 16 | byte(c[2]) << 8 | byte(c[3]));
+    std::fprintf(f, " vsc");
+    for (size_t b = 0; b < 12; b++)
+        std::fprintf(f, " %08X", uint32_t(Fnv(reinterpret_cast<const uint8_t*>(&g_state.vsc[b * 16]), 16 * 16)));
+    std::fprintf(f, "\n");
 }
 }  // namespace
 
