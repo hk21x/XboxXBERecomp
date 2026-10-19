@@ -1241,14 +1241,17 @@ uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h = 1469598103934665603ull) {
     for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
     return h;
 }
+FILE* g_framelog = nullptr;  // open while frames are being logged
+uint32_t g_framelog_first = 0;
 void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     static const long frames = [] {
         const char* e = std::getenv("XBE_FRAMELOG");
         return e && *e ? std::atol(e) : 0L;
     }();
     if (frames <= 0 || !count) return;
-    static FILE* f = nullptr;
-    static uint32_t first = 0, last_frame = ~0u, draw = 0;
+    FILE*& f = g_framelog;
+    uint32_t& first = g_framelog_first;
+    static uint32_t last_frame = ~0u, draw = 0;
     uint32_t frame = g_presents.load();
     if (!f) {
         // F4, or a file named framelog beside the exe (looked for every 30 frames), starts it; once
@@ -1338,6 +1341,14 @@ void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* 
     std::fprintf(f, "\n");
 }
 }  // namespace
+
+namespace d3d {
+// a line from the title's code into the frame log while it is being written ("note" lines between the draws)
+void FrameLogNote(const char* text) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (g_framelog) std::fprintf(g_framelog, "note %u %s\n", g_presents.load() - g_framelog_first, text);
+}
+}  // namespace d3d
 
 // drawing
 
