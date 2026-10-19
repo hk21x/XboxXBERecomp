@@ -980,7 +980,8 @@ FILE* g_drawlog = nullptr;  // REF_DRAWLOG: this frame's draw list
 
 // what one draw changed, for REF_DRAWLOG
 struct DrawStats {
-    uint32_t colour = 0, stencil = 0;
+    uint32_t colour = 0, stencil = 0, zfail = 0;
+    uint32_t zmiss[6] = {};  // failed depth tests missing by up to 16, 256, 4096, 65536, 1048576 units, more
     int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
     void At(int x, int y) {
         x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
@@ -1099,6 +1100,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             if (!g_drawlog) return;
             std::fprintf(g_drawlog, "%5u vs %08X prim %u n %u rt %08X zs %08X colour %u stencil %u", draw, s.vs_handle, prim,
                          count, s.rt.data, s.zs.data, st.colour, st.stencil);
+            if (st.zfail)
+                std::fprintf(g_drawlog, " zfail %u miss %u/%u/%u/%u/%u/%u", st.zfail, st.zmiss[0], st.zmiss[1], st.zmiss[2],
+                             st.zmiss[3], st.zmiss[4], st.zmiss[5]);
             if (st.x1 >= 0) std::fprintf(g_drawlog, " box %d,%d-%d,%d", st.x0, st.y0, st.x1, st.y1);
             std::fprintf(g_drawlog, " %s", what.c_str());
             // c-96 to c95 hashed, and c0 to c3 and c14's x (a title's matrices are usually there)
@@ -1228,12 +1232,28 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (!s.rs[kRsSpecularEnable]) o.attr[kD1] = o.attr[kB1] = V(0, 0, 0, 1);
     }
 
+    // REF_VERTS_VS=handle with REF_DRAWLOG: that vertex shader's vertices listed (input v0, screen position)
+    static const uint32_t verts_vs = uint32_t(std::strtoul(std::getenv("REF_VERTS_VS") ? std::getenv("REF_VERTS_VS") : "0", nullptr, 16));
+    if (g_drawlog && verts_vs && s.vs_handle == verts_vs && slot[0] >= 0)
+        for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
+            const float* v0 = input(vi, 0);
+            const Vec& p = verts[vi].pos;
+            std::fprintf(g_drawlog, "   v%u in %.3f %.3f %.3f %.3f pos %.1f %.1f %.0f %.4f\n", vi, v0[0], v0[1], v0[2], v0[3], p[0], p[1], p[2], p[3]);
+        }
+
     // raster and output state
     bool blend = simple(kMBlendEnable) != 0;
     uint32_t src_factor = simple(kMSrcBlend), dst_factor = simple(kMDestBlend), blend_op = simple(kMBlendOp);
     uint32_t cw = simple(kMColorWriteEnable);
     uint32_t cmask = (cw >> 16 & 1 ? 4u : 0u) | (cw >> 8 & 1 ? 2u : 0u) | (cw & 1 ? 1u : 0u) | (cw >> 24 & 1 ? 8u : 0u);
     bool ztest = zs.ok && s.rs[kRsZEnable], zwrite = ztest && simple(kMZWriteEnable);
+    // REF_NODEPTH_VS=handle (experiment): that vertex shader's draws without the depth test
+    static const uint32_t nodepth = uint32_t(std::strtoul(std::getenv("REF_NODEPTH_VS") ? std::getenv("REF_NODEPTH_VS") : "0", nullptr, 16));
+    if (nodepth && s.vs_handle == nodepth) ztest = zwrite = false;
+    DrawAdjust adjust;
+    if (g_draw_filter) g_draw_filter(s, adjust);
+    if (adjust.skip) return;
+    if (!adjust.depth_test) ztest = zwrite = false;
     uint32_t zfunc = simple(kMZFunc);
     bool stencil = zs.ok && s.rs[kRsStencilEnable];
     uint32_t sfunc = simple(kMStencilFunc), sref = simple(kMStencilRef) & 0xFF, smask = simple(kMStencilMask) & 0xFF,
@@ -1365,6 +1385,10 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     static const uint32_t zeps = uint32_t(std::atoi(std::getenv("REF_ZEPS") ? std::getenv("REF_ZEPS") : "0"));
                     bool near_equal = zeps && zfunc == 0x203 && zi > oz && zi - oz <= zeps;
                     if (ztest && !near_equal && !Passes(zfunc, zi, oz)) {
+                        if (zfunc == 0x203 && zi > oz) {
+                            uint32_t d = zi - oz, b = d <= 16 ? 0 : d <= 256 ? 1 : d <= 4096 ? 2 : d <= 65536 ? 3 : d <= 1048576 ? 4 : 5;
+                            st.zfail++, st.zmiss[b]++;
+                        }
                         if (stencil) zs.StoreDepth(uint32_t(x), uint32_t(y), oz, stencil_op(op_zfail));
                         if (stencil && stencil_op(op_zfail) != os) st.stencil++, st.At(x, y);
                         continue;

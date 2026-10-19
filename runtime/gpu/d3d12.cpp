@@ -2548,6 +2548,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         said = true;
         return;
     }
+    DrawAdjust adjust;
+    if (g_draw_filter) g_draw_filter(s, adjust);
+    if (adjust.skip) return;
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
     Assembled& a = asm_;
@@ -2580,6 +2583,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     BuildPipelineKey(s, a, sh.vh, sh.ph, k);
     if (tested && test.cull) k.cull = 0;
     if (tested && test.depth) k.zen = k.zwrite = 0;
+    if (!adjust.depth_test) k.zen = k.zwrite = 0;
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;

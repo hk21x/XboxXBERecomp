@@ -191,4 +191,13 @@ struct State {
     float zscale = 16777215.0f;  // depth buffer units per 1.0
 };
 
+// what a title's code may change about one draw: g_draw_filter, set before the first frame, sees each draw's state
+// (on the render thread when there is one) and may drop its depth test or the draw
+struct DrawAdjust {
+    bool depth_test = true;
+    bool skip = false;
+};
+using DrawFilter = void (*)(const State&, DrawAdjust&);
+inline DrawFilter g_draw_filter = nullptr;
+
 }  // namespace gpu
