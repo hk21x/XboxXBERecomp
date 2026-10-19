@@ -122,6 +122,15 @@ void ApplyNow() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // the settings window: F1 opens and closes it, and a key binding it waits for takes the next key
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+        std::lock_guard lock(UiLock());
+        if (wp == VK_F1 && !(lp & (1 << 30))) {
+            ToggleOverlay();
+            return 0;
+        }
+        if (OverlayKey(uint16_t(wp))) return 0;
+    }
     {
         std::lock_guard lock(UiLock());
         if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;

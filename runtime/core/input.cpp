@@ -1,7 +1,18 @@
 // controllers through SDL: Xbox, PlayStation and Switch pads read into the console controller's report
 #include "core/input.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
 #include <iterator>
 #include <mutex>
 
@@ -78,35 +89,89 @@ void Init() {
     }
 }
 
+namespace {
+constexpr const char* kNames[kControls] = {
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right", "start", "back", "left_thumb", "right_thumb",
+    "a", "b", "x", "y", "black", "white", "left_trigger", "right_trigger",
+    "left_stick_left", "left_stick_right", "left_stick_up", "left_stick_down",
+    "right_stick_left", "right_stick_right", "right_stick_up", "right_stick_down"};
+constexpr const char* kLabels[kControls] = {
+    "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Start", "Back", "Left stick click", "Right stick click",
+    "A", "B", "X", "Y", "Black (RB)", "White (LB)", "Left trigger", "Right trigger",
+    "Left stick left", "Left stick right", "Left stick up", "Left stick down",
+    "Right stick left", "Right stick right", "Right stick up", "Right stick down"};
+
+// a pad's inputs as 0 to 1 each, in Control order
+void ReadPad(SDL_Gamepad* pad, float* v) {
+    constexpr SDL_GamepadButton kButtons[] = {
+        SDL_GAMEPAD_BUTTON_DPAD_UP,    SDL_GAMEPAD_BUTTON_DPAD_DOWN, SDL_GAMEPAD_BUTTON_DPAD_LEFT,
+        SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_START,     SDL_GAMEPAD_BUTTON_BACK,
+        SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+        // A B X Y black white
+        SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH,
+        SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER};
+    for (int i = 0; i < 14; i++) v[i] = SDL_GetGamepadButton(pad, kButtons[i]) ? 1.0f : 0.0f;
+    auto axis = [&](SDL_GamepadAxis a) { return float(SDL_GetGamepadAxis(pad, a)) / 32767.0f; };
+    v[kLT] = std::max(axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), 0.0f);
+    v[kRT] = std::max(axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER), 0.0f);
+    // SDL's sticks have y down
+    float lx = axis(SDL_GAMEPAD_AXIS_LEFTX), ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
+    float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX), ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+    v[kLSLeft] = std::max(-lx, 0.0f), v[kLSRight] = std::max(lx, 0.0f);
+    v[kLSUp] = std::max(-ly, 0.0f), v[kLSDown] = std::max(ly, 0.0f);
+    v[kRSLeft] = std::max(-rx, 0.0f), v[kRSRight] = std::max(rx, 0.0f);
+    v[kRSUp] = std::max(-ry, 0.0f), v[kRSDown] = std::max(ry, 0.0f);
+}
+
+int16_t Stick(float neg, float pos) {
+    float v = std::clamp(pos - neg, -1.0f, 1.0f);
+    return int16_t(std::lround(v * 32767.0f));
+}
+}  // namespace
+
+const char* ControlName(int c) { return c >= 0 && c < kControls ? kNames[c] : ""; }
+const char* ControlLabel(int c) { return c >= 0 && c < kControls ? kLabels[c] : ""; }
+int ControlByName(const char* name) {
+    for (int c = 0; c < kControls; c++)
+        if (std::strcmp(kNames[c], name) == 0) return c;
+    return -1;
+}
+
 Pad Poll(int port) {
     Pad p;
+    float in[kControls] = {}, out[kControls] = {};
+    const app::Settings& s = app::Get();
     {
         std::lock_guard lock(g_lock);
         UpdatePads();
         if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
             p.connected = true;
-            constexpr SDL_GamepadButton kButtons[] = {
-                SDL_GAMEPAD_BUTTON_DPAD_UP,   SDL_GAMEPAD_BUTTON_DPAD_DOWN,  SDL_GAMEPAD_BUTTON_DPAD_LEFT,
-                SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_START,     SDL_GAMEPAD_BUTTON_BACK,
-                SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK};
-            for (int i = 0; i < 8; i++) p.buttons |= uint16_t(SDL_GetGamepadButton(pad, kButtons[i]) << i);
-            // A B X Y black white
-            constexpr SDL_GamepadButton kAnalog[] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST,
-                                                     SDL_GAMEPAD_BUTTON_WEST,  SDL_GAMEPAD_BUTTON_NORTH,
-                                                     SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER};
-            for (int i = 0; i < 6; i++) p.analog[i] = SDL_GetGamepadButton(pad, kAnalog[i]) ? 0xFF : 0;
-            auto axis = [&](SDL_GamepadAxis a) { return int(SDL_GetGamepadAxis(pad, a)); };
-            // 0 to 32767 into 0 to 255
-            p.analog[6] = uint8_t(std::max(axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), 0) >> 7);
-            p.analog[7] = uint8_t(std::max(axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER), 0) >> 7);
-            // SDL's sticks have y down
-            // not plain negation: -32768 has no positive
-            p.lx = int16_t(axis(SDL_GAMEPAD_AXIS_LEFTX));
-            p.ly = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_LEFTY));
-            p.rx = int16_t(axis(SDL_GAMEPAD_AXIS_RIGHTX));
-            p.ry = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_RIGHTY));
+            ReadPad(pad, in);
         }
     }
+    // remapped: each console input reads the physical input the settings name for it
+    for (int c = 0; c < kControls; c++) {
+        int from = c < int(s.pad_map.size()) && s.pad_map[c] < kControls ? s.pad_map[c] : c;
+        out[c] = in[from];
+    }
+    // the keyboard drives controller 1 while the game window has the focus
+    HWND hwnd = static_cast<HWND>(app::Window());
+    if (port == 0 && s.keyboard && hwnd && GetForegroundWindow() == hwnd) {
+        p.connected = true;
+        for (int c = 0; c < kControls; c++) {
+            std::array<uint16_t, 2> keys = c < int(s.keys.size()) ? s.keys[c] : app::DefaultKeys(c);
+            for (uint16_t k : keys)
+                if (k && (GetAsyncKeyState(k) & 0x8000)) out[c] = 1.0f;
+        }
+    }
+    // the settings window takes the input while it is open
+    if (app::OverlayOpen()) std::fill(std::begin(out), std::end(out), 0.0f);
+    for (int i = 0; i < 8; i++) p.buttons |= uint16_t(out[i] >= 0.5f) << i;
+    for (int i = 0; i < 8; i++) p.analog[i] = uint8_t(std::lround(std::clamp(out[kA + i], 0.0f, 1.0f) * 255.0f));
+    p.lx = Stick(out[kLSLeft], out[kLSRight]);
+    p.ly = Stick(out[kLSDown], out[kLSUp]);
+    p.rx = Stick(out[kRSLeft], out[kRSRight]);
+    p.ry = Stick(out[kRSDown], out[kRSUp]);
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
 }

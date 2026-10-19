@@ -1,0 +1,250 @@
+// the in-game settings window, F1: display, graphics, the game's own options and controls. Changes are saved to the
+// settings file at once; display mode and resolution apply at once, render scale and aspect at the next start.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <imgui.h>
+
+#include "app/app.h"
+#include "core/input.h"
+#include "core/log.h"
+
+namespace app {
+
+namespace {
+
+std::atomic<bool> g_open{false};
+// a key binding waiting for its key: the input and the slot, -1 none
+std::atomic<int> g_bind_control{-1}, g_bind_slot{0};
+
+// the monitor's modes, widest first, each size once
+std::vector<Mode> Modes() {
+    std::vector<Mode> modes;
+    HMONITOR mon = MonitorFromWindow(static_cast<HWND>(Window()), MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return modes;
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    for (DWORD i = 0; EnumDisplaySettingsW(mi.szDevice, i, &dm); i++) {
+        if (dm.dmBitsPerPel < 32 || dm.dmPelsHeight < 480) continue;
+        Mode m{dm.dmPelsWidth, dm.dmPelsHeight};
+        if (std::none_of(modes.begin(), modes.end(), [&](const Mode& o) { return o.width == m.width && o.height == m.height; }))
+            modes.push_back(m);
+    }
+    std::sort(modes.begin(), modes.end(), [](const Mode& a, const Mode& b) {
+        return a.width != b.width ? a.width > b.width : a.height > b.height;
+    });
+    return modes;
+}
+
+void Display(Settings& s) {
+    bool changed = false;
+    const char* modes[] = {"Fullscreen", "Borderless window", "Window"};
+    int mode = int(s.display_mode);
+    if (ImGui::Combo("Display mode", &mode, modes, 3)) {
+        s.display_mode = DisplayMode(mode);
+        changed = true;
+    }
+    static std::vector<Mode> list = Modes();
+    std::string current = s.width && s.height ? std::to_string(s.width) + " x " + std::to_string(s.height) : "Desktop";
+    if (ImGui::BeginCombo("Resolution", current.c_str())) {
+        if (ImGui::Selectable("Desktop", !s.width)) {
+            s.width = s.height = 0;
+            changed = true;
+        }
+        for (const Mode& m : list) {
+            std::string name = std::to_string(m.width) + " x " + std::to_string(m.height);
+            if (ImGui::Selectable(name.c_str(), s.width == m.width && s.height == m.height)) {
+                s.width = m.width;
+                s.height = m.height;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::Checkbox("Vertical sync", &s.vsync)) Save();
+    if (changed) {
+        Save();
+        ApplyDisplay();
+    }
+    int aspect = int(s.aspect % 3);
+    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)"};
+    if (ImGui::Combo("Aspect ratio", &aspect, aspects, 3)) {
+        s.aspect = uint32_t(aspect);
+        Save();
+    }
+    ImGui::TextDisabled("Aspect ratio applies at the next start (the game reads its TV setting when it boots).");
+}
+
+void Graphics(Settings& s) {
+    int percent = int(s.render_percent);
+    if (ImGui::SliderInt("Render scale (% of the screen)", &percent, 25, 200)) {
+        s.render_percent = uint32_t(percent);
+        Save();
+    }
+    ImGui::TextDisabled("Render scale applies at the next start.");
+    const int anisos[] = {0, 2, 4, 8, 16};
+    const char* aniso_names[] = {"As the game asks", "2x", "4x", "8x", "16x"};
+    int a = 0;
+    for (int i = 0; i < 5; i++)
+        if (int(s.aniso) == anisos[i]) a = i;
+    if (ImGui::Combo("Anisotropic filtering", &a, aniso_names, 5)) {
+        s.aniso = uint32_t(anisos[a]);
+        Save();
+    }
+    const int caps[] = {30, 60, 120, 144, 240, 0};
+    const char* cap_names[] = {"30", "60", "120", "144", "240", "Unlimited"};
+    int c = 1;
+    for (int i = 0; i < 6; i++)
+        if (int(s.fps_cap) == caps[i]) c = i;
+    if (ImGui::Combo("Frame rate cap", &c, cap_names, 6)) {
+        s.fps_cap = uint32_t(caps[c]);
+        Save();
+    }
+    ImGui::TextDisabled("The game sets its own pace (menus 60, races 30); the cap only limits it further.");
+}
+
+void GameOptions() {
+    if (kGame.options.empty()) {
+        ImGui::TextDisabled("No options for this game.");
+        return;
+    }
+    for (const Option& o : kGame.options) {
+        if (o.flag) {
+            if (ImGui::Checkbox(o.key, o.flag)) Save();
+        } else if (o.value) {
+            int v = int(*o.value);
+            if (ImGui::InputInt(o.key, &v)) {
+                *o.value = uint32_t(std::max(v, 0));
+                Save();
+            }
+        }
+    }
+    ImGui::TextDisabled("Game options apply at the next start.");
+}
+
+void Controls(Settings& s) {
+    if (s.keys.size() != input::kControls || s.pad_map.size() != input::kControls) return;  // sized in Get
+    if (ImGui::Checkbox("Keyboard plays as controller 1", &s.keyboard)) Save();
+    ImGui::SameLine();
+    if (ImGui::Button("Default keys")) {
+        for (int c = 0; c < input::kControls; c++) s.keys[c] = DefaultKeys(c);
+        Save();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Default controller")) {
+        for (int c = 0; c < input::kControls; c++) s.pad_map[c] = uint8_t(c);
+        Save();
+    }
+    ImGui::TextDisabled("Click a key box, then press the key (Escape clears it). Each input takes up to two keys.");
+    if (!ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) return;
+    ImGui::TableSetupColumn("Console input");
+    ImGui::TableSetupColumn("Key");
+    ImGui::TableSetupColumn("Key");
+    ImGui::TableSetupColumn("Controller input");
+    ImGui::TableHeadersRow();
+    for (int c = 0; c < input::kControls; c++) {
+        ImGui::PushID(c);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(input::ControlLabel(c));
+        for (int slot = 0; slot < 2; slot++) {
+            ImGui::TableNextColumn();
+            ImGui::PushID(slot);
+            bool waiting = g_bind_control == c && g_bind_slot == slot;
+            std::string name = waiting ? "press a key..." : KeyToName(s.keys[c][slot]);
+            if (name.empty()) name = "-";
+            if (ImGui::Button(name.c_str(), ImVec2(-1, 0))) {
+                g_bind_slot = slot;
+                g_bind_control = c;
+            }
+            ImGui::PopID();
+        }
+        ImGui::TableNextColumn();
+        int from = s.pad_map[c];
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##pad", input::ControlLabel(from))) {
+            for (int p = 0; p < input::kControls; p++)
+                if (ImGui::Selectable(input::ControlLabel(p), p == from)) {
+                    s.pad_map[c] = uint8_t(p);
+                    Save();
+                }
+            ImGui::EndCombo();
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
+}  // namespace
+
+bool OverlayOpen() { return g_open; }
+
+void ToggleOverlay() {
+    g_open = !g_open;
+    g_bind_control = -1;
+    if (ImGui::GetCurrentContext()) ImGui::GetIO().MouseDrawCursor = g_open;
+    LOGR("settings window %s", g_open ? "opened" : "closed");
+}
+
+bool OverlayKey(uint16_t vk) {
+    int c = g_bind_control;
+    if (!g_open || c < 0) return false;
+    Settings& s = Get();
+    if (s.keys.size() == input::kControls) {
+        s.keys[c][g_bind_slot] = vk == VK_ESCAPE ? 0 : vk;
+        Save();
+    }
+    g_bind_control = -1;
+    return true;
+}
+
+void DrawOverlay() {
+    if (!g_open) return;
+    Settings& s = Get();
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    // readable on a big screen: the default font is sized for 720 lines
+    ImGui::GetIO().FontGlobalScale = std::max(1.0f, vp->WorkSize.y / 720.0f);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x * 0.6f, vp->WorkSize.y * 0.8f),
+                             ImGuiCond_Appearing);
+    bool open = true;
+    if (ImGui::Begin("Settings (F1)", &open, ImGuiWindowFlags_NoCollapse)) {
+        if (ImGui::BeginTabBar("tabs")) {
+            if (ImGui::BeginTabItem("Display")) {
+                Display(s);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Graphics")) {
+                Graphics(s);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Game")) {
+                GameOptions();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Controls")) {
+                Controls(s);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
+    if (!open) ToggleOverlay();
+}
+
+}  // namespace app

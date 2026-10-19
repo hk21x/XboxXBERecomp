@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -23,7 +24,23 @@ struct Settings {
     bool vsync = true;
     uint32_t aniso = 0;              // 0 as the game asks
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
+    uint32_t aspect = 0;             // 0 from the output's shape, 1 4:3, 2 16:9 (the console's TV setting, at boot)
+    // controls, by input::Control: the physical pad input that drives each console input, and up to two keys (Windows
+    // virtual key codes, 0 none) that press it on controller 1
+    std::vector<uint8_t> pad_map;    // empty: each input drives itself
+    std::vector<std::array<uint16_t, 2>> keys;  // empty: the default keys
+    bool keyboard = true;
 };
+// the default keys for input::Control c
+std::array<uint16_t, 2> DefaultKeys(int c);
+std::string KeyToName(uint16_t vk);  // settings file names of Windows virtual keys
+uint16_t KeyFromName(const std::string& name);
+// the in-game settings window (F1): open, and drawn each frame inside the ImGui frame (overlay.cpp)
+bool OverlayOpen();
+void ToggleOverlay();
+void DrawOverlay();
+// a key pressed while the overlay waits for one to bind (window thread); true takes it
+bool OverlayKey(uint16_t vk);
 
 Settings& Get();
 void Load();
