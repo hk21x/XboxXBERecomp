@@ -1323,8 +1323,8 @@ void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* 
         std::fprintf(f, "\n");
     }
     uint64_t rsh = Fnv(reinterpret_cast<const uint8_t*>(&g_state.rs[gpu::kRsDeferredFirst]), (gpu::kRsComplexFirst - gpu::kRsDeferredFirst) * 4);
-    std::fprintf(f, "%u %u vs %08X prim %u n %u rt %08X tex %08X %08X %08X %08X vb %016llX ib %016llX th %016llX %016llX %016llX %016llX tss %016llX rs %016llX",
-                 frame - first, draw++, g_state.vs_handle, prim, count, g_state.rt.data, td[0], td[1], td[2], td[3],
+    std::fprintf(f, "%u %u ps %08X vs %08X prim %u n %u rt %08X tex %08X %08X %08X %08X vb %016llX ib %016llX th %016llX %016llX %016llX %016llX tss %016llX rs %016llX",
+                 frame - first, draw++, g_state.ps ? g_state.ps->handle : 0u, g_state.vs_handle, prim, count, g_state.rt.data, td[0], td[1], td[2], td[3],
                  (unsigned long long)vh, (unsigned long long)ih, (unsigned long long)th[0], (unsigned long long)th[1],
                  (unsigned long long)th[2], (unsigned long long)th[3], (unsigned long long)tssh, (unsigned long long)rsh);
     // the pixel shader constants as values, the vertex constants as a hash per block of 16 registers (c-96 up)
