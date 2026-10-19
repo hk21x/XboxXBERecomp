@@ -9,6 +9,7 @@
 #include <intrin.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -95,6 +96,15 @@ void LogSystem() {
     Mode desk = Desktop();
     LOGR("Desktop: %ux%u", desk.width, desk.height);
     LogSettings();
+    // experiment and diagnostic switches stay set in a shell or the user's environment between runs: list them
+    std::string game = kGame.log;
+    for (char& c : game) c = char(std::toupper(static_cast<unsigned char>(c)));
+    game += "_";
+    if (char* env = GetEnvironmentStringsA()) {
+        for (const char* e = env; *e; e += std::strlen(e) + 1)
+            if (std::strncmp(e, "XBE_", 4) == 0 || std::strncmp(e, game.c_str(), game.size()) == 0) LOGR("Environment: %s", e);
+        FreeEnvironmentStringsA(env);
+    }
 }
 
 }  // namespace app
