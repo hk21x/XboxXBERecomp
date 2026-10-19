@@ -172,7 +172,13 @@ struct State {
         uint32_t stride = 0;
     };
     std::array<Stream, 16> streams{};
+    // SetVertexShaderInput: streams that replace streams, with the attribute layout below
+    std::array<Stream, 16> input_streams{};
     uint32_t index_buffer = 0, index_data = 0, base_vertex = 0;
+    // SetVertexShaderInput: while set, draws read their attributes by this layout (the stream offsets added) from
+    // input_streams, in place of the vertex shader's declaration and SetStreamSource's streams
+    bool input_active = false;
+    std::array<VertexShader::Input, 16> input_layout{};
     uint32_t vs_handle = 0;  // programmable when bit 0 set, otherwise an FVF
     std::shared_ptr<VertexShader> vs;
     std::shared_ptr<PixelShader> ps;

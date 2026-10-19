@@ -984,6 +984,7 @@ std::map<uint32_t, std::array<uint32_t, 8>> g_zowner_miss;  // winner -> misses 
 // what one draw changed, for REF_DRAWLOG
 struct DrawStats {
     uint32_t colour = 0, stencil = 0, zfail = 0;
+    uint32_t culled = 0, offscreen = 0, killed = 0, atested = 0;  // triangles culled or off the viewport, fragments discarded
     uint32_t zmiss[6] = {};  // failed depth tests missing by up to 16, 256, 4096, 65536, 1048576 units, more
     int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
     void At(int x, int y) {
@@ -1109,6 +1110,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             if (!g_drawlog) return;
             std::fprintf(g_drawlog, "%5u vs %08X prim %u n %u rt %08X zs %08X colour %u stencil %u", draw, s.vs_handle, prim,
                          count, s.rt.data, s.zs.data, st.colour, st.stencil);
+            if (st.culled || st.offscreen || st.killed || st.atested)
+                std::fprintf(g_drawlog, " culled %u offscreen %u killed %u atested %u", st.culled, st.offscreen, st.killed, st.atested);
             if (st.zfail)
                 std::fprintf(g_drawlog, " zfail %u miss %u/%u/%u/%u/%u/%u", st.zfail, st.zmiss[0], st.zmiss[1], st.zmiss[2],
                              st.zmiss[3], st.zmiss[4], st.zmiss[5]);
@@ -1245,11 +1248,39 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
 
     // REF_VERTS_VS=handle with REF_DRAWLOG: that vertex shader's vertices listed (input v0, screen position)
     static const uint32_t verts_vs = uint32_t(std::strtoul(std::getenv("REF_VERTS_VS") ? std::getenv("REF_VERTS_VS") : "0", nullptr, 16));
-    if (g_drawlog && verts_vs && s.vs_handle == verts_vs && slot[0] >= 0)
+    static const uint32_t verts_t0 = uint32_t(std::strtoul(std::getenv("REF_VERTS_T0") ? std::getenv("REF_VERTS_T0") : "0", nullptr, 16));
+    bool verts_tex = false;
+    if (verts_t0 && s.textures[0]) {
+        TextureDesc vd;
+        verts_tex = Describe(s.textures[0], vd) && vd.data == verts_t0;
+    }
+    if (g_drawlog && ((verts_vs && s.vs_handle == verts_vs) || verts_tex) && slot[0] >= 0 && s.vs) {
+        std::fprintf(g_drawlog, "   decl");
+        for (int r = 0; r < 16; r++) {
+            const auto& in = s.vs->inputs[size_t(r)];
+            if (in.stream >= 0) std::fprintf(g_drawlog, " v%d:%d+%u/%X", r, in.stream, in.offset, in.type);
+        }
+        for (int st = 0; st < 4; st++)
+            if (s.streams[st].vb) std::fprintf(g_drawlog, " stream%d stride %u", st, s.streams[st].stride);
+        std::fprintf(g_drawlog, " start %u indexed %d base %u count %u\n", start, indices ? 1 : 0, s.base_vertex, count);
+        // the first vertices' bytes as stream 0 holds them (the vertex buffer's Data at +4 is physical)
+        if (s.streams[0].vb) {
+            uint32_t base = mem::VirtualFromPhysical(kernel::R32(s.streams[0].vb + 4));
+            for (uint32_t i = 0; i < 4; i++) {
+                uint32_t v = indices ? (uint32_t(indices[i * 2]) | uint32_t(indices[i * 2 + 1]) << 8) + s.base_vertex : start + i;
+                std::fprintf(g_drawlog, "   raw %u @%08X:", v, base + v * s.streams[0].stride);
+                for (uint32_t w = 0; w < s.streams[0].stride / 4; w++) std::fprintf(g_drawlog, " %08X", kernel::R32(base + v * s.streams[0].stride + w * 4));
+                std::fprintf(g_drawlog, "\n");
+            }
+        }
+    }
+    if (g_drawlog && ((verts_vs && s.vs_handle == verts_vs) || verts_tex) && slot[0] >= 0)
         for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
             const float* v0 = input(vi, 0);
             const Vec& p = verts[vi].pos;
-            std::fprintf(g_drawlog, "   v%u in %.3f %.3f %.3f %.3f pos %.1f %.1f %.0f %.4f\n", vi, v0[0], v0[1], v0[2], v0[3], p[0], p[1], p[2], p[3]);
+            const Vec& t0 = verts[vi].attr[kT0];
+            std::fprintf(g_drawlog, "   v%u in %.3f %.3f %.3f %.3f pos %.1f %.1f %.0f %.4f t0 %.3f %.3f %.3f %.3f\n", vi, v0[0], v0[1], v0[2], v0[3], p[0],
+                         p[1], p[2], p[3], t0[0], t0[1], t0[2], t0[3]);
         }
 
     // raster and output state
@@ -1340,11 +1371,17 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             if (area == 0 || !std::isfinite(area)) continue;
             bool clockwise = area > 0;  // y down
             // GL_CW 0x900, GL_CCW 0x901
-            if ((cull == 0x900 && clockwise) || (cull == 0x901 && !clockwise)) continue;
+            if ((cull == 0x900 && clockwise) || (cull == 0x901 && !clockwise)) {
+                st.culled++;
+                continue;
+            }
             bool front = s.rs[kRsFrontFace] == 0x901 ? !clockwise : clockwise;
             int x0 = std::max(left, int(std::floor(std::min({p0.x, p1.x, p2.x})))), x1 = std::min(right - 1, int(std::ceil(std::max({p0.x, p1.x, p2.x}))));
             int y0 = std::max(top, int(std::floor(std::min({p0.y, p1.y, p2.y})))), y1 = std::min(bottom - 1, int(std::ceil(std::max({p0.y, p1.y, p2.y}))));
-            if (x0 > x1 || y0 > y1) continue;
+            if (x0 > x1 || y0 > y1) {
+                st.offscreen++;
+                continue;
+            }
             float inv_area = 1 / area;
             // polygon offset (solid fill): units in depth buffer steps plus the slope scale times the larger of the
             // triangle's depth gradients in x and y
@@ -1383,8 +1420,14 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     g_trace.on = watched && x == probes.trace.x && y == probes.trace.y;
                     Vec col;
                     bool keep = mat.key.programmable ? Combiners{mat, frag}.Shade(col) : ShadeStages(mat, frag, col);
-                    if (!keep) continue;
-                    if (atest && !Passes(afunc, uint32_t(int(std::lround(Sat(col[3]) * 255))), aref)) continue;
+                    if (!keep) {
+                        st.killed++;
+                        continue;
+                    }
+                    if (atest && !Passes(afunc, uint32_t(int(std::lround(Sat(col[3]) * 255))), aref)) {
+                        st.atested++;
+                        continue;
+                    }
                     uint32_t oz = 0, os = 0, zi = uint32_t(std::floor(z));
                     if (zs.ok) zs.LoadDepth(uint32_t(x), uint32_t(y), oz, os);
                     auto stencil_op = [&](uint32_t op) { return (os & ~swmask) | (StencilResult(op, os, sref) & swmask); };

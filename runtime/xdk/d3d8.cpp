@@ -54,6 +54,14 @@ using namespace kernel;
 #define SYM_D3DDevice_SetRenderTargetFast FFFFFE06
 #define HAS_D3DDevice_SetRenderTargetFast 0
 #endif
+#ifndef SYM_D3DDevice_SetVertexShaderInput
+#define SYM_D3DDevice_SetVertexShaderInput FFFFFE07
+#define HAS_D3DDevice_SetVertexShaderInput 0
+#endif
+#ifndef SYM_D3DDevice_SetVertexShaderInputDirect
+#define SYM_D3DDevice_SetVertexShaderInputDirect FFFFFE08
+#define HAS_D3DDevice_SetVertexShaderInputDirect 0
+#endif
 #ifndef SYM_D3DDevice_SetDepthClipPlanes
 #define SYM_D3DDevice_SetDepthClipPlanes FFFFFE05
 #define HAS_D3DDevice_SetDepthClipPlanes 0
@@ -1003,6 +1011,62 @@ void WatchConstants(const char* how, uint32_t first, uint32_t count, uint32_t re
     }
 }
 
+// SetVertexShaderInput(handle, count, inputs): until called with handle 0, draws read the attributes that vertex
+// shader's declaration lays out (stream, offset, type) from count D3DSTREAM_INPUTs (vertex buffer, stride, offset) in
+// place of SetStreamSource's streams; the library pushes the vertex array addresses and formats itself (0x1C0560 in
+// 5659, dirty bit 0x40000000 makes the draws skip their own). SetVertexShaderInputDirect passes the layout as 16
+// D3DVERTEXATTRIBUTEFORMATs (stream, offset, format, 16 bytes each) instead of a handle.
+namespace {
+void SetVertexInput(const std::array<gpu::VertexShader::Input, 16>& attrs, uint32_t count, uint32_t inputs) {
+    std::array<gpu::State::Stream, 16> streams{};
+    std::array<gpu::VertexShader::Input, 16> layout{};
+    for (size_t r = 0; r < 16; r++) {
+        const auto& in = attrs[r];
+        constexpr uint32_t kTypeNone = 0x02;
+        if (in.stream < 0 || !in.type || (in.type & 0xFF) == kTypeNone || uint32_t(in.stream) >= count || !inputs) continue;
+        uint32_t si = inputs + uint32_t(in.stream) * 12;
+        streams[size_t(in.stream)] = {R32(si), R32(si + 4)};
+        layout[r] = {in.stream, in.offset + R32(si + 8), in.type & 0xFF};
+    }
+    g_state.input_streams = streams;
+    g_state.input_layout = layout;
+    g_state.input_active = true;
+}
+}  // namespace
+
+HLE_STDCALL(D3DDevice_SetVertexShaderInput, 3) {
+    WalkBeforeState();
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t h = a[0];
+    if (!h) {
+        g_state.input_active = false;
+        return 0;
+    }
+    auto it = g_vs.find(h);
+    if (it == g_vs.end() || !it->second) {
+        LOG_FIRST(8, "d3d: SetVertexShaderInput with unknown handle %08X", h);
+        g_state.input_active = false;
+        return 0;
+    }
+    SetVertexInput(it->second->inputs, a[1], a[2]);
+    return 0;
+}
+
+HLE_STDCALL(D3DDevice_SetVertexShaderInputDirect, 3) {
+    WalkBeforeState();
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t p = a[0];
+    if (!p) {
+        g_state.input_active = false;
+        return 0;
+    }
+    std::array<gpu::VertexShader::Input, 16> attrs{};
+    for (uint32_t r = 0; r < 16; r++)
+        attrs[r] = {int(R32(p + r * 16)), R32(p + r * 16 + 4), R32(p + r * 16 + 8) & 0xFF};
+    SetVertexInput(attrs, a[1], a[2]);
+    return 0;
+}
+
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // the declaration's constants come after anything pushed before
@@ -1218,9 +1282,12 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
     auto stream = g_state.streams[0];
+    bool input = g_state.input_active;  // vertices from memory are read by the shader's declaration
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
+    g_state.input_active = false;
     g_backend->Draw(g_state, prim, 0, count, nullptr);
     g_state.streams[0] = stream;
+    g_state.input_active = input;
 }
 
 // bytes per vertex of the bound format: stream 0 of the FVF or of the shader's declaration

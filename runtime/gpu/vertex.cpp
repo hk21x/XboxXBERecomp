@@ -453,12 +453,22 @@ void FvfInputs(uint32_t fvf, VertexShader& vs) {
     vs.stream_stride[0] = off;
 }
 
-bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* ip, Assembled& out) {
+bool Assemble(const State& state, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* ip, Assembled& out) {
     ResetAssembled(out);
     if (!count || prim < 1 || prim > 10) return false;
 
+    // SetVertexShaderInput: its layout and streams in place of the shader's declaration and SetStreamSource's
+    static thread_local State input_state;
+    VertexShader input_layout;
+    if (state.input_active) {
+        input_state = state;
+        input_state.streams = state.input_streams;
+        input_layout.inputs = state.input_layout;
+    }
+    const State& s = state.input_active ? input_state : state;
+
     VertexShader fvf_layout;
-    const VertexShader* layout = PickLayout(s, fvf_layout);
+    const VertexShader* layout = state.input_active ? &input_layout : PickLayout(s, fvf_layout);
     out.pretransformed = Pretransformed(s);
     if (!layout) return false;
 
