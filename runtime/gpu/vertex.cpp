@@ -458,11 +458,14 @@ bool Assemble(const State& state, uint32_t prim, uint32_t start, uint32_t count,
     if (!count || prim < 1 || prim > 10) return false;
 
     // SetVertexShaderInput: its layout and streams in place of the shader's declaration and SetStreamSource's
+    // only the fields assembly reads (streams, base_vertex, vs, vs_handle) are copied: the whole State is tens of KB
     static thread_local State input_state;
     VertexShader input_layout;
     if (state.input_active) {
-        input_state = state;
         input_state.streams = state.input_streams;
+        input_state.base_vertex = state.base_vertex;
+        input_state.vs = state.vs;
+        input_state.vs_handle = state.vs_handle;
         input_layout.inputs = state.input_layout;
     }
     const State& s = state.input_active ? input_state : state;
