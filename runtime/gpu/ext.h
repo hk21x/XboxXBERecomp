@@ -37,6 +37,12 @@ struct Target {
     DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
     float range = 1;         // colour held divided by it until the extension resolves the target
     uint64_t tag = ~0ull;    // the extension's
+    // MSAA: a multisampled twin that draws go to, resolved into res before anything reads res
+    Microsoft::WRL::ComPtr<ID3D12Resource> ms;
+    D3D12_RESOURCE_STATES ms_state = D3D12_RESOURCE_STATE_COMMON;
+    uint32_t ms_view = 0;
+    bool ms_dirty = false;  // the twin has pixels res has not
+    bool ms_stale = false;  // res has pixels the twin has not
 };
 
 // what the renderer lends an extension, on the render thread

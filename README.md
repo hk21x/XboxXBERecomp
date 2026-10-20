@@ -58,7 +58,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 ### Graphics
 - **Direct3D 8** - Implements Direct3D 8 as the XDK does it, including immediate mode draws, palettes, gamma ramps and Direct3D code built into the game.
 - **Native Direct3D 12 Renderer** - Translates the Xbox's vertex programs, pixel combiners and fixed function pipeline to HLSL, with rendering on its own thread.
-- **Antialiasing** - FXAA on the finished frame, in the final blit.
+- **Antialiasing** - FXAA on the finished frame, in the final blit, or MSAA 2x, 4x or 8x on the scene: big colour targets and their depth draw into multisampled twins, resolved before anything reads them.
 - **Console Accurate Depth** - Draws W-buffered depth (D3DZB_USEW) from each pixel's perspective correct w, with polygon offsets in its units and the XDK's scale for fixed function and pretransformed vertices; a depth buffer bigger than the colour target serves it, as on the console.
 - **Ordered Push Buffer Commands** - Reads raw commands a title pushed (vertex shader constants, visibility tests, immediate mode) before every state or constant set, so they apply in the console's order.
 - **Visibility Tests** - Counts visible pixels with occlusion queries and delivers reports when a title polls for them inside a frame.

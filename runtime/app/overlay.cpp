@@ -132,13 +132,13 @@ void Graphics(Settings& s) {
         Save();
     }
     ImGui::TextDisabled("The game sets its own pace (menus 60, races 30); the cap only limits it further.");
-    int aa = int(s.antialiasing % 2);
-    const char* aa_names[] = {"Off", "FXAA (smooths edges of the finished frame)"};
-    if (ImGui::Combo("Antialiasing", &aa, aa_names, 2)) {
+    int aa = int(s.antialiasing % 5);
+    const char* aa_names[] = {"Off", "FXAA (smooths edges of the finished frame)", "MSAA 2x", "MSAA 4x", "MSAA 8x"};
+    if (ImGui::Combo("Antialiasing", &aa, aa_names, 5)) {
         s.antialiasing = uint32_t(aa);
         Save();
     }
-    ImGui::TextDisabled("Render scale above 100% also smooths edges (supersampling).");
+    ImGui::TextDisabled("MSAA smooths the edges of the 3D scene at once; render scale above 100% also smooths edges.");
     if (ImGui::Checkbox("Show frames a second", &s.show_fps)) Save();
 }
 

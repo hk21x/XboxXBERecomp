@@ -29,7 +29,8 @@ const char* kModes[] = {"fullscreen", "borderless", "windowed"};
 std::filesystem::path File() { return ExeDir() / kGame.settings; }
 
 const char* kAspects[] = {"auto", "4:3", "16:9"};
-const char* kAntialiasing[] = {"off", "fxaa"};
+const char* kAntialiasing[] = {"off", "fxaa", "msaa2", "msaa4", "msaa8"};
+constexpr uint32_t kAntialiasingCount = 5;
 
 // the displays in Windows' order
 std::vector<HMONITOR> MonitorList() {
@@ -148,8 +149,8 @@ void Load() {
     s.monitor = t["monitor"].value_or(s.monitor);
     s.pause_unfocused = t["pause_unfocused"].value_or(s.pause_unfocused);
     s.show_fps = t["show_fps"].value_or(s.show_fps);
-    std::string aa = t["antialiasing"].value_or(std::string(kAntialiasing[s.antialiasing % 2]));
-    for (uint32_t i = 0; i < 2; i++)
+    std::string aa = t["antialiasing"].value_or(std::string(kAntialiasing[s.antialiasing % kAntialiasingCount]));
+    for (uint32_t i = 0; i < kAntialiasingCount; i++)
         if (aa == kAntialiasing[i]) s.antialiasing = i;
     // [keys] input = ["key", "key"], [gamepad] input = "physical input"
     if (const toml::table* keys = t["keys"].as_table()) {
@@ -192,7 +193,7 @@ toml::table Table() {
                   {"monitor", int64_t(s.monitor)},
                   {"pause_unfocused", s.pause_unfocused},
                   {"show_fps", s.show_fps},
-                  {"antialiasing", kAntialiasing[s.antialiasing % 2]}};
+                  {"antialiasing", kAntialiasing[s.antialiasing % kAntialiasingCount]}};
     // only what differs from the defaults
     toml::table keys, pad;
     for (int c = 0; c < input::kControls; c++) {

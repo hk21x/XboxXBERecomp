@@ -35,7 +35,7 @@ struct Settings {
     uint32_t monitor = 0;            // 0 the primary display, n the nth display Windows lists
     bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
     bool show_fps = false;           // frames a second in a corner
-    uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame
+    uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
 };
 // the default keys for input::Control c
 std::array<uint16_t, 2> DefaultKeys(int c);
