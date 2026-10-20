@@ -4,11 +4,14 @@
 // AUDIT=N: every Nth frame's shaders and textures as a GPU backend would get them, see audit.cpp
 // snap in the run folder: the next two frames (SNAP_FRAMES) drawn and saved as snap_1.tga, snap_2.tga ..., then snap
 // is removed
+// memdump in the run folder: guest memory written to mem_<frame>.bin and mem_<frame>_phys.bin (uncommitted pages as
+// zeros) within 30 frames, then memdump is removed
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "app/app.h"
 #include "audit.h"
@@ -67,6 +70,11 @@ public:
             std::fclose(f);
             snap_ = 1;
         }
+        std::string memdump = (app::ExeDir() / "memdump").string();
+        if (frames_ % 30 == 0 && std::filesystem::exists(memdump)) {
+            std::remove(memdump.c_str());
+            DumpMemory();
+        }
         static const long every = harness::Env("REF"), cap = harness::Env("CAP");
         drawing_ = snap_ || (every && (frames_ + 1) % every == 0);
         if (drawing_) reference::BeginFrame();
@@ -91,6 +99,26 @@ public:
     }
 
 private:
+    // the user space's first 128 MB to mem_<frame>.bin, the contiguous mapping of physical memory (0x80000000, 64 MB)
+    // to mem_<frame>_phys.bin
+    void DumpMemory() {
+        constexpr uint32_t kPage = 4096;
+        static const std::vector<uint8_t> zeros(kPage);
+        struct Range {
+            uint32_t base, size;
+            const char* name;
+        };
+        for (Range r : {Range{0, 128u << 20, "mem_%05llu.bin"}, Range{0x80000000u, 64u << 20, "mem_%05llu_phys.bin"}}) {
+            std::string name = File(r.name, frames_);
+            FILE* f = std::fopen(name.c_str(), "wb");
+            if (!f) continue;
+            for (uint32_t va = r.base; va - r.base < r.size; va += kPage)
+                std::fwrite(mem::IsCommitted(va) ? kernel::HostPtr(va) : zeros.data(), 1, kPage, f);
+            std::fclose(f);
+            LOGI("memdump: guest memory %08X+%X written to %s", r.base, r.size, name.c_str());
+        }
+    }
+
     static std::string File(const char* fmt, unsigned long long n) {
         char name[64];
         std::snprintf(name, sizeof name, fmt, n);
