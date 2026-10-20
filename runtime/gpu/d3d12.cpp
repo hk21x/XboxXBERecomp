@@ -3506,29 +3506,15 @@ void D3D12Backend::ApplySettings() {
 }
 
 // Ultrawide: a title lays out its 2D (HUD, menus) for 16:9; shown wider it would stretch. Pretransformed draws without
-// a depth test on a stretched screen target are squeezed into the centred 16:9 part, unless they span the whole width
-// (full screen passes: the frame's own copy, blurs, movies). Depth tested ones (light glows, their visibility probes)
-// sit at world positions and stay.
+// a depth test on a stretched screen target are squeezed into the centred 16:9 part, each corner on its own: one on
+// the frame's left or right edge stays there (the vertex shader), so HUD bars from the edge still reach it and full
+// screen passes (the frame's own copy, blurs, movies) and full width lines keep their width. Depth tested ones (light
+// glows, their visibility probes) sit at world positions and stay.
 float D3D12Backend::HudSqueeze(const State& s, const Assembled& a) const {
     constexpr float kWide = 16.0f / 9.0f;
     if (!a.pretransformed || s.rs[kRsZEnable] || aspect_ <= kWide + 1e-3f || !bound_rt_) return 1;
     const Target& t = *bound_rt_;
     if (XStretch(t.gw, t.gh) <= 1) return 1;
-    // the draw's extent across, from register 0's x
-    float lo = 1e30f, hi = -1e30f;
-    auto see = [&](float x) { lo = std::min(lo, x), hi = std::max(hi, x); };
-    if (!a.vertices.empty()) {
-        uint32_t per = uint32_t(std::popcount(a.regs)) * 4;
-        for (uint32_t v = 0; per && v < a.vertex_count; v++) see(a.vertices[size_t(v) * per]);
-    } else if ((a.regs & 1) && a.elements[0].buffer < a.buffer_count) {
-        const VertexBuffer& b = a.buffers[a.elements[0].buffer];
-        for (uint32_t v = 0; b.src && b.stride && v < b.bytes / b.stride && v < 4096; v++) {
-            float x;
-            std::memcpy(&x, b.src + size_t(v) * b.stride + a.elements[0].offset, 4);
-            see(x);
-        }
-    }
-    if (lo > hi || (lo <= 1.0f && hi >= float(t.gw) - 1.0f)) return 1;
     return kWide / aspect_;
 }
 

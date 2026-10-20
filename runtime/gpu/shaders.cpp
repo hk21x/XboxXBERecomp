@@ -705,7 +705,9 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    float4 rhw = " + v(0, "float4(0,0,0,1)") + ";\n";
         s += "    float w = rhw.w == 0 ? 1 : 1 / rhw.w;\n";
         s += "    oPos = float4(rhw.xy, rhw.z / surf.z, w);\n";
-        s += "    oPos.x = hud.y + (oPos.x - hud.y) * hud.x;  // ultrawide: 2D drawn in a centred 16:9 part\n";
+        // ultrawide: 2D drawn in a centred 16:9 part; a corner on the frame's left or right edge stays there (HUD bars
+        // reaching the edge keep reaching it, full screen passes and full width lines keep their width)
+        s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5) oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
     } else {
         s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
         s += "    float4 cp = mul(ip, wvp);\n";

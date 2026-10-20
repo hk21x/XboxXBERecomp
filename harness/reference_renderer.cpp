@@ -1199,17 +1199,12 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     auto input = [&](uint32_t v, int r) { return &as.vertices[(size_t(v) * regs + slot[r]) * 4]; };
     uint32_t gw = rt.ok ? rt.w : zs.w, gh = rt.ok ? rt.h : zs.h;
     std::vector<Shaded> verts(as.vertex_count);
-    // ultrawide (FRAME_ASPECT_X100 over 16:9): 2D without a depth test that does not span the frame is squeezed into
-    // the centred 16:9 part, as D3D12's HudSqueeze does (the frame is shown stretched to that shape)
+    // ultrawide (FRAME_ASPECT_X100 over 16:9): 2D without a depth test is squeezed into the centred 16:9 part, a corner
+    // on the frame's left or right edge staying there, as D3D12's HudSqueeze and vertex shader do
     float squeeze = 1;
-    if (as.pretransformed && slot[0] >= 0 && !s.rs[kRsZEnable] && rt.ok && rt.h == 480 && rt.w >= rt.h && app::FrameAspect() > 16.0f / 9.0f + 1e-3f) {
-        float lo = 1e30f, hi = -1e30f;
-        for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
-            float x = input(vi, 0)[0];
-            lo = std::min(lo, x), hi = std::max(hi, x);
-        }
-        if (lo <= hi && !(lo <= 1.0f && hi >= float(rt.w) - 1.0f)) squeeze = 16.0f / 9.0f / app::FrameAspect();
-    }
+    if (as.pretransformed && slot[0] >= 0 && !s.rs[kRsZEnable] && rt.ok && rt.h == 480 && rt.w >= rt.h &&
+        app::FrameAspect() > 16.0f / 9.0f + 1e-3f)
+        squeeze = 16.0f / 9.0f / app::FrameAspect();
     for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
         VertexProgram vp{s};
         for (int r = 0; r < 16; r++) {
@@ -1235,7 +1230,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             const Vec& q = vp.in[0];
             if (as.pretransformed) {
                 o.pos = V(q[0], q[1], q[2] * s.zscale, q[3] == 0 ? 1 : 1 / q[3]);
-                o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
+                if (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f) o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
             } else {
                 // world, view, projection, then the viewport, as the D3D12 path builds it
                 auto mul = [](const float* x, const float* y, float* r) {
