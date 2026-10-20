@@ -51,7 +51,7 @@ constexpr KeyName kKeyNames[] = {
 }  // namespace
 
 std::string KeyToName(uint16_t vk) {
-    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return std::string(1, char(vk == 0 ? ' ' : std::tolower(vk)));
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return std::string(1, char(std::tolower(vk)));
     for (const KeyName& k : kKeyNames)
         if (k.vk == vk) return k.name;
     return vk ? "vk" + std::to_string(vk) : "";

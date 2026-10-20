@@ -154,10 +154,11 @@ Pad Poll(int port) {
         int from = c < int(s.pad_map.size()) && s.pad_map[c] < kControls ? s.pad_map[c] : c;
         out[c] = in[from];
     }
-    // the keyboard drives controller 1 while the game window has the focus
+    // the keyboard is controller 1, plugged in while keyboard play is on (alt-tabbing away must not unplug it), its
+    // keys read while the game window has the focus
     HWND hwnd = static_cast<HWND>(app::Window());
+    if (port == 0 && s.keyboard) p.connected = true;
     if (port == 0 && s.keyboard && hwnd && GetForegroundWindow() == hwnd) {
-        p.connected = true;
         for (int c = 0; c < kControls; c++) {
             std::array<uint16_t, 2> keys = c < int(s.keys.size()) ? s.keys[c] : app::DefaultKeys(c);
             for (uint16_t k : keys)
