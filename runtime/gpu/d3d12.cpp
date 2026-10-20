@@ -2591,11 +2591,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     bool tested = test.vs && s.vs_handle == test.vs;
     if (tested && test.alphakill) pk.alphakill = 0;
     pk.quad = sh.quad;
-    // XBE_WBUFFER=1 (experiment): D3DZB_USEW draws write w as their depth, as the console does
+    // D3DZB_USEW draws write w as their depth, as the console does (a Z buffer lost the showroom car's panels to its
+    // interior); XBE_WBUFFER=0 goes back to z / w
     static const bool wbuffer = [] {
         const char* e = std::getenv("XBE_WBUFFER");
-        bool on = e && *e == '1';
-        if (on) LOGR("d3d12: XBE_WBUFFER=1, W-buffered draws write w as their depth");
+        bool on = !(e && *e == '0');
+        if (!on) LOGR("d3d12: XBE_WBUFFER=0, W-buffered draws use z / w");
         return on;
     }();
     pk.wbuf = wbuffer && s.rs[kRsZEnable] == 2 && bound_ds_ ? 1 : 0;

@@ -332,8 +332,8 @@ void AuditDraw(const State& s, uint32_t prim, uint32_t start, uint32_t count, co
     }
     PixelKey pk = MakePixelKey(s, info);
     pk.quad = quad;
-    // as the D3D12 backend with XBE_WBUFFER=1
-    static const bool wbuffer = std::getenv("XBE_WBUFFER") && *std::getenv("XBE_WBUFFER") == '1';
+    // as the D3D12 backend: W-buffered unless XBE_WBUFFER=0
+    static const bool wbuffer = !(std::getenv("XBE_WBUFFER") && *std::getenv("XBE_WBUFFER") == '0');
     pk.wbuf = wbuffer && s.rs[kRsZEnable] == 2 ? 1 : 0;
     std::string ps = PixelHlsl(pk);
     WriteShader("ps", Hash(ps.data(), ps.size()), ps);
