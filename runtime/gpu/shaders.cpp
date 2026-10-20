@@ -32,7 +32,7 @@ struct VOut {
     float4 tc2 : TEXCOORD2;
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
-    noperspective float wlin : TEXCOORD6;
+    float wlin : TEXCOORD6;  // w, interpolated perspective correct: the pixel's own
 };
 cbuffer VC : register(b0) { float4 c[192]; };
 cbuffer DC : register(b1) {
@@ -807,8 +807,8 @@ std::string PixelHlsl(const PixelKey& k) {
         s += F("%s tex%d : register(t%d);\n%s smp%d : register(s%d);\n", type, i, i, t.shadow ? "SamplerComparisonState" : "SamplerState", i, i);
     }
     if (k.wbuf) {
-        // the NV2A's Z_PERSPECTIVE: w interpolated linearly on the screen, the polygon offset in its units and its
-        // slope, stored whole (after xemu)
+        // the NV2A's Z_PERSPECTIVE: the pixel's w, the polygon offset in its units and its slope, stored whole (xemu
+        // interpolates w linearly on the screen, which puts long triangles reaching the camera in front of everything)
         s += "float4 main(VOut i, bool front : SV_IsFrontFace, out float depth : SV_Depth) : SV_Target {\n";
         s += "    float wz = i.wlin + wdepth.x + wdepth.y * max(abs(ddx(i.wlin)), abs(ddy(i.wlin)));\n";
         s += "    depth = saturate(floor(max(wz, 0)) * wdepth.z);\n";

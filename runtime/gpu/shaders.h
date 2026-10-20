@@ -32,7 +32,7 @@ struct PixelKey {
     uint32_t flat = 0, two_sided = 0;
     uint32_t proj = 0;       // fixed function: bit per stage sampled at coordinates divided by w
     uint32_t quad = 0;       // a screen quad: QuadHlsl
-    uint32_t wbuf = 0;       // D3DZB_USEW: the depth written is the vertex w, linear on screen (DrawConstants::wdepth)
+    uint32_t wbuf = 0;       // D3DZB_USEW: the depth written is the pixel's w (DrawConstants::wdepth)
     bool operator==(const PixelKey& o) const;
 };
 

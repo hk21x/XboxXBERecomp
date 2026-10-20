@@ -1385,8 +1385,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             float inv_area = 1 / area;
             // polygon offset (solid fill): units in depth buffer steps plus the slope scale times the larger of the
             // triangle's depth gradients in x and y
-            // D3DZB_USEW (ZENABLE 2): the depth is the vertex w interpolated linearly on the screen, offsets added in its
-            // units (as the NV2A's Z_PERSPECTIVE mode, after xemu); otherwise z / w
+            // D3DZB_USEW (ZENABLE 2): the depth is the pixel's w, offsets added in its units (the NV2A's Z_PERSPECTIVE
+            // mode; xemu interpolates w linearly on the screen, which streaks long triangles); otherwise z / w
             const bool wbuf = s.rs[kRsZEnable] == 2 && !std::getenv("REF_NO_WBUFFER");
             float w0 = 1 / p0.iw, w1 = 1 / p1.iw, w2 = 1 / p2.iw;
             float zv0 = wbuf ? w0 : p0.z, zv1 = wbuf ? w1 : p1.z, zv2 = wbuf ? w2 : p2.z;
@@ -1407,7 +1407,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     float b1 = ((p2.x - cx) * (p0.y - cy) - (p0.x - cx) * (p2.y - cy)) * inv_area;
                     float b2 = 1 - b0 - b1;
                     if (b0 < 0 || b1 < 0 || b2 < 0) continue;
-                    float z = b0 * zv0 + b1 * zv1 + b2 * zv2;
+                    // W-buffered: the pixel's own w, perspective correct (w interpolated linearly on the screen
+                    // put long triangles that reach the camera in front of everything)
+                    float z = wbuf ? 1.0f / (b0 * p0.iw + b1 * p1.iw + b2 * p2.iw) : b0 * zv0 + b1 * zv1 + b2 * zv2;
                     if (z < 0 || (!wbuf && z > s.zscale)) continue;
                     z = std::clamp(z + zoff + float(adjust.depth_bias) * s.zscale / 16777215.0f, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
