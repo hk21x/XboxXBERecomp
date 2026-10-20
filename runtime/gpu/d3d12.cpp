@@ -69,6 +69,7 @@ struct Perf {
     double draw = 0;
     double assemble = 0;
     double bind = 0;
+    double t_shaders = 0, pso = 0, consts = 0, tables = 0, setup = 0, geometry = 0;  // the rest of a draw, by step
     double sig = 0;
     double texup = 0;
     double compile = 0;
@@ -622,6 +623,18 @@ private:
     std::vector<uint8_t> vsc_last_, dc_last_;
     std::unordered_map<uint64_t, uint32_t> tables_;
     uint64_t root_args_[4] = {};  // what each root parameter holds now, 0 unknown
+    // the draw path's last pipeline, topology, viewport, scissor, blend factor and stencil reference; anything else that
+    // sets them calls ForgetDrawState
+    struct DrawStateCache {
+        ID3D12PipelineState* pso = nullptr;
+        int topo = -1;
+        bool vp_ok = false, bf_ok = false;
+        D3D12_VIEWPORT vp{};
+        D3D12_RECT sc{};
+        float bf[4] = {};
+        uint32_t sref = ~0u;
+    } ds_cache_;
+    void ForgetDrawState() { ds_cache_ = {}; }
     void SetRootCbv(uint32_t i, D3D12_GPU_VIRTUAL_ADDRESS va) {
         if (root_args_[i] == va) return;
         root_args_[i] = va;
@@ -994,6 +1007,7 @@ void D3D12Backend::Begin() {
     cl_->SetGraphicsRootSignature(root_.Get());
     bound_rt_ = bound_ds_ = nullptr;
     std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
+    ForgetDrawState();
 }
 
 void D3D12Backend::Submit(bool wait) {
@@ -1027,6 +1041,7 @@ void D3D12Backend::WaitFence(uint64_t value) {
 }
 
 void D3D12Backend::SetFullViewport(uint32_t w, uint32_t h) {
+    ForgetDrawState();
     D3D12_VIEWPORT vp{0, 0, float(w), float(h), 0, 1};
     D3D12_RECT scissor{0, 0, LONG(w), LONG(h)};
     cl_->RSSetViewports(1, &vp);
@@ -1440,6 +1455,7 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
 // the full screen triangle: cb at b0 and b1, views at srv_slot; without a sampler slot EnsureBlitSamplers gives it
 void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t srv_slot,
                                   std::optional<uint32_t> sampler_slot) {
+    ForgetDrawState();
     cl_->SetPipelineState(pso);
     SetRootCbv(0, cb);
     SetRootCbv(1, cb);
@@ -1579,6 +1595,7 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
     SetFullViewport(w, h);
     if (blend >= 0) {
         float f[4] = {blend, blend, blend, blend};
+        ForgetDrawState();
         cl_->OMSetBlendFactor(f);
     }
     DrawFullScreen(pso, cb.gpu, slot);
@@ -2583,7 +2600,8 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     float W = float(b->w);
     float H = float(b->h);
     D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
-    cl_->RSSetViewports(1, &vp);
+    DrawStateCache& c = ds_cache_;
+    if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) cl_->RSSetViewports(1, &vp);
     float sx = W / gw, sy = b->gh ? H / b->gh : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(s.viewport.x * sx);
     LONG y0 = LONG(s.viewport.y * sy);
@@ -2597,14 +2615,23 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     }
     D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
                     std::clamp<LONG>(x1, 0, LONG(W)), std::clamp<LONG>(y1, 0, LONG(H))};
-    cl_->RSSetScissorRects(1, &rect);
+    if (!c.vp_ok || std::memcmp(&c.sc, &rect, sizeof(rect))) cl_->RSSetScissorRects(1, &rect);
+    c.vp = vp;
+    c.sc = rect;
+    c.vp_ok = true;
 }
 
 void D3D12Backend::SetBlendFactorStencilRef(const State& s) {
     float bf[4];
     Color(SimpleState(s, kMBlendColor), bf);
-    cl_->OMSetBlendFactor(bf);
-    cl_->OMSetStencilRef(SimpleState(s, kMStencilRef) & 0xFF);
+    DrawStateCache& c = ds_cache_;
+    if (!c.bf_ok || std::memcmp(c.bf, bf, sizeof(bf))) {
+        cl_->OMSetBlendFactor(bf);
+        std::memcpy(c.bf, bf, sizeof(bf));
+        c.bf_ok = true;
+    }
+    uint32_t sref = SimpleState(s, kMStencilRef) & 0xFF;
+    if (c.sref != sref) cl_->OMSetStencilRef(c.sref = sref);
 }
 
 D3D_PRIMITIVE_TOPOLOGY PrimitiveTopology(const Assembled& a) {
@@ -2628,7 +2655,8 @@ void D3D12Backend::UploadVertexBuffers(const Assembled& a) {
 
 void D3D12Backend::DrawGeometry(const Assembled& a) {
     UploadVertexBuffers(a);
-    cl_->IASetPrimitiveTopology(PrimitiveTopology(a));
+    int topo = int(PrimitiveTopology(a));
+    if (ds_cache_.topo != topo) cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(ds_cache_.topo = topo));
     if (a.index_count) {
         uint32_t ibytes = a.index_count * (a.index16 ? 2 : 4);
         Alloc ib = Upload(ibytes, 4);
@@ -2756,14 +2784,17 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (ext_ && ext_->Bound(*this, s, bound_rt_, bound_ds_, a.pretransformed) && !BindTargets(s)) return;
 
     // vertex shader
+    auto perf_shaders = PerfClock::now();
     DrawShaders sh = ClassifyShaders(s, a, count);
     if (sh.prog) EnsureProgramHash(s);
     sh.vkey = VertexKey(s, a, sh);
     EnsureVertexShader(s, a, sh);
 
+    g_perf.t_shaders += PerfMs(perf_shaders);
     // stage textures, then the pixel shader made for them
     DrawTextures stages;
     if (!BindStageTexturesAndTargets(s, stages)) return;
+    perf_shaders = PerfClock::now();
     PixelKey pk = MakePixelKey(s, stages.info);
     const diag::DrawTest& test = diag::DrawTests();
     bool tested = test.vs && s.vs_handle == test.vs;
@@ -2780,9 +2811,11 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     pk.wbuf = wbuffer && s.rs[kRsZEnable] == 2 && bound_ds_ ? 1 : 0;
     sh.pkey = Hash(&pk, sizeof(pk));
     EnsurePixelShader(pk, sh);
+    g_perf.t_shaders += PerfMs(perf_shaders);
     if (!sh.vs_code || !sh.ps_code) return;
 
     // pipeline
+    auto perf_pso = PerfClock::now();
     PsoKey k;
     BuildPipelineKey(s, a, sh.vh, sh.ph, k);
     if (tested && test.cull) k.cull = 0;
@@ -2799,9 +2832,11 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
-    cl_->SetPipelineState(pso);
+    if (ds_cache_.pso != pso) cl_->SetPipelineState(ds_cache_.pso = pso);
+    g_perf.pso += PerfMs(perf_pso);
 
     // constants
+    auto perf_consts = PerfClock::now();
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
@@ -2810,6 +2845,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     c.hud[1] = guest_w_ * 0.5f;
     if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f;
     UploadConstants(s, sh, k, stages, size, c);
+    g_perf.consts += PerfMs(perf_consts);
 
     if (cap_) {
         CaptureDraw(s, prim, count, k, c, stages);
@@ -2818,14 +2854,20 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     }
 
     // texture views and samplers, viewport and scissor, blend factor and stencil reference
+    auto perf_step = PerfClock::now();
     SetTextureViewsAndSamplers(s, a, stages);
+    g_perf.tables += PerfMs(perf_step);
+    perf_step = PerfClock::now();
     SetViewportScissor(s, size.w);
     SetBlendFactorStencilRef(s);
+    g_perf.setup += PerfMs(perf_step);
 
     // geometry, counted while the title runs a visibility test
+    perf_step = PerfClock::now();
     uint32_t query = BeginCountedDraw(s);
     DrawGeometry(a);
     EndCountedDraw(query);
+    g_perf.geometry += PerfMs(perf_step);
     // XBE_CAPTURE_DRAWS: the target after each draw in the range (cap_i_ moved on past this draw's number)
     if (cap_ && draw_rt_) {
         diag::DrawRange r = diag::CaptureDraws();
@@ -3006,6 +3048,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         LONG bottom = std::min(LONG(vp.TopLeftY + vp.Height), LONG(dst_t.h));
         D3D12_RECT scissor{LONG(vp.TopLeftX), LONG(vp.TopLeftY), right, bottom};
         if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) continue;
+        ForgetDrawState();
         cl_->RSSetViewports(1, &vp);
         cl_->RSSetScissorRects(1, &scissor);
         float uv[4] = {r.x0 / src_t.gw, r.y0 / src_t.gh, (r.x1 - r.x0) / src_t.gw, (r.y1 - r.y0) / src_t.gh};
@@ -3191,6 +3234,7 @@ void D3D12Backend::BlitFrame(Target& t) {
     float uv[4] = {0, 0, 1, 1};
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
     D3D12_RECT scissor{0, 0, LONG(bb_w_), LONG(bb_h_)};
+    ForgetDrawState();
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3279,8 +3323,10 @@ void LogPerf() {
         double n = double(perf_frames);
         double host = p.draw + p.clear + p.copy + p.present + p.sync;
         LOGR("perf: %.1f fps %.2f ms/frame | host %.2f (draw %.2f: assemble %.2f bind %.2f [check %.2f, upload %.2f] "
+             "shaders %.2f pso %.2f consts %.2f tables %.2f setup %.2f geometry %.2f "
              "compile %.2f; clear %.2f copy %.2f sync %.2f present %.2f [swap %.2f wait %.2f]) other %.2f",
              n * 1000.0 / el, el / n, host / n, p.draw / n, p.assemble / n, p.bind / n, p.sig / n, p.texup / n,
+             p.t_shaders / n, p.pso / n, p.consts / n, p.tables / n, p.setup / n, p.geometry / n,
              p.compile / n, p.clear / n, p.copy / n, p.sync / n, p.present / n, p.swap / n, p.wait / n,
              (el - host) / n);
         LOGR("perf: title thread per frame: recording %.2f ms, waiting %.2f ms (%.1f waits: read-back %.2f "
