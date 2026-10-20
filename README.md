@@ -78,6 +78,7 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### General
 - **Settings Window** - F1, or Back + Start on any controller, opens an in-game window for monitor, display mode, resolution, vsync, aspect ratio, render scale, anisotropic filtering, frame rate cap, FXAA, a frame counter, pausing on focus loss, the game's own options (with labels and help lines) and controls, saved at once. Controllers navigate it through SDL, so every pad type works.
+- **Achievements** - A game lists achievements as conditions on guest memory in RetroAchievements' syntax (`GameInfo::achievements`); they are checked each frame, unlock with a pop-up, are listed in the settings window and kept in `achievements.toml`.
 - **Pause On Focus Loss** - The title waits at its next frame and the mixer is not pulled, so the game, its sound and its sample clock stand still while the window is behind another.
 - **Hard Disk** - Emulates the hard disk's partitions, formats the cache partition and keeps save games beside the exe.
 - **Disc Images** - Runs the game from an ISO in the `assets` folder, either a whole disc dump or the game partition, or from the extracted data files.

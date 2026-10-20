@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/achievements.h"
+
 namespace input {
 struct Pad;
 }
@@ -118,6 +120,7 @@ struct GameInfo {
     void (*ui)(double fps);        // each frame inside the ImGui frame, UiLock held
     void (*pad)(int port, input::Pad& pad);  // a polled pad before the game gets it
     void (*rumble)(int port, uint16_t& left, uint16_t& right);
+    std::vector<achievements::Def> achievements = {};  // core/achievements.h
 };
 extern const GameInfo kGame;
 

@@ -250,7 +250,53 @@ void FeedPad() {
     last = held;
 }
 
+// the newest unlock for a few seconds, top right
+void DrawUnlock() {
+    std::string title;
+    uint32_t points = 0;
+    double age = 0;
+    if (!achievements::Recent(title, points, age) || age > 6) return;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 16, vp->WorkPos.y + 16), ImGuiCond_Always, ImVec2(1, 0));
+    ImGui::SetNextWindowBgAlpha(0.8f);
+    ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##unlock", nullptr, f)) {
+        ImGui::TextDisabled("Achievement unlocked");
+        ImGui::Text("%s  (%u)", title.c_str(), points);
+    }
+    ImGui::End();
+}
+
+void Achievements() {
+    std::vector<achievements::Status> list = achievements::List();
+    uint32_t got = 0, points = 0, total = 0;
+    for (auto& a : list) {
+        total += a.def->points;
+        if (a.unlocked) got++, points += a.def->points;
+    }
+    ImGui::Text("%u of %zu unlocked, %u of %u points", got, list.size(), points, total);
+    if (!ImGui::BeginTable("achievements", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) return;
+    ImGui::TableSetupColumn("Achievement");
+    ImGui::TableSetupColumn("Points");
+    ImGui::TableSetupColumn("Unlocked");
+    ImGui::TableHeadersRow();
+    for (auto& a : list) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        if (a.unlocked) ImGui::TextUnformatted(a.def->title);
+        else ImGui::TextDisabled("%s", a.def->title);
+        ImGui::TextDisabled("%s", a.def->description);
+        ImGui::TableNextColumn();
+        ImGui::Text("%u", a.def->points);
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(a.unlocked ? a.when.c_str() : "-");
+    }
+    ImGui::EndTable();
+}
+
 void DrawHud(double fps) {
+    DrawUnlock();
     if (!Get().show_fps) return;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 8, vp->WorkPos.y + 8));
@@ -303,6 +349,10 @@ void DrawOverlay() {
             }
             if (ImGui::BeginTabItem("Game")) {
                 GameOptions();
+                ImGui::EndTabItem();
+            }
+            if (!kGame.achievements.empty() && ImGui::BeginTabItem("Achievements")) {
+                Achievements();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("General")) {

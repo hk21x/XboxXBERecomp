@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "app/app.h"
+#include "core/achievements.h"
 #include "core/diag.h"
 #include "gpu/backend.h"
 #include "gpu/shaders.h"
@@ -676,6 +677,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    achievements::Frame();
     app::Pace(PresentVblanks());
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
