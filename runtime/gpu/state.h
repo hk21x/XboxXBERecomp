@@ -195,6 +195,10 @@ struct State {
     uint32_t light_enable = 0;                         // bit per light
     float ss_offset_x = 0, ss_offset_y = 0;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
+    // 1 / the projection's far w, as the XDK's SetTransform derives it (0x1C34A0). W-buffered, the fixed function and
+    // pretransformed vertices have w scaled by zscale * inv_wfar (0x1C0FC0 folds it into the matrix, 0x1C0300 into
+    // the pass-through program's c0.w); a vertex program's w is its own
+    float inv_wfar = 1.0f;
 };
 
 // what a title's code may change about one draw: g_draw_filter, set before the first frame, sees each draw's state

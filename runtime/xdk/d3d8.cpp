@@ -842,6 +842,13 @@ HLE_STDCALL(D3DDevice_SetTransform, 2) {
     std::memcpy(HostPtr(kDevice + kDevTransforms + t * 64), HostPtr(a[1]), 64);
     uint32_t pc = t < 2 ? t + 2 : t < 6 ? t + 14 : t + 250;
     std::memcpy(g_state.transforms[pc].data(), HostPtr(a[1]), 64);
+    if (t == 1) {  // the far w of the projection, as the library's own SetTransform finds it
+        const float* m = g_state.transforms[pc].data();
+        float wfar = 1;
+        if (m[10] != m[11] && m[10] != 0) wfar = (m[15] - m[14]) / (m[10] - m[11]) * m[11] + m[15];
+        g_state.inv_wfar = wfar != 0 && std::isfinite(1 / wfar) ? 1 / wfar : 1;
+        LOG_FIRST(4, "d3d: projection far w %g", wfar);
+    }
     return 0;
 }
 
@@ -1429,7 +1436,11 @@ std::vector<float> g_im_vertices;       // every slot per vertex
 // at a physical address in the first 16 MB
 void ApplyVisibilityMethod(uint32_t m, uint32_t v) {
     constexpr uint32_t kReportAddressMask = 0xFFFFFF;
-    if (m == gpu::kMCountEnable) g_state.simple[gpu::kMCountEnable >> 2] = v;
+    if (m == gpu::kMCountEnable) {
+        g_state.simple[gpu::kMCountEnable >> 2] = v;
+        if (g_framelog) d3d::FrameLogNote(v ? "visibility count on" : "visibility count off");
+    }
+    if (g_framelog && m == gpu::kMGetReport) d3d::FrameLogNote("visibility report");
     if (!g_backend) return;
     if (m == gpu::kMClearReport) g_backend->ClearReport();
     if (m == gpu::kMGetReport) {

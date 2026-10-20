@@ -2629,7 +2629,8 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (!adjust.depth_test) k.zen = k.zwrite = 0;
     k.zbias += adjust.depth_bias;
     // W-buffered: the pixel shader adds the polygon offset to w, the rasterizer's bias would act on the unused z
-    float wdepth[4] = {float(k.zbias), k.zslope, 1.0f / 16777216.0f, 0};
+    // .w scales w to depth units: the fixed function's and pretransformed vertices' w is the projection's
+    float wdepth[4] = {float(k.zbias), k.zslope, 1.0f / 16777216.0f, sh.prog ? 1.0f : s.zscale * s.inv_wfar};
     if (pk.wbuf) k.zbias = 0, k.zslope = 0;
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);

@@ -810,7 +810,8 @@ std::string PixelHlsl(const PixelKey& k) {
         // the NV2A's Z_PERSPECTIVE: the pixel's w, the polygon offset in its units and its slope, stored whole (xemu
         // interpolates w linearly on the screen, which puts long triangles reaching the camera in front of everything)
         s += "float4 main(VOut i, bool front : SV_IsFrontFace, out float depth : SV_Depth) : SV_Target {\n";
-        s += "    float wz = i.wlin + wdepth.x + wdepth.y * max(abs(ddx(i.wlin)), abs(ddy(i.wlin)));\n";
+        s += "    float wl = i.wlin * wdepth.w;\n";
+        s += "    float wz = wl + wdepth.x + wdepth.y * max(abs(ddx(wl)), abs(ddy(wl)));\n";
         s += "    depth = saturate(floor(max(wz, 0)) * wdepth.z);\n";
     } else {
         s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");

@@ -1390,7 +1390,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             // D3DZB_USEW (ZENABLE 2): the depth is the pixel's w, offsets added in its units (the NV2A's Z_PERSPECTIVE
             // mode; xemu interpolates w linearly on the screen, which streaks long triangles); otherwise z / w
             const bool wbuf = s.rs[kRsZEnable] == 2 && !std::getenv("REF_NO_WBUFFER");
-            float w0 = 1 / p0.iw, w1 = 1 / p1.iw, w2 = 1 / p2.iw;
+            // the fixed function's and pretransformed vertices' w scaled to depth units (State::inv_wfar)
+            const float wk = program ? 1.0f : s.zscale * s.inv_wfar;
+            float w0 = wk / p0.iw, w1 = wk / p1.iw, w2 = wk / p2.iw;
             float zv0 = wbuf ? w0 : p0.z, zv1 = wbuf ? w1 : p1.z, zv2 = wbuf ? w2 : p2.z;
             float zoff = 0;
             if (s.simple[kMSolidOffsetEnable >> 2]) {
@@ -1411,7 +1413,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     if (b0 < 0 || b1 < 0 || b2 < 0) continue;
                     // W-buffered: the pixel's own w, perspective correct (w interpolated linearly on the screen
                     // put long triangles that reach the camera in front of everything)
-                    float z = wbuf ? 1.0f / (b0 * p0.iw + b1 * p1.iw + b2 * p2.iw) : b0 * zv0 + b1 * zv1 + b2 * zv2;
+                    float z = wbuf ? wk / (b0 * p0.iw + b1 * p1.iw + b2 * p2.iw) : b0 * zv0 + b1 * zv1 + b2 * zv2;
                     if (z < 0 || (!wbuf && z > s.zscale)) continue;
                     z = std::clamp(z + zoff + float(adjust.depth_bias) * s.zscale / 16777215.0f, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
