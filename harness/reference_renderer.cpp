@@ -1156,7 +1156,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     Plane rt = OpenPlane(s.rt);
     Plane zs = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? OpenPlane(s.zs) : Plane{};
     if (!rt.ok && !zs.ok) return;
-    if (rt.ok && zs.ok && (rt.w != zs.w || rt.h != zs.h)) zs.ok = false;
+    // a depth buffer at least as big serves a smaller target (each surface keeps its own pitch: the console renders a
+    // showroom car into a 500x200 texture with the 640x480 one); a smaller one cannot
+    if (rt.ok && zs.ok && (zs.w < rt.w || zs.h < rt.h)) zs.ok = false;
     auto simple = [&](uint32_t method) { return s.simple[method >> 2]; };
 
     Material mat;

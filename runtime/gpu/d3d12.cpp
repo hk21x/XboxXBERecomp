@@ -590,9 +590,10 @@ private:
         bool sized;  // the entry is there at the surface's size
     };
     Target* FindTarget(const Surface& s, bool depth);
-    Target* EnsureTarget(const Surface& s, bool depth);
+    Target* EnsureTarget(const Surface& s, bool depth, uint32_t gw = 0, uint32_t gh = 0);
+    Target* DepthTarget(const State& s);
     // EnsureTarget's steps, in call order
-    TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt);
+    TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt, uint32_t gw = 0, uint32_t gh = 0);
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
     bool TargetStale(uint32_t data) const;
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
@@ -1068,10 +1069,12 @@ uint64_t D3D12Backend::SizedTargetKey(uint32_t data, bool depth, uint32_t gw, ui
 }
 
 // alt: the extension's bits of the key
-D3D12Backend::TargetSlot D3D12Backend::FindTargetSlot(const Surface& s, bool depth, uint64_t alt) {
+D3D12Backend::TargetSlot D3D12Backend::FindTargetSlot(const Surface& s, bool depth, uint64_t alt, uint32_t gw,
+                                                      uint32_t gh) {
     TargetSlot slot;
     slot.data = mem::VirtualFromPhysical(s.data);
     SurfaceSize(s, slot.gw, slot.gh);
+    if (gw && gh) slot.gw = gw, slot.gh = gh;
     slot.key = SizedTargetKey(slot.data, depth, slot.gw, slot.gh) | alt;
     slot.it = targets_.find(slot.key);
     slot.sized = slot.it != targets_.end() && slot.it->second.gw == slot.gw && slot.it->second.gh == slot.gh;
@@ -1090,11 +1093,12 @@ Target* D3D12Backend::FindTarget(const Surface& s, bool depth) {
 }
 
 // the surface's target, made again at its size when that changed
-Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
+// gw and gh, when set, stand in for the surface's own size (DepthTarget)
+Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, uint32_t gh) {
     if (!s.header) return nullptr;
     uint64_t alt = 0;
     if (ext_ && !ext_->TargetKey(s, depth, alt)) return nullptr;
-    TargetSlot slot = FindTargetSlot(s, depth, alt);
+    TargetSlot slot = FindTargetSlot(s, depth, alt, gw, gh);
     target_used_[slot.data] = frame_;
     if (slot.sized) return &slot.it->second;
     if (slot.it != targets_.end()) ReleaseTarget(slot.it);
@@ -1117,9 +1121,22 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
     return &ref;
 }
 
+// the depth target for the bound colour target. The console draws a smaller colour target with a bigger depth buffer
+// (its top left part: PGR2 renders the showroom car into a 500x200 texture with the 640x480 one); here a depth target
+// of the colour target's size stands in, since a view of another size cannot be bound with it
+Target* D3D12Backend::DepthTarget(const State& s) {
+    uint32_t rw = 0, rh = 0, zw = 0, zh = 0;
+    if (s.rt.header && s.zs.header) {
+        SurfaceSize(s.rt, rw, rh);
+        SurfaceSize(s.zs, zw, zh);
+        if (rw <= zw && rh <= zh && (rw != zw || rh != zh)) return EnsureTarget(s.zs, true, rw, rh);
+    }
+    return EnsureTarget(s.zs, true);
+}
+
 bool D3D12Backend::BindTargets(const State& s) {
     Target* rt = EnsureTarget(s.rt, false);
-    Target* ds = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? EnsureTarget(s.zs, true) : nullptr;
+    Target* ds = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? DepthTarget(s) : nullptr;
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
     if (rt) {
@@ -2700,7 +2717,7 @@ void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
                 color, z);
     }
     Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false) : nullptr;
-    Target* ds = (flags & (kClearZ | kClearStencil)) ? EnsureTarget(s.zs, true) : nullptr;
+    Target* ds = (flags & (kClearZ | kClearStencil)) ? DepthTarget(s) : nullptr;
     uint32_t gw;
     uint32_t gh;
     SurfaceSize(rt ? s.rt : s.zs, gw, gh);
