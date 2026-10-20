@@ -2715,7 +2715,10 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     k.zbias += adjust.depth_bias;
     // W-buffered: the pixel shader adds the polygon offset to w, the rasterizer's bias would act on the unused z
     // .w scales w to depth units: the fixed function's and pretransformed vertices' w is the projection's
-    float wdepth[4] = {float(k.zbias), k.zslope, 1.0f / 16777216.0f, sh.prog ? 1.0f : s.zscale * s.inv_wfar};
+    // in the guest depth format's own steps (k.zbias is in 24 bit ones for the rasterizer): .x the offset, .z one step
+    // (a D16 shadow map holds w in 65536 steps, D24 in 2^24)
+    float wdepth[4] = {float(k.zbias) * s.zscale / kDepth24Max, k.zslope, 1.0f / (s.zscale + 1.0f),
+                       sh.prog ? 1.0f : s.zscale * s.inv_wfar};
     if (pk.wbuf) k.zbias = 0, k.zslope = 0;
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
@@ -3277,6 +3280,19 @@ void D3D12Backend::ApplySettings() {
     }
     float want = app::RenderScale(guest_h_);
     bool remake = ext_ && ext_->Settings();
+    // a new scale waits until it has held for half a second: dragging the slider would remake every target (and
+    // every MSAA twin) each frame
+    static float pending = 0;
+    static std::chrono::steady_clock::time_point since;
+    auto now = std::chrono::steady_clock::now();
+    if (std::fabs(want - scale_) > 1e-4f && !remake) {
+        if (std::fabs(want - pending) > 1e-4f) {
+            pending = want;
+            since = now;
+            return;
+        }
+        if (now - since < std::chrono::milliseconds(500)) return;
+    }
     if (std::fabs(want - scale_) > 1e-4f || remake) {
         Flush();
         scale_ = want;
