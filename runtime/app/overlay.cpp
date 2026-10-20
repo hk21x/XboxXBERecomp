@@ -182,11 +182,13 @@ void Controls(Settings& s) {
     }
     ImGui::TextDisabled("Click a key box, then press the key (Escape clears it). Each input takes up to two keys.");
     ImGui::TextDisabled("On a controller, Back + Start opens this window and Start closes it.");
-    if (!ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) return;
-    ImGui::TableSetupColumn("Console input");
-    ImGui::TableSetupColumn("Key");
-    ImGui::TableSetupColumn("Key");
-    ImGui::TableSetupColumn("Controller input");
+    if (!ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg)) return;
+    // the names and keys at their full width, the controller input takes what is left
+    float pad = ImGui::GetStyle().FramePadding.x * 2 + ImGui::GetStyle().CellPadding.x * 2;
+    ImGui::TableSetupColumn("Console input", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Right stick right").x + pad);
+    ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("press a key...").x + pad);
+    ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("press a key...").x + pad);
+    ImGui::TableSetupColumn("Controller input", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableHeadersRow();
     for (int c = 0; c < input::kControls; c++) {
         ImGui::PushID(c);
