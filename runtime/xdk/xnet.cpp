@@ -25,6 +25,16 @@
 #include "app/app.h"
 #include "xdk/hle.h"
 
+// configs written before the SDK knew the name
+#ifndef SYM_XNetGetConnectStatus
+#define SYM_XNetGetConnectStatus FFFFFB00
+#define HAS_XNetGetConnectStatus 0
+#endif
+#ifndef SYM_XNetUnregisterInAddr
+#define SYM_XNetUnregisterInAddr FFFFFB01
+#define HAS_XNetUnregisterInAddr 0
+#endif
+
 using kernel::HostPtr;
 using kernel::R32;
 using kernel::W32;
@@ -175,8 +185,22 @@ void Init() {
     });
 }
 
+// XNET_TRACE=1: every call, datagram and error in the log (release builds too)
+bool Tracing() {
+    static const bool on = [] {
+        const char* e = std::getenv("XNET_TRACE");
+        return e && *e == '1';
+    }();
+    return on;
+}
+#define XTRACE(...) \
+    do {            \
+        if (Tracing()) LOGR("xnet: " __VA_ARGS__); \
+    } while (0)
+
 uint32_t Fail(int err) {
     t_error = uint32_t(err);
+    if (err != WSAEWOULDBLOCK && err != WSA_IO_PENDING) XTRACE("error %d", err);
     return kSocketError;
 }
 int HostError() {
@@ -245,6 +269,8 @@ int Recv(uint32_t sock, SOCKET s, const std::vector<Span>& spans, uint32_t from,
         if (g_public.size() > kMaxPublic) g_public.erase(g_public.begin());
     }
     src.sin_port = GuestPort(src.sin_port);
+    XTRACE("recv %X %d bytes from %s, first %02X %02X %02X %02X", sock, n, Addr(src).c_str(), buf[0], n > 1 ? buf[1] : 0,
+           n > 2 ? buf[2] : 0, n > 3 ? buf[3] : 0);
     if (from) std::memcpy(HostPtr(from), &src, sizeof(src));
     if (fromlen) W32(fromlen, sizeof(src));
     return done;
@@ -288,6 +314,8 @@ int SendOnce(SOCKET s, const uint8_t* data, int len, const sockaddr_in* to) {
 
 int Send(uint32_t sock, SOCKET s, const uint8_t* data, int len, const sockaddr_in* to) {
     int n = SendOnce(s, data, len, to);
+    XTRACE("send %X %d bytes to %s -> %d, first %02X %02X %02X %02X", sock, len, to ? Addr(*to).c_str() : "connected", n,
+           len > 0 ? data[0] : 0, len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
     if (n < 0) LOG_FIRST(20, "xnet: send %X failed (%d)", sock, WSAGetLastError());
     return n;
 }
@@ -302,6 +330,7 @@ std::vector<uint8_t> Gather(uint32_t bufs, uint32_t count) {
 }
 
 void Complete(uint32_t ovl, uint32_t status, uint32_t bytes) {
+    XTRACE("overlapped %08X done: status %X, %u bytes", ovl, status, bytes);
     W32(ovl + kOvlBytes, bytes);
     W32(ovl + kOvlStatus, status);
     Signal(R32(ovl + kOvlEvent));
@@ -410,11 +439,27 @@ HLE_STDCALL(XNetCreateKey, 2) {
     return 0;
 }
 HLE_STDCALL(XNetRegisterKey, 2) {
+    XTRACE("XNetRegisterKey from %08X", R32(ctx.esp));
     std::lock_guard<std::mutex> lock(g_lock);
     std::memcpy(g_kid.data(), HostPtr(a[0]), 8);
     return 0;
 }
-HLE_STDCALL(XNetUnregisterKey, 1) { return 0; }
+HLE_STDCALL(XNetUnregisterKey, 1) {
+    XTRACE("XNetUnregisterKey from %08X", R32(ctx.esp));
+    return 0;
+}
+
+// a secure address's connection: always up here, the peers are plain UDP (the library's own answered
+// XNET_CONNECT_STATUS_LOST without its network stack, and PGR2 dropped a system link host 16 ms after joining)
+HLE_STDCALL(XNetGetConnectStatus, 1) {
+    constexpr uint32_t kConnected = 2;  // XNET_CONNECT_STATUS_CONNECTED
+    XTRACE("XNetGetConnectStatus %s", Ip(a[0]).c_str());
+    return kConnected;
+}
+HLE_STDCALL(XNetUnregisterInAddr, 1) {
+    XTRACE("XNetUnregisterInAddr %s", Ip(a[0]).c_str());
+    return 0;
+}
 
 HLE_STDCALL(XNetGetTitleXnAddr, 1) {
     Init();
@@ -434,10 +479,12 @@ HLE_STDCALL(XNetXnAddrToInAddr, 3) {
         std::memcpy(g_peers[ina].data(), HostPtr(a[0]), kXnAddrSize);
     }
     W32(a[2], ina);
+    XTRACE("XNetXnAddrToInAddr %s -> %s", Ip(R32(a[0])).c_str(), Ip(ina).c_str());
     return 0;
 }
 HLE_STDCALL(XNetInAddrToXnAddr, 3) {
     uint32_t ina = a[0];
+    XTRACE("XNetInAddrToXnAddr %s", Ip(ina).c_str());
     uint8_t x[kXnAddrSize];
     std::lock_guard<std::mutex> lock(g_lock);
     auto it = g_peers.find(ina);
@@ -502,9 +549,12 @@ HLE_STDCALL(socket, 3) {
     if (!udp && type != SOCK_STREAM) return Fail(WSAESOCKTNOSUPPORT);
     SOCKET s = ::socket(AF_INET, int(type), udp ? IPPROTO_UDP : IPPROTO_TCP);
     if (s == INVALID_SOCKET) return Fail(HostError());
-    return AddSocket(s, udp);
+    uint32_t id = AddSocket(s, udp);
+    XTRACE("socket %X type %u protocol %u", id, type, a[2]);
+    return id;
 }
 HLE_STDCALL(closesocket, 1) {
+    XTRACE("closesocket %X", a[0]);
     std::lock_guard<std::mutex> lock(g_lock);
     auto it = g_sockets.find(a[0]);
     if (it == g_sockets.end()) return Fail(WSAENOTSOCK);
@@ -585,6 +635,7 @@ HLE_STDCALL(connect, 3) {
     Socket k = Find(a[0]);
     if (k.s == INVALID_SOCKET) return Fail(WSAENOTSOCK);
     sockaddr_in to = GuestAddr(a[1]);
+    XTRACE("connect %X to %s", a[0], Addr(to).c_str());
     to.sin_port = HostPort(to.sin_port);
     if (::connect(k.s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0) return 0;
     int e = HostError();
@@ -649,6 +700,7 @@ HLE_STDCALL(select, 5) {
     } else {
         r = ::select(0, guest[0] ? &host[0] : nullptr, guest[1] ? &host[1] : nullptr, guest[2] ? &host[2] : nullptr, ptv);
         if (r < 0) return Fail(HostError());
+        if (r > 0) XTRACE("select: %d ready", r);
     }
     for (int i = 0; i < 3; i++) {
         if (!guest[i]) continue;
