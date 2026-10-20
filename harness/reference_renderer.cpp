@@ -984,7 +984,7 @@ std::map<uint32_t, std::array<uint32_t, 8>> g_zowner_miss;  // winner -> misses 
 // what one draw changed, for REF_DRAWLOG
 struct DrawStats {
     uint32_t colour = 0, stencil = 0, zfail = 0;
-    uint32_t culled = 0, offscreen = 0, killed = 0, atested = 0;  // triangles culled or off the viewport, fragments discarded
+    uint32_t culled = 0, offscreen = 0, killed = 0, atested = 0, nonfinite = 0;  // triangles culled or off the viewport, fragments discarded
     uint32_t zmiss[6] = {};  // failed depth tests missing by up to 16, 256, 4096, 65536, 1048576 units, more
     int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
     void At(int x, int y) {
@@ -1006,8 +1006,11 @@ struct Clip {
 };
 
 // screen vertex with attributes over w
+// x and y in double: corners just past the near plane land far off screen (1e25 and more), where edge products
+// overflow a float and a triangle reaching behind the camera (the road under it) would be lost
 struct Screen {
-    float x, y, z, iw;
+    double x, y;
+    float z, iw;
     Vec attr[kAttrs];
 };
 
@@ -1112,6 +1115,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                          count, s.rt.data, s.zs.data, st.colour, st.stencil);
             if (st.culled || st.offscreen || st.killed || st.atested)
                 std::fprintf(g_drawlog, " culled %u offscreen %u killed %u atested %u", st.culled, st.offscreen, st.killed, st.atested);
+            if (st.nonfinite) std::fprintf(g_drawlog, " nonfinite %u", st.nonfinite);
             if (st.zfail)
                 std::fprintf(g_drawlog, " zfail %u miss %u/%u/%u/%u/%u/%u", st.zfail, st.zmiss[0], st.zmiss[1], st.zmiss[2],
                              st.zmiss[3], st.zmiss[4], st.zmiss[5]);
@@ -1353,6 +1357,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             float t = (near_w - p.h[3]) / (q.h[3] - p.h[3]);
             Clip& m = poly[corners++];
             for (int j = 0; j < 4; j++) m.h[j] = p.h[j] + (q.h[j] - p.h[j]) * t;
+            // on the plane, not past it: interpolated in float, w of thousands rounds to 0 or below, and x / w to inf
+            m.h[3] = std::max(m.h[3], near_w);
             for (int a = 0; a < kAttrs; a++)
                 for (int j = 0; j < 4; j++) m.attr[a][j] = p.attr[a][j] + (q.attr[a][j] - p.attr[a][j]) * t;
         }
@@ -1360,8 +1366,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         Screen sv[4];
         for (int i = 0; i < corners; i++) {
             float iw = 1 / poly[i].h[3];
-            sv[i].x = poly[i].h[0] * iw;
-            sv[i].y = poly[i].h[1] * iw;
+            sv[i].x = double(poly[i].h[0]) / poly[i].h[3];
+            sv[i].y = double(poly[i].h[1]) / poly[i].h[3];
             sv[i].z = poly[i].h[2] * iw;
             sv[i].iw = iw;
             for (int a = 0; a < kAttrs; a++)
@@ -1369,8 +1375,11 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         }
         for (int fan = 1; fan + 1 < corners; fan++) {
             const Screen &p0 = sv[0], &p1 = sv[fan], &p2 = sv[fan + 1];
-            float area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
-            if (area == 0 || !std::isfinite(area)) continue;
+            double area = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+            if (area == 0 || !std::isfinite(area)) {
+                if (area != 0) st.nonfinite++;
+                continue;
+            }
             bool clockwise = area > 0;  // y down
             // GL_CW 0x900, GL_CCW 0x901
             if ((cull == 0x900 && clockwise) || (cull == 0x901 && !clockwise)) {
@@ -1378,13 +1387,16 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                 continue;
             }
             bool front = s.rs[kRsFrontFace] == 0x901 ? !clockwise : clockwise;
-            int x0 = std::max(left, int(std::floor(std::min({p0.x, p1.x, p2.x})))), x1 = std::min(right - 1, int(std::ceil(std::max({p0.x, p1.x, p2.x}))));
-            int y0 = std::max(top, int(std::floor(std::min({p0.y, p1.y, p2.y})))), y1 = std::min(bottom - 1, int(std::ceil(std::max({p0.y, p1.y, p2.y}))));
+            // clamped before the conversion to int, which far off screen corners would overflow
+            int x0 = int(std::max<double>(left, std::floor(std::min({p0.x, p1.x, p2.x}))));
+            int x1 = int(std::min<double>(right - 1, std::ceil(std::max({p0.x, p1.x, p2.x}))));
+            int y0 = int(std::max<double>(top, std::floor(std::min({p0.y, p1.y, p2.y}))));
+            int y1 = int(std::min<double>(bottom - 1, std::ceil(std::max({p0.y, p1.y, p2.y}))));
             if (x0 > x1 || y0 > y1) {
                 st.offscreen++;
                 continue;
             }
-            float inv_area = 1 / area;
+            double inv_area = 1 / area;
             // polygon offset (solid fill): units in depth buffer steps plus the slope scale times the larger of the
             // triangle's depth gradients in x and y
             // D3DZB_USEW (ZENABLE 2): the depth is the pixel's w, offsets added in its units (the NV2A's Z_PERSPECTIVE
@@ -1396,8 +1408,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             float zv0 = wbuf ? w0 : p0.z, zv1 = wbuf ? w1 : p1.z, zv2 = wbuf ? w2 : p2.z;
             float zoff = 0;
             if (s.simple[kMSolidOffsetEnable >> 2]) {
-                float dzdx = ((zv1 - zv0) * (p2.y - p0.y) - (zv2 - zv0) * (p1.y - p0.y)) * inv_area;
-                float dzdy = ((zv2 - zv0) * (p1.x - p0.x) - (zv1 - zv0) * (p2.x - p0.x)) * inv_area;
+                float dzdx = float(((zv1 - zv0) * (p2.y - p0.y) - (zv2 - zv0) * (p1.y - p0.y)) * inv_area);
+                float dzdy = float(((zv2 - zv0) * (p1.x - p0.x) - (zv1 - zv0) * (p2.x - p0.x)) * inv_area);
                 float slope, units;
                 std::memcpy(&slope, &s.simple[kMSlopeScale >> 2], 4);
                 std::memcpy(&units, &s.simple[kMDepthOffset >> 2], 4);
@@ -1406,10 +1418,11 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             for (int y = y0; y <= y1; y++)
                 for (int x = x0; x <= x1; x++) {
                     // barycentrics at the pixel centre
-                    float cx = x + 0.5f, cy = y + 0.5f;
-                    float b0 = ((p1.x - cx) * (p2.y - cy) - (p2.x - cx) * (p1.y - cy)) * inv_area;
-                    float b1 = ((p2.x - cx) * (p0.y - cy) - (p0.x - cx) * (p2.y - cy)) * inv_area;
-                    float b2 = 1 - b0 - b1;
+                    double cx = x + 0.5, cy = y + 0.5;
+                    double e0 = ((p1.x - cx) * (p2.y - cy) - (p2.x - cx) * (p1.y - cy)) * inv_area;
+                    double e1 = ((p2.x - cx) * (p0.y - cy) - (p0.x - cx) * (p2.y - cy)) * inv_area;
+                    if (e0 < 0 || e1 < 0 || 1 - e0 - e1 < 0) continue;
+                    float b0 = float(e0), b1 = float(e1), b2 = float(1 - e0 - e1);
                     if (b0 < 0 || b1 < 0 || b2 < 0) continue;
                     // W-buffered: the pixel's own w, perspective correct (w interpolated linearly on the screen
                     // put long triangles that reach the camera in front of everything)
