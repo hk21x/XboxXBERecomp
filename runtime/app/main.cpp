@@ -10,6 +10,7 @@
 #include <timeapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cwchar>
@@ -36,6 +37,7 @@ HWND g_hwnd = nullptr;
 constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2;
 bool g_mode_changed = false;
 bool g_apply_posted = false;  // a display apply is waiting in the queue or running
+std::atomic<bool> g_active{true};  // the game window is in front (WM_ACTIVATE)
 
 // crash dump in CrashDumps beside the exe
 LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
@@ -82,7 +84,7 @@ void DumpThreads() {
 // window thread only
 void ApplyNow() {
     const Settings& s = Get();
-    HMONITOR mon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTOPRIMARY);
+    HMONITOR mon = static_cast<HMONITOR>(Monitor());
     MONITORINFOEXW mi{};
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(mon, &mi);
@@ -145,6 +147,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_ACTIVATE:
+            g_active = LOWORD(wp) != WA_INACTIVE;
             if (LOWORD(wp) == WA_INACTIVE) {
                 // a changed display mode steps aside for the desktop, minimized, and comes back on return; not while
                 // handing over to the next instance, which runs in the same mode
@@ -212,9 +215,19 @@ std::recursive_mutex& UiLock() {
 void ApplyDisplay() { PostMessageW(g_hwnd, kApplyDisplay, 0, 0); }
 void OpenGameWindow(bool apply) { SendMessageW(g_hwnd, kOpenWindow, apply, 0); }
 
+bool Paused() { return Get().pause_unfocused && !g_active && g_hwnd && IsWindowVisible(g_hwnd); }
+
 void Pace(uint32_t vblanks) {
     using clock = std::chrono::steady_clock;
     static clock::time_point next = clock::now();
+    // pause_unfocused: the title waits here, the sound output stops pulling the mixer (so the title's sample clock
+    // stands still too)
+    if (Paused()) {
+        LOGR("paused: the window is not in front");
+        while (Paused()) Sleep(10);
+        LOGR("resumed");
+        next = clock::now();
+    }
     uint32_t cap = PaceRate(Get().fps_cap, vblanks);
     auto now = clock::now();
     if (!cap) {

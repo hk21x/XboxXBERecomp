@@ -31,7 +31,7 @@ std::atomic<int> g_bind_control{-1}, g_bind_slot{0};
 // the monitor's modes, widest first, each size once
 std::vector<Mode> Modes() {
     std::vector<Mode> modes;
-    HMONITOR mon = MonitorFromWindow(static_cast<HWND>(Window()), MONITOR_DEFAULTTOPRIMARY);
+    HMONITOR mon = static_cast<HMONITOR>(Monitor());
     MONITORINFOEXW mi{};
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(mon, &mi)) return modes;
@@ -51,13 +51,31 @@ std::vector<Mode> Modes() {
 
 void Display(Settings& s) {
     bool changed = false;
+    static std::vector<std::string> monitors = Monitors();
+    if (monitors.size() > 1) {
+        std::string current = s.monitor && s.monitor <= monitors.size() ? monitors[s.monitor - 1] : "Primary display";
+        if (ImGui::BeginCombo("Monitor", current.c_str())) {
+            if (ImGui::Selectable("Primary display", s.monitor == 0)) {
+                s.monitor = 0;
+                changed = true;
+            }
+            for (uint32_t i = 0; i < monitors.size(); i++)
+                if (ImGui::Selectable(monitors[i].c_str(), s.monitor == i + 1)) {
+                    s.monitor = i + 1;
+                    changed = true;
+                }
+            ImGui::EndCombo();
+        }
+    }
     const char* modes[] = {"Fullscreen", "Borderless window", "Window"};
     int mode = int(s.display_mode);
     if (ImGui::Combo("Display mode", &mode, modes, 3)) {
         s.display_mode = DisplayMode(mode);
         changed = true;
     }
-    static std::vector<Mode> list = Modes();
+    static uint32_t list_monitor = ~0u;
+    static std::vector<Mode> list;
+    if (list_monitor != s.monitor) list = Modes(), list_monitor = s.monitor;
     std::string current = s.width && s.height ? std::to_string(s.width) + " x " + std::to_string(s.height) : "Desktop";
     if (ImGui::BeginCombo("Resolution", current.c_str())) {
         if (ImGui::Selectable("Desktop", !s.width)) {
@@ -114,6 +132,19 @@ void Graphics(Settings& s) {
         Save();
     }
     ImGui::TextDisabled("The game sets its own pace (menus 60, races 30); the cap only limits it further.");
+    int aa = int(s.antialiasing % 2);
+    const char* aa_names[] = {"Off", "FXAA (smooths edges of the finished frame)"};
+    if (ImGui::Combo("Antialiasing", &aa, aa_names, 2)) {
+        s.antialiasing = uint32_t(aa);
+        Save();
+    }
+    ImGui::TextDisabled("Render scale above 100% also smooths edges (supersampling).");
+    if (ImGui::Checkbox("Show frames a second", &s.show_fps)) Save();
+}
+
+void General(Settings& s) {
+    if (ImGui::Checkbox("Pause when the window is not in front", &s.pause_unfocused)) Save();
+    ImGui::TextDisabled("The game and its sound stop while another window is in front, and carry on when you return.");
 }
 
 void GameOptions() {
@@ -122,17 +153,18 @@ void GameOptions() {
         return;
     }
     for (const Option& o : kGame.options) {
+        const char* name = o.label ? o.label : o.key;
         if (o.flag) {
-            if (ImGui::Checkbox(o.key, o.flag)) Save();
+            if (ImGui::Checkbox(name, o.flag)) Save();
         } else if (o.value) {
             int v = int(*o.value);
-            if (ImGui::InputInt(o.key, &v)) {
+            if (ImGui::InputInt(name, &v)) {
                 *o.value = uint32_t(std::max(v, 0));
                 Save();
             }
         }
+        if (o.help) ImGui::TextDisabled("%s", o.help);
     }
-    ImGui::TextDisabled("Game options apply at the next start.");
 }
 
 void Controls(Settings& s) {
@@ -149,6 +181,7 @@ void Controls(Settings& s) {
         Save();
     }
     ImGui::TextDisabled("Click a key box, then press the key (Escape clears it). Each input takes up to two keys.");
+    ImGui::TextDisabled("On a controller, Back + Start opens this window and Start closes it.");
     if (!ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) return;
     ImGui::TableSetupColumn("Console input");
     ImGui::TableSetupColumn("Key");
@@ -192,6 +225,42 @@ void Controls(Settings& s) {
 
 bool OverlayOpen() { return g_open; }
 
+void FeedPad() {
+    using input::Control;
+    struct Map {
+        Control c;
+        ImGuiKey key;
+    };
+    static const Map kMap[] = {
+        {input::kUp, ImGuiKey_GamepadDpadUp},       {input::kDown, ImGuiKey_GamepadDpadDown},
+        {input::kLeft, ImGuiKey_GamepadDpadLeft},   {input::kRight, ImGuiKey_GamepadDpadRight},
+        {input::kLSUp, ImGuiKey_GamepadLStickUp},   {input::kLSDown, ImGuiKey_GamepadLStickDown},
+        {input::kLSLeft, ImGuiKey_GamepadLStickLeft}, {input::kLSRight, ImGuiKey_GamepadLStickRight},
+        {input::kA, ImGuiKey_GamepadFaceDown},      {input::kB, ImGuiKey_GamepadFaceRight},
+        {input::kX, ImGuiKey_GamepadFaceLeft},      {input::kY, ImGuiKey_GamepadFaceUp},
+        {input::kWhite, ImGuiKey_GamepadL1},        {input::kBlack, ImGuiKey_GamepadR1},
+        {input::kLT, ImGuiKey_GamepadL2},           {input::kRT, ImGuiKey_GamepadR2},
+    };
+    static uint32_t last = 0;
+    ImGuiIO& io = ImGui::GetIO();
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    uint32_t held = g_open ? input::HeldControls() : 0;
+    for (const Map& m : kMap)
+        if (((held ^ last) >> m.c) & 1) io.AddKeyEvent(m.key, (held >> m.c) & 1);
+    last = held;
+}
+
+void DrawHud(double fps) {
+    if (!Get().show_fps) return;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 8, vp->WorkPos.y + 8));
+    ImGui::SetNextWindowBgAlpha(0.4f);
+    ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##fps", nullptr, f)) ImGui::Text("%.0f fps", fps);
+    ImGui::End();
+}
+
 void ToggleOverlay() {
     g_open = !g_open;
     g_bind_control = -1;
@@ -234,6 +303,10 @@ void DrawOverlay() {
             }
             if (ImGui::BeginTabItem("Game")) {
                 GameOptions();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("General")) {
+                General(s);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Controls")) {

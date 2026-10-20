@@ -26,5 +26,8 @@ void Init();  // window thread, before boot
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
 void Rumble(int port, uint16_t left, uint16_t right);
+// the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
+// navigation)
+uint32_t HeldControls();
 
 }  // namespace input

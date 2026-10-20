@@ -29,6 +29,17 @@ const char* kModes[] = {"fullscreen", "borderless", "windowed"};
 std::filesystem::path File() { return ExeDir() / kGame.settings; }
 
 const char* kAspects[] = {"auto", "4:3", "16:9"};
+const char* kAntialiasing[] = {"off", "fxaa"};
+
+// the displays in Windows' order
+std::vector<HMONITOR> MonitorList() {
+    std::vector<HMONITOR> list;
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM p) -> BOOL {
+        reinterpret_cast<std::vector<HMONITOR>*>(p)->push_back(m);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&list));
+    return list;
+}
 
 // keys by name in the settings file: letters, digits and these
 struct KeyName {
@@ -134,6 +145,12 @@ void Load() {
     for (uint32_t i = 0; i < 3; i++)
         if (aspect == kAspects[i]) s.aspect = i;
     s.keyboard = t["keyboard"].value_or(s.keyboard);
+    s.monitor = t["monitor"].value_or(s.monitor);
+    s.pause_unfocused = t["pause_unfocused"].value_or(s.pause_unfocused);
+    s.show_fps = t["show_fps"].value_or(s.show_fps);
+    std::string aa = t["antialiasing"].value_or(std::string(kAntialiasing[s.antialiasing % 2]));
+    for (uint32_t i = 0; i < 2; i++)
+        if (aa == kAntialiasing[i]) s.antialiasing = i;
     // [keys] input = ["key", "key"], [gamepad] input = "physical input"
     if (const toml::table* keys = t["keys"].as_table()) {
         for (auto& [name, v] : *keys) {
@@ -171,7 +188,11 @@ toml::table Table() {
                   {"anisotropic_filtering", int64_t(s.aniso)},
                   {"join_ip", s.join_ip},
                   {"aspect", kAspects[s.aspect % 3]},
-                  {"keyboard", s.keyboard}};
+                  {"keyboard", s.keyboard},
+                  {"monitor", int64_t(s.monitor)},
+                  {"pause_unfocused", s.pause_unfocused},
+                  {"show_fps", s.show_fps},
+                  {"antialiasing", kAntialiasing[s.antialiasing % 2]}};
     // only what differs from the defaults
     toml::table keys, pad;
     for (int c = 0; c < input::kControls; c++) {
@@ -205,8 +226,34 @@ void LogSettings() {
         if (!line.empty()) LOGR("  %s", line.c_str());
 }
 
+void* Monitor() {
+    uint32_t n = Get().monitor;
+    if (n) {
+        std::vector<HMONITOR> list = MonitorList();
+        if (n <= list.size()) return list[n - 1];
+    }
+    return MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+}
+
+std::vector<std::string> Monitors() {
+    std::vector<std::string> names;
+    for (HMONITOR m : MonitorList()) {
+        MONITORINFOEXW mi{};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(m, &mi);
+        DISPLAY_DEVICEW dd{};
+        dd.cb = sizeof(dd);
+        std::wstring name = EnumDisplayDevicesW(mi.szDevice, 0, &dd, 0) ? dd.DeviceString : mi.szDevice;
+        int w = mi.rcMonitor.right - mi.rcMonitor.left, h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        std::string text(name.begin(), name.end());  // device names are ASCII
+        names.push_back(std::to_string(names.size() + 1) + ": " + text + " (" + std::to_string(w) + " x " +
+                        std::to_string(h) + (mi.dwFlags & MONITORINFOF_PRIMARY ? ", primary)" : ")"));
+    }
+    return names;
+}
+
 Mode Desktop() {
-    HMONITOR mon = MonitorFromWindow(static_cast<HWND>(Window()), MONITOR_DEFAULTTOPRIMARY);
+    HMONITOR mon = static_cast<HMONITOR>(Monitor());
     MONITORINFOEXW mi{};
     mi.cbSize = sizeof(mi);
     DEVMODEW dm{};
@@ -229,7 +276,7 @@ bool Widescreen() {
     const Settings& s = Get();
     if (s.aspect == 1) return false;
     if (s.aspect == 2) return true;
-    uint64_t k = uint64_t(s.width) << 32 | s.height;
+    uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;
     if (key.exchange(k) != k) {
         Mode m = Output();
         wide = m.width * 2 >= m.height * 3;  // 3:2 or wider

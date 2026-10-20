@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -127,6 +128,7 @@ int16_t Stick(float neg, float pos) {
     float v = std::clamp(pos - neg, -1.0f, 1.0f);
     return int16_t(std::lround(v * 32767.0f));
 }
+std::atomic<uint32_t> g_held[4];  // HeldControls, per port
 }  // namespace
 
 const char* ControlName(int c) { return c >= 0 && c < kControls ? kNames[c] : ""; }
@@ -136,6 +138,8 @@ int ControlByName(const char* name) {
         if (std::strcmp(kNames[c], name) == 0) return c;
     return -1;
 }
+
+uint32_t HeldControls() { return g_held[0] | g_held[1] | g_held[2] | g_held[3]; }
 
 Pad Poll(int port) {
     Pad p;
@@ -164,6 +168,25 @@ Pad Poll(int port) {
             for (uint16_t k : keys)
                 if (k && (GetAsyncKeyState(k) & 0x8000)) out[c] = 1.0f;
         }
+    }
+    // Back + Start on a controller opens or closes the settings window, Start alone closes it; what was held then
+    // stays from the game until let go
+    uint32_t held = 0;
+    for (int c = 0; c < kControls; c++) held |= uint32_t(in[c] >= 0.5f) << c;
+    if (port >= 0 && port < 4) {
+        static std::atomic<uint32_t> last[4], swallow[4];
+        g_held[port] = held;
+        uint32_t pressed = held & ~last[port].exchange(held);
+        constexpr uint32_t kStartBit = 1u << kStart, kBackBit = 1u << kBack;
+        bool open = app::OverlayOpen();
+        if ((pressed & kStartBit) && ((held & kBackBit) || open)) {
+            std::lock_guard lock(app::UiLock());
+            app::ToggleOverlay();
+            for (auto& w : swallow) w = kStartBit | kBackBit;
+        }
+        swallow[port] &= held;
+        for (int c = 0; c < kControls; c++)
+            if (swallow[port] & (1u << (s.pad_map.size() > size_t(c) ? s.pad_map[c] : c))) out[c] = 0;
     }
     // the settings window takes the input while it is open
     if (app::OverlayOpen()) std::fill(std::begin(out), std::end(out), 0.0f);

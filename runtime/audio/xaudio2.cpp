@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/app.h"
 #include "audio/audio.h"
 #include "core/log.h"
 
@@ -40,7 +41,8 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         for (uint32_t n = 0;;) {
             XAUDIO2_VOICE_STATE st;
             voice->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            if (st.BuffersQueued >= 3) {
+            // paused (app::Paused): the mixer is not pulled, so the title's sound and its sample clock stand still
+            if (st.BuffersQueued >= 3 || app::Paused()) {
                 Sleep(2);
                 continue;
             }

@@ -134,6 +134,35 @@ float4 psmain(O i) : SV_Target {
     if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c.rgb, opts.y > 0 ? c.a : 1);
 }
+// the finished frame with fast approximate antialiasing: where the luma of a pixel and its four neighbours differs
+// enough to be an edge, the colour is averaged along the edge's direction, found from the diagonal neighbours
+float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float3 tap(float2 uv) { return img.SampleLevel(ls, uv, 0).rgb; }
+float4 psfxaa(O i) : SV_Target {
+    float2 size;
+    img.GetDimensions(size.x, size.y);
+    float2 t = 1 / size;
+    float3 m = tap(i.uv);
+    float lm = luma(m);
+    float ln = luma(tap(i.uv + float2(0, -t.y))), ls_ = luma(tap(i.uv + float2(0, t.y)));
+    float le = luma(tap(i.uv + float2(t.x, 0))), lw = luma(tap(i.uv + float2(-t.x, 0)));
+    float lo = min(lm, min(min(ln, ls_), min(le, lw))), hi = max(lm, max(max(ln, ls_), max(le, lw)));
+    float3 c = m;
+    if (hi - lo >= max(0.0312, hi * 0.125)) {
+        float lnw = luma(tap(i.uv + float2(-t.x, -t.y))), lne = luma(tap(i.uv + float2(t.x, -t.y)));
+        float lsw = luma(tap(i.uv + float2(-t.x, t.y))), lse = luma(tap(i.uv + float2(t.x, t.y)));
+        float2 dir = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
+        float reduce = max((lnw + lne + lsw + lse) * (0.25 / 8), 1.0 / 128);
+        dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8, 8) * t;
+        float3 a = 0.5 * (tap(i.uv + dir * (1.0 / 3 - 0.5)) + tap(i.uv + dir * (2.0 / 3 - 0.5)));
+        float3 b = a * 0.5 + 0.25 * (tap(i.uv - dir * 0.5) + tap(i.uv + dir * 0.5));
+        float lb = luma(b);
+        c = lb < lo || lb > hi ? a : b;
+    }
+    c *= opts.w;
+    if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
+    return float4(c, 1);
+}
 )";
 
 const char* kDepthHlsl = R"(
@@ -364,6 +393,7 @@ struct BlitOptions {
     float mul = 1;            // colour scale
     DXGI_FORMAT rtv = kBgra;  // the target's format
     bool over = false;        // premultiplied over the target, which keeps its alpha
+    bool fxaa = false;        // fast approximate antialiasing (the finished frame; taps and alpha unused)
 };
 
 // Shrink's settings past the source and the size
@@ -541,7 +571,7 @@ private:
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
     // Blit's pipeline
-    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false);
+    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool fxaa = false);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC FullScreenPipelineDesc(ID3DBlob* vs, ID3DBlob* ps, DXGI_FORMAT rtv) const;
     // Init, in order, each callee right after its caller
     bool CreateDevice();
@@ -1356,7 +1386,9 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
     std::memcpy(cb.cpu, c, sizeof(c));
-    DrawFullScreen(EnsureBlitPipeline(o.rtv, o.over), cb.gpu, slot, si);
+    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, o.fxaa);
+    if (!pso && o.fxaa) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
+    if (pso) DrawFullScreen(pso, cb.gpu, slot, si);
 }
 
 ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash) {
@@ -1401,12 +1433,13 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC D3D12Backend::FullScreenPipelineDesc(ID3DBlob
     return d;
 }
 
-ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over) {
-    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32];
+ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool fxaa) {
+    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(fxaa) << 33];
     if (pso) return pso.Get();
     uint64_t h;
     ID3DBlob* vs = Compile(kBlitHlsl, "vs", "vs_5_0", h);
-    ID3DBlob* ps = Compile(kBlitHlsl, "psmain", "ps_5_0", h);
+    ID3DBlob* ps = Compile(kBlitHlsl, fxaa ? "psfxaa" : "psmain", "ps_5_0", h);
+    if (!vs || !ps) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, rtv);
     if (over) {
         auto& blend = d.BlendState.RenderTarget[0];
@@ -3011,14 +3044,16 @@ void D3D12Backend::BlitFrame(Target& t) {
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_});
+    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
 }
 
 void D3D12Backend::RenderUi() {
     std::lock_guard lock(app::UiLock());
+    app::FeedPad();
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+    app::DrawHud(fps_);
     app::DrawOverlay();
     if (app::kGame.ui) app::kGame.ui(fps_);
     ImGui::Render();

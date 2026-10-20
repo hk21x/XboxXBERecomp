@@ -30,6 +30,10 @@ struct Settings {
     std::vector<uint8_t> pad_map;    // empty: each input drives itself
     std::vector<std::array<uint16_t, 2>> keys;  // empty: the default keys
     bool keyboard = true;
+    uint32_t monitor = 0;            // 0 the primary display, n the nth display Windows lists
+    bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
+    bool show_fps = false;           // frames a second in a corner
+    uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame
 };
 // the default keys for input::Control c
 std::array<uint16_t, 2> DefaultKeys(int c);
@@ -52,6 +56,11 @@ struct Mode {
     uint32_t width, height;
 };
 Mode Desktop();
+void* Monitor();                  // HMONITOR of the monitor setting (the primary display when it is gone)
+std::vector<std::string> Monitors();  // the displays' names, in the monitor setting's order from 1
+bool Paused();                    // pause_unfocused and the window is not in front (Windows)
+void DrawHud(double fps);         // the frame counter, inside the ImGui frame (overlay.cpp)
+void FeedPad();                   // controllers to the settings window's navigation, before each ImGui frame
 Mode Output();
 float RenderScale(uint32_t guest_height);
 // the output is 3:2 or wider: the console reports a widescreen TV and the frame is shown 16:9, else 4:3 as on a 4:3 TV
@@ -85,6 +94,8 @@ struct Option {  // a setting in the settings file, flag or value
     const char* key;
     bool* flag;
     uint32_t* value;
+    const char* label = nullptr;  // the settings window's name for it, else the key
+    const char* help = nullptr;   // a line under it in the settings window
 };
 struct GameInfo {
     const wchar_t* title;        // window and splash
