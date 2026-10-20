@@ -32,6 +32,12 @@ Mode Desktop() {
 Mode Output() { return Desktop(); }
 float RenderScale(uint32_t) { return 1.0f; }
 bool Widescreen() { return Desktop().width * 2 >= Desktop().height * 3; }  // as on Windows: 3:2 or wider
+// FRAME_ASPECT_X100=239 (a shape times 100): as the Windows aspect setting "screen" on an ultrawide display
+float FrameAspect() {
+    static const float forced = float(harness::Env("FRAME_ASPECT_X100")) / 100;
+    if (forced > 0) return forced;
+    return Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+}
 
 std::filesystem::path ExeDir() {
     static const std::filesystem::path dir = std::filesystem::current_path();

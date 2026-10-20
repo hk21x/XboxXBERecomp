@@ -26,7 +26,9 @@ struct Settings {
     bool vsync = true;
     uint32_t aniso = 0;              // 0 as the game asks
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
-    uint32_t aspect = 0;             // 0 from the output's shape, 1 4:3, 2 16:9 (the console's TV setting, at boot)
+    // 0 from the output's shape, 1 4:3, 2 16:9 (the console's TV setting, at boot), 3 widescreen filling the screen's
+    // shape (ultrawide: the title's 3D views widened by its GameInfo code, the frame shown at the screen's shape)
+    uint32_t aspect = 0;
     // controls, by input::Control: the physical pad input that drives each console input, and up to two keys (Windows
     // virtual key codes, 0 none) that press it on controller 1
     std::vector<uint8_t> pad_map;    // empty: each input drives itself
@@ -67,6 +69,8 @@ Mode Output();
 float RenderScale(uint32_t guest_height);
 // the output is 3:2 or wider: the console reports a widescreen TV and the frame is shown 16:9, else 4:3 as on a 4:3 TV
 bool Widescreen();
+// the shape the frame is shown at: 4:3, 16:9, or the screen's when the aspect setting fills it (never under 16:9)
+float FrameAspect();
 
 std::filesystem::path ExeDir();
 // the game in assets (game_files.cpp): its folder and this executable's xbe, from the extracted files or a disc

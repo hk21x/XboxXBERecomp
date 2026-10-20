@@ -28,7 +28,8 @@ const char* kModes[] = {"fullscreen", "borderless", "windowed"};
 
 std::filesystem::path File() { return ExeDir() / kGame.settings; }
 
-const char* kAspects[] = {"auto", "4:3", "16:9"};
+const char* kAspects[] = {"auto", "4:3", "16:9", "screen"};
+constexpr uint32_t kAspectCount = 4;
 const char* kAntialiasing[] = {"off", "fxaa", "msaa2", "msaa4", "msaa8"};
 constexpr uint32_t kAntialiasingCount = 5;
 
@@ -142,8 +143,8 @@ void Load() {
     s.vsync = t["vsync"].value_or(s.vsync);
     s.aniso = t["anisotropic_filtering"].value_or(s.aniso);
     s.join_ip = t["join_ip"].value_or(s.join_ip);
-    std::string aspect = t["aspect"].value_or(std::string(kAspects[s.aspect % 3]));
-    for (uint32_t i = 0; i < 3; i++)
+    std::string aspect = t["aspect"].value_or(std::string(kAspects[s.aspect % kAspectCount]));
+    for (uint32_t i = 0; i < kAspectCount; i++)
         if (aspect == kAspects[i]) s.aspect = i;
     s.keyboard = t["keyboard"].value_or(s.keyboard);
     s.monitor = t["monitor"].value_or(s.monitor);
@@ -188,7 +189,7 @@ toml::table Table() {
                   {"vsync", s.vsync},
                   {"anisotropic_filtering", int64_t(s.aniso)},
                   {"join_ip", s.join_ip},
-                  {"aspect", kAspects[s.aspect % 3]},
+                  {"aspect", kAspects[s.aspect % kAspectCount]},
                   {"keyboard", s.keyboard},
                   {"monitor", int64_t(s.monitor)},
                   {"pause_unfocused", s.pause_unfocused},
@@ -276,13 +277,20 @@ bool Widescreen() {
     static std::atomic<bool> wide{true};
     const Settings& s = Get();
     if (s.aspect == 1) return false;
-    if (s.aspect == 2) return true;
+    if (s.aspect >= 2) return true;
     uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;
     if (key.exchange(k) != k) {
         Mode m = Output();
         wide = m.width * 2 >= m.height * 3;  // 3:2 or wider
     }
     return wide;
+}
+
+float FrameAspect() {
+    if (!Widescreen()) return 4.0f / 3.0f;
+    if (Get().aspect != 3) return 16.0f / 9.0f;
+    Mode m = Output();
+    return m.height ? std::max(16.0f / 9.0f, float(m.width) / float(m.height)) : 16.0f / 9.0f;
 }
 
 float RenderScale(uint32_t guest_height) {

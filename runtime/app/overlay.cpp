@@ -97,9 +97,9 @@ void Display(Settings& s) {
         Save();
         ApplyDisplay();
     }
-    int aspect = int(s.aspect % 3);
-    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)"};
-    if (ImGui::Combo("Aspect ratio", &aspect, aspects, 3)) {
+    int aspect = int(s.aspect % 4);
+    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide)"};
+    if (ImGui::Combo("Aspect ratio", &aspect, aspects, 4)) {
         s.aspect = uint32_t(aspect);
         Save();
     }
