@@ -1,5 +1,5 @@
 // the in-game settings window, F1: display, graphics, the game's own options and controls. Changes are saved to the
-// settings file at once; display mode and resolution apply at once, render scale and aspect at the next start.
+// settings file at once; display mode, resolution and render scale apply at once, aspect at the next start.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -112,7 +112,7 @@ void Graphics(Settings& s) {
         s.render_percent = uint32_t(percent);
         Save();
     }
-    ImGui::TextDisabled("Render scale applies at the next start.");
+    ImGui::TextDisabled("Render scale applies at once.");
     const int anisos[] = {0, 2, 4, 8, 16};
     const char* aniso_names[] = {"As the game asks", "2x", "4x", "8x", "16x"};
     int a = 0;

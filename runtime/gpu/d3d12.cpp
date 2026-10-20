@@ -595,6 +595,7 @@ private:
     void ResetFrame();
     void CountFps();
     void ApplySettings();
+    void RescaleTargets();
     ComPtr<ID3D12Resource> Shrink(ID3D12Resource* src, D3D12_RESOURCE_STATES& st, DXGI_FORMAT fmt, uint32_t w,
                                   uint32_t h, const ShrinkOptions& o = {});
     bool ReadBack(ID3D12Resource* res, uint32_t w, uint32_t h, std::vector<uint8_t>& out);
@@ -3203,12 +3204,68 @@ void D3D12Backend::ApplySettings() {
     bool remake = ext_ && ext_->Settings();
     if (std::fabs(want - scale_) > 1e-4f || remake) {
         Flush();
-        for (auto& [key, tg] : targets_) (tg.depth ? free_dsv_ : free_rtv_).push_back(tg.view);
-        targets_.clear();
         scale_ = want;
-        if (ext_) ext_->Reset(*this);
+        if (ext_) {
+            // an extension may size its targets itself: they all start again
+            for (auto& [key, tg] : targets_) (tg.depth ? free_dsv_ : free_rtv_).push_back(tg.view);
+            targets_.clear();
+            ext_->Reset(*this);
+        } else {
+            RescaleTargets();
+        }
         bound_rt_ = bound_ds_ = nullptr;
     }
+}
+
+// a new render scale: colour targets keep their pictures, scaled into new ones (a title may draw a target once and
+// sample it for long after: PGR2 draws a race's mini map at its start), depth targets start again
+void D3D12Backend::RescaleTargets() {
+    for (auto it = targets_.begin(); it != targets_.end();) {
+        Target& old = it->second;
+        if (old.depth) {
+            free_dsv_.push_back(old.view);
+            it = targets_.erase(it);
+            continue;
+        }
+        Target t;
+        t.fmt = old.fmt;
+        t.gw = old.gw;
+        t.gh = old.gh;
+        t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_)));
+        t.h = std::max(1u, uint32_t(std::lround(t.gh * scale_)));
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC td = Texture2DDesc(t.fmt, t.w, t.h);
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE cv{};
+        cv.Format = t.fmt;
+        t.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.state, &cv, IID_PPV_ARGS(&t.res)))) {
+            free_rtv_.push_back(old.view);
+            it = targets_.erase(it);
+            continue;
+        }
+        t.view = old.view;  // the same descriptor slot, now viewing the new resource
+        D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), t.view, rtv_inc_);
+        dev_->CreateRenderTargetView(t.res.Get(), nullptr, rh);
+        Transition(old.res.Get(), old.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        SetBlitTarget(rh, t.w, t.h);
+        float uv[4] = {0, 0, 1, 1};
+        Blit(old.res.Get(), old.fmt, uv, {.alpha = true, .rtv = t.fmt});
+        CurrentFrame().garbage.push_back(old.res);
+        if (old.fb) CurrentFrame().garbage.push_back(old.fb);
+        t.data = old.data;
+        t.bytes = old.bytes;
+        t.epoch = old.epoch;
+        t.sig = old.sig;
+        t.drawn = old.drawn;
+        t.linear32 = old.linear32;
+        t.read = std::move(old.read);
+        t.range = old.range;
+        t.tag = old.tag;
+        old = std::move(t);
+        ++it;
+    }
+    LOGR("d3d12: render scale %.2f, %zu targets kept", scale_, targets_.size());
 }
 
 // the target resolved, then shrunk with o when it is not guest sized BGRA; res null on failure
