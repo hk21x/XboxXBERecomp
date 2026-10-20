@@ -58,6 +58,13 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 ### Graphics
 - **Direct3D 8** - Implements Direct3D 8 as the XDK does it, including immediate mode draws, palettes, gamma ramps and Direct3D code built into the game.
 - **Native Direct3D 12 Renderer** - Translates the Xbox's vertex programs, pixel combiners and fixed function pipeline to HLSL, with rendering on its own thread.
+- **Console Accurate Depth** - Draws W-buffered depth (D3DZB_USEW) from each pixel's perspective correct w, with polygon offsets in its units and the XDK's scale for fixed function and pretransformed vertices; a depth buffer bigger than the colour target serves it, as on the console.
+- **Ordered Push Buffer Commands** - Reads raw commands a title pushed (vertex shader constants, visibility tests, immediate mode) before every state or constant set, so they apply in the console's order.
+- **Visibility Tests** - Counts visible pixels with occlusion queries and delivers reports when a title polls for them inside a frame.
+- **Render Targets** - Switches targets set with SetRenderTargetFast, copies cube faces drawn on the GPU into their cube, and keeps 8 bit targets as the console's B8.
+- **Vertex Inputs** - Supports SetVertexShaderInput and SetVertexShaderInputDirect, and declarations that read past the stride.
+- **Frame Pacing** - Paces each frame by the title's presentation interval, honours Swap's copy and finish flags and calls the swap callback.
+- **Draw Filters** - Allows a game to drop a draw, its depth test, or move it nearer with `gpu::g_draw_filter`, for game specific fixes.
 - **Renderer Extensions** - Allows a game to change render targets, add passes and add to the generated shaders through `gpu::Extension`, set with `gpu::SetExtension` from `GameInfo::init`.
 
 ### Audio
@@ -65,16 +72,20 @@ A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles 
 
 ### Input
 - **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
+- **Remapping** - Maps any physical controller input to any console input.
+- **Keyboard** - Plays as controller 1 with two keys per console input, remappable, saved in the settings file's `[keys]` table.
 
 ### General
+- **Settings Window** - F1 opens an in-game window for display mode, resolution, vsync, aspect ratio, render scale, anisotropic filtering, frame rate cap, the game's own options and controls, saved at once.
+- **Hard Disk** - Emulates the hard disk's partitions, formats the cache partition and keeps save games beside the exe.
 - **Disc Images** - Runs the game from an ISO in the `assets` folder, either a whole disc dump or the game partition, or from the extracted data files.
-- **System Link** - System Link can be played over LAN, or by directly connecting to a friend's IP address.
+- **System Link** - System Link can be played over LAN, or by directly connecting to a friend's IP address (`join_ip`). `XNET_TRACE=1` logs every network call.
 - **Bink Movies** - Fixes Bink movies playing too fast above 30 FPS and crashing on fast reads, for games that use Bink.
 - **Crash Dumps** - Writes crash dumps to a `CrashDumps` folder beside the exe.
 
 ### Miscellaneous
 - **Boot Splash** - Place a `splash.png` (or `.bmp`) beside the exe to display a splash screen at launch.
-- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures a frame with F3 when `XBE_CAPTURE_DIR` is set and enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG`.
+- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures frames with F3 when `XBE_CAPTURE_DIR` is set (`XBE_CAPTURE_FRAMES`, `XBE_CAPTURE_DRAWS` for several frames or every draw), records draws with their input hashes at full speed with F4 (`XBE_FRAMELOG`), leaves out or alters draws by vertex shader (`XBE_DRAW_SKIP`, `XBE_DRAW_TEST`), logs vertex constant writes (`XBE_VSC`), lists the environment's switches at startup and enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG`.
 - **Headless Harness** - Builds and runs a game on Linux without a window, GPU, audio or controller, for testing.
 - **SDK Sync** - Keeps the `sdk/` copies in game repositories in step with this repository.
 

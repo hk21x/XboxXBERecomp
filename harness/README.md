@@ -44,6 +44,9 @@ Environment:
   frames, `snap_1.tga` to `snap_N.tga`)
 - `REF_DRAWLOG` each drawn frame's draws in `cap/drawlog_<frame>.txt`: pixels and stencil values written, their box,
   depth/stencil/blend state, textures; diff two frames' lists to find what flickers
+  (`REF_DRAWLOG=2` adds constant changes). With it: `REF_ZOWNER` which shader's depth stopped each failed pixel and
+  by how much; `REF_VERTS_VS=handle` / `REF_VERTS_T0=texture` that shader's (or texture's) vertices; `REF_NODEPTH_VS`
+  that shader without the depth test; `REF_NO_WBUFFER` W-buffered draws as z / w
 - `CAP=N` every Nth frame's draws listed in `cap/draws_<frame>.txt`
 - `AUDIT=N` every Nth frame's draws: each shader the D3D12 backend would generate into `cap/hlsl/`, each texture
   sampled into `cap/textures.txt` with how far each mip level is from its parent shrunk (`audit.cpp`)
@@ -56,6 +59,9 @@ Environment:
   `audio: output started` line is the time of its first sample
 - `OUTPUT=WxH` the display size the game is told about, 1280x720 by default: narrower than 3:2 the console reports
   a 4:3 TV instead of a widescreen one
-- `XBE_PERF` as on Windows
+- `XBE_PERF`, `XBE_FRAMELOG` (a `framelog` file in the run folder starts it), `XBE_WBUFFER`, `XNET_TRACE` as on
+  Windows
+- Debugging: start the exe inside gdb (attaching may be refused); recompiled functions are
+  `__imp__sub_XXXXXXXX(X86Context&, base)`, guest memory is at 0x100000000
 
 A frame drawn by the reference renderer takes long; a button held across one can auto repeat in the game's menus.
