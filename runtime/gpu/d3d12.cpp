@@ -80,6 +80,7 @@ struct Perf {
     double sync = 0;
     // counts and bytes
     uint64_t draws = 0;
+    uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
     uint64_t verts = 0;
     uint64_t upload = 0;
     uint64_t overflow = 0;
@@ -613,6 +614,24 @@ private:
     void CountFps();
     void ApplySettings();
     void RescaleTargets();
+    // per draw uploads and descriptor tables made earlier in the same ring generation are used again; the generation
+    // moves on whenever the upload or descriptor ring starts over
+    uint64_t ring_gen_ = 1;
+    uint64_t vsc_gen_ = 0, dc_gen_ = 0, tables_gen_ = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS vsc_va_ = 0, dc_va_ = 0;
+    std::vector<uint8_t> vsc_last_, dc_last_;
+    std::unordered_map<uint64_t, uint32_t> tables_;
+    uint64_t root_args_[4] = {};  // what each root parameter holds now, 0 unknown
+    void SetRootCbv(uint32_t i, D3D12_GPU_VIRTUAL_ADDRESS va) {
+        if (root_args_[i] == va) return;
+        root_args_[i] = va;
+        cl_->SetGraphicsRootConstantBufferView(i, va);
+    }
+    void SetRootTable(uint32_t i, D3D12_GPU_DESCRIPTOR_HANDLE h) {
+        if (root_args_[i] == h.ptr) return;
+        root_args_[i] = h.ptr;
+        cl_->SetGraphicsRootDescriptorTable(i, h);
+    }
     // a screen shaped target shown wider than its guest shape (16:9, ultrawide) gets more pixels across than down
     float aspect_ = 0;  // app::FrameAspect() the targets were made for
     float HudSqueeze(const State& s, const Assembled& a) const;
@@ -974,6 +993,7 @@ void D3D12Backend::Begin() {
     cl_->SetDescriptorHeaps(2, heaps);
     cl_->SetGraphicsRootSignature(root_.Get());
     bound_rt_ = bound_ds_ = nullptr;
+    std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
 }
 
 void D3D12Backend::Submit(bool wait) {
@@ -989,6 +1009,7 @@ void D3D12Backend::Submit(bool wait) {
         f.garbage.clear();
         f.used = 0;
         f.srv = 0;
+        ring_gen_++;
         cl_->Reset(f.alloc.Get(), nullptr);
         Begin();
     }
@@ -1047,6 +1068,7 @@ uint32_t D3D12Backend::AllocSrvSlots(uint32_t n) {
     if (f.srv + n > per) {
         LOG_FIRST(4, "d3d12: descriptor ring wrapped within a frame");
         f.srv = 0;
+        ring_gen_++;
     }
     uint32_t i = uint32_t(frame_ % kFrames) * per + f.srv;
     f.srv += n;
@@ -1419,12 +1441,12 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
 void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t srv_slot,
                                   std::optional<uint32_t> sampler_slot) {
     cl_->SetPipelineState(pso);
-    cl_->SetGraphicsRootConstantBufferView(0, cb);
-    cl_->SetGraphicsRootConstantBufferView(1, cb);
-    cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), srv_slot, srv_inc_));
+    SetRootCbv(0, cb);
+    SetRootCbv(1, cb);
+    SetRootTable(2, Gpu(srv_heap_.Get(), srv_slot, srv_inc_));
     // without a slot the passes take the blit samplers, looked up at this point as they always were
     uint32_t si = sampler_slot ? *sampler_slot : EnsureBlitSamplers();
-    cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
+    SetRootTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
     cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl_->DrawInstanced(3, 1, 0, 0);
 }
@@ -2368,23 +2390,45 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
 
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                                    GuestExtent size, DrawConstants& c) {
-    Alloc vc = Upload(sizeof(s.vsc), 256);
-    std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
-    Alloc dc = Upload(sizeof(DrawConstants), 256);
+    // the vertex constants: the last upload again when they have not changed (an extension may change the copy)
+    D3D12_GPU_VIRTUAL_ADDRESS vsc_va = 0;
+    float(*ext_vsc)[4] = nullptr;
+    if (!ext_ && vsc_gen_ == ring_gen_ && !std::memcmp(vsc_last_.data(), s.vsc.data(), sizeof(s.vsc))) {
+        vsc_va = vsc_va_;
+        g_perf.reused_vsc++;
+    } else {
+        Alloc vc = Upload(sizeof(s.vsc), 256);
+        std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(s.vsc.data());
+        vsc_last_.assign(b, b + sizeof(s.vsc));
+        vsc_va = vsc_va_ = vc.gpu;
+        vsc_gen_ = ext_ ? 0 : ring_gen_;
+        ext_vsc = reinterpret_cast<float(*)[4]>(vc.cpu);
+    }
     FillSurfaceConstants(s, size, c);
     // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
     if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale();
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
-    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, bound_rt_, k.blend ? k.src : 1);
+    if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
-    std::memcpy(dc.cpu, &c, sizeof(c));
-    cl_->SetGraphicsRootConstantBufferView(0, vc.gpu);
-    cl_->SetGraphicsRootConstantBufferView(1, dc.gpu);
+    // the draw constants likewise
+    if (dc_gen_ == ring_gen_ && dc_last_.size() == sizeof(c) && !std::memcmp(dc_last_.data(), &c, sizeof(c))) {
+        g_perf.reused_dc++;
+    } else {
+        Alloc dc = Upload(sizeof(DrawConstants), 256);
+        std::memcpy(dc.cpu, &c, sizeof(c));
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(&c);
+        dc_last_.assign(b, b + sizeof(c));
+        dc_va_ = dc.gpu;
+        dc_gen_ = ring_gen_;
+    }
+    SetRootCbv(0, vsc_va);
+    SetRootCbv(1, dc_va_);
 }
 
 void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
@@ -2497,18 +2541,40 @@ bool UnitTexcoords(const Assembled& a) {
 
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
-    uint32_t slot = AllocSrvSlots(4);
+    // the four views, and a table made for the same four earlier in this ring generation
+    struct ViewKey {
+        ID3D12Resource* res[4];
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv[4];
+    } key;
+    std::memset(&key, 0, sizeof(key));
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[i];
         if (!stages.res[i]) {
             sv.ViewDimension = NullViewDimension(stages.info[i].kind);
             sv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         }
-        dev_->CreateShaderResourceView(stages.res[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+        key.res[i] = stages.res[i];
+        key.sv[i] = sv;
     }
-    cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
+    if (tables_gen_ != ring_gen_) {
+        tables_.clear();
+        tables_gen_ = ring_gen_;
+    }
+    uint64_t h = Hash(&key, sizeof(key));
+    auto found = tables_.find(h);
+    uint32_t slot;
+    if (found != tables_.end()) {
+        slot = found->second;
+        g_perf.reused_tables++;
+    } else {
+        slot = AllocSrvSlots(4);
+        for (int i = 0; i < 4; i++)
+            dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+        if (tables_gen_ == ring_gen_) tables_[h] = slot;  // a wrap while allocating started a new generation
+    }
+    SetRootTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
     uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
-    cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));
+    SetRootTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));
 }
 
 // viewport covers the target, the guest viewport is in the shader; scissor clips to it
@@ -3186,6 +3252,7 @@ void D3D12Backend::ResetFrame() {
     f.garbage.clear();
     f.used = 0;
     f.srv = 0;
+    ring_gen_++;
     cl_->Reset(f.alloc.Get(), nullptr);
     Begin();
 }
@@ -3227,11 +3294,11 @@ void LogPerf() {
              g_perf_sync_late.exchange(0) / n);
         LOGR("perf: per frame %.0f draws (%.0f raw) %.0fk verts %.1f MB upload %.1f overflow | %.0f checks %.2f MB "
              "hashed | %.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f shrinks, "
-             "%.1f read-backs %.1f late | %llu shaders %llu psos this second",
+             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables",
              p.draws / n, p.raw / n, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n, p.sigs / n,
              p.sig_bytes / n / 1048576.0, p.texups / n, p.texup_bytes / n / 1048576.0, p.newtex / n,
              p.targets / n, p.rtups / n, p.shrinks / n, p.syncs / n, p.lates / n,
-             (unsigned long long)p.shaders, (unsigned long long)p.psos);
+             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n);
         g_perf = Perf{};
         perf_start = PerfClock::now();
         perf_frames = 0;
