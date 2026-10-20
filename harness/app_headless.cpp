@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "app/app.h"
+#include "core/log.h"
 #include "harness.h"
 
 namespace app {
@@ -52,6 +53,10 @@ void OpenGameWindow(bool) {}
 bool StartHandover() { return false; }
 bool HandingOver() { return false; }
 void FinishHandover() {}
+
+// no settings window without a window: never open, opening it does nothing
+bool OverlayOpen() { return false; }
+void ToggleOverlay() { LOGI("settings window: none headless"); }
 
 std::recursive_mutex& UiLock() {
     static std::recursive_mutex m;
