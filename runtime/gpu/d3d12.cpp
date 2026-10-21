@@ -4010,6 +4010,9 @@ void D3D12Backend::SetGamma(const uint8_t* ramp) {
 
 }  // namespace
 
-std::unique_ptr<Backend> CreateBackend() { return std::make_unique<D3D12Backend>(); }
+std::unique_ptr<Backend> CreateBackend() {
+    if (app::Get().renderer == 1) return CreateD3D11Backend();
+    return std::make_unique<D3D12Backend>();
+}
 
 }  // namespace gpu

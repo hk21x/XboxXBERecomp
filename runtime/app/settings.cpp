@@ -32,6 +32,8 @@ const char* kAspects[] = {"auto", "4:3", "16:9", "screen"};
 constexpr uint32_t kAspectCount = 4;
 const char* kAntialiasing[] = {"off", "fxaa", "msaa2", "msaa4", "msaa8"};
 constexpr uint32_t kAntialiasingCount = 5;
+const char* kRenderers[] = {"d3d12", "d3d11"};
+constexpr uint32_t kRendererCount = 2;
 
 // the displays in Windows' order
 std::vector<HMONITOR> MonitorList() {
@@ -153,6 +155,9 @@ void Load() {
     std::string aa = t["antialiasing"].value_or(std::string(kAntialiasing[s.antialiasing % kAntialiasingCount]));
     for (uint32_t i = 0; i < kAntialiasingCount; i++)
         if (aa == kAntialiasing[i]) s.antialiasing = i;
+    std::string renderer = t["renderer"].value_or(std::string(kRenderers[s.renderer % kRendererCount]));
+    for (uint32_t i = 0; i < kRendererCount; i++)
+        if (renderer == kRenderers[i]) s.renderer = i;
     // [keys] input = ["key", "key"], [gamepad] input = "physical input"
     if (const toml::table* keys = t["keys"].as_table()) {
         for (auto& [name, v] : *keys) {
@@ -194,7 +199,8 @@ toml::table Table() {
                   {"monitor", int64_t(s.monitor)},
                   {"pause_unfocused", s.pause_unfocused},
                   {"show_fps", s.show_fps},
-                  {"antialiasing", kAntialiasing[s.antialiasing % kAntialiasingCount]}};
+                  {"antialiasing", kAntialiasing[s.antialiasing % kAntialiasingCount]},
+                  {"renderer", kRenderers[s.renderer % kRendererCount]}};
     // only what differs from the defaults
     toml::table keys, pad;
     for (int c = 0; c < input::kControls; c++) {
