@@ -6,8 +6,11 @@
 // is removed
 // memdump in the run folder: guest memory written to mem_<frame>.bin and mem_<frame>_phys.bin (uncommitted pages as
 // zeros) within 30 frames, then memdump is removed
+// poke in the run folder: lines "address size value" (hex address, size 1 2 or 4, value decimal or 0x hex) written to
+// guest memory at the next present, then poke is removed (to meet a condition by hand: achievements)
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -69,6 +72,19 @@ public:
         } else if (FILE* f = std::fopen(snap.c_str(), "r")) {
             std::fclose(f);
             snap_ = 1;
+        }
+        if (std::FILE* f = std::fopen((app::ExeDir() / "poke").string().c_str(), "r")) {
+            unsigned addr, size;
+            char value[32];
+            while (std::fscanf(f, "%x %u %31s", &addr, &size, value) == 3) {
+                uint32_t v = uint32_t(std::strtoul(value, nullptr, 0));
+                if (size == 1) *static_cast<uint8_t*>(kernel::HostPtr(addr)) = uint8_t(v);
+                else if (size == 2) kernel::W16(addr, uint16_t(v));
+                else kernel::W32(addr, v);
+                LOGI("poke: %08X = %u (%u bytes)", addr, v, size);
+            }
+            std::fclose(f);
+            std::remove((app::ExeDir() / "poke").string().c_str());
         }
         std::string memdump = (app::ExeDir() / "memdump").string();
         if (frames_ % 30 == 0 && std::filesystem::exists(memdump)) {

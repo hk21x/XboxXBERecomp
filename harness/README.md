@@ -43,6 +43,8 @@ Environment:
 - `snap` file in the run folder: the next two frames drawn into `snap_1.tga` and `snap_2.tga` (`SNAP_FRAMES=N`: N
   frames, `snap_1.tga` to `snap_N.tga`)
 - `achievements.toml` in the run folder: the achievements unlocked, as on Windows (log line `achievement unlocked`)
+- `poke` file in the run folder: lines `address size value` (hex address, size 1, 2 or 4, value decimal or `0x`
+  hex) written into guest memory at the next frame, then the file is removed. Used to meet achievement conditions.
 - `memdump` file in the run folder: guest memory to `mem_<frame>.bin` (the first 128 MB of virtual space) and
   `mem_<frame>_phys.bin` (physical memory at 0x80000000), uncommitted pages as zeros
 - `REF_DRAWLOG` each drawn frame's draws in `cap/drawlog_<frame>.txt`: pixels and stencil values written, their box,
