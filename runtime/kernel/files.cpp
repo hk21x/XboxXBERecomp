@@ -2,6 +2,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -192,6 +193,20 @@ std::string ReadCString(uint32_t va, size_t max) {
 }
 
 // the hard disk's partitions, \Device\Harddisk0\Partition1 to 5, each a host folder
+// XBE_FILES_LOG=1: every open and every missing file in the log, not only the first few hundred
+bool FilesLogAll() {
+    static const bool all = [] {
+        const char* e = std::getenv("XBE_FILES_LOG");
+        return e && *e == '1';
+    }();
+    return all;
+}
+#define FILE_LOG(n, ...)                    \
+    do {                                    \
+        if (FilesLogAll()) LOGI(__VA_ARGS__); \
+        else LOG_FIRST(n, __VA_ARGS__);     \
+    } while (0)
+
 const std::string kPartitionPrefix = "\\DEVICE\\HARDDISK0\\PARTITION";
 
 void MountDefaults(const std::string& game_dir, const std::string& data_dir) {
@@ -246,17 +261,15 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
     }
     if (p.size() >= 2 && p[1] == ':') p = "\\??\\" + p;
     std::lock_guard<std::mutex> lock(g_links_lock);
+    // the longest link that is a prefix: a link to one file wins over its drive's
     for (int depth = 0; depth < 8; depth++) {
         std::string up = Upper(p);
-        bool changed = false;
-        for (auto& [k, v] : g_links) {
-            if (up.compare(0, k.size(), k) == 0 && (up.size() == k.size() || up[k.size()] == '\\')) {
-                p = v + p.substr(k.size());
-                changed = true;
-                break;
-            }
-        }
-        if (!changed) break;
+        const std::pair<const std::string, std::string>* link = nullptr;
+        for (auto& e : g_links)
+            if (up.compare(0, e.first.size(), e.first) == 0 && (up.size() == e.first.size() || up[e.first.size()] == '\\'))
+                if (!link || e.first.size() > link->first.size()) link = &e;
+        if (!link) break;
+        p = link->second + p.substr(link->first.size());
     }
     std::string up = Upper(p);
     const std::pair<const std::string, fs::path>* best = nullptr;
@@ -288,7 +301,7 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
 uint32_t OpenOnDisc(const Disc::Entry* e, const std::string& name, uint32_t handle_out, uint32_t iosb, uint32_t disposition,
                     uint32_t options) {
     if (!e && (disposition == 1 || disposition == 4)) {  // FILE_OPEN or FILE_OVERWRITE need an existing file
-        LOG_FIRST(200, "missing %s", name.c_str());
+        FILE_LOG(200, "missing %s", name.c_str());
         IoStatus(iosb, kObjectNameNotFound, 5);
         return kObjectNameNotFound;
     }
@@ -306,13 +319,20 @@ uint32_t OpenOnDisc(const Disc::Entry* e, const std::string& name, uint32_t hand
     f->dir = e->dir;
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, 1);
-    LOG_FIRST(400, "open %s", name.c_str());
+    FILE_LOG(400, "open %s", name.c_str());
     return kSuccess;
 }
 
 }  // namespace
 
 std::string ResolvePath(const std::string& xbox_path, uint32_t root_handle) { return Resolve(xbox_path, root_handle).host; }
+
+bool GameFileExists(const std::string& xbox_path) {
+    Target t = Resolve(xbox_path, 0);
+    if (t.disc) return t.entry && !t.entry->dir;
+    std::error_code ec;
+    return !t.host.empty() && fs::is_regular_file(t.host, ec);
+}
 
 bool ReadGameFile(const std::string& xbox_path, std::vector<uint8_t>& out) {
     Target t = Resolve(xbox_path, 0);
@@ -381,7 +401,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
             break;
         case 1:  // open
             if (!exists) {
-                LOG_FIRST(200, "missing %s", name.c_str());
+                FILE_LOG(200, "missing %s", name.c_str());
                 IoStatus(iosb, kObjectNameNotFound, 5);
                 return kObjectNameNotFound;
             }
@@ -429,7 +449,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     f->delete_on_close = options & 0x1000;  // FILE_DELETE_ON_CLOSE
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, info);
-    LOG_FIRST(400, "open %s", name.c_str());
+    FILE_LOG(400, "open %s", name.c_str());
     return kSuccess;
 }
 
@@ -443,7 +463,7 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     const std::string& host = t.host;
     std::error_code ec;
     if (host.empty() || !fs::exists(host, ec)) {
-        LOG_FIRST(200, "missing %s", name.c_str());
+        FILE_LOG(200, "missing %s", name.c_str());
         IoStatus(iosb, kObjectNameNotFound, 5);
         return host.empty() ? kObjectPathNotFound : kObjectNameNotFound;
     }
@@ -765,7 +785,7 @@ KERNEL_EXPORT(210, NtQueryFullAttributesFile, 2) {
     Target t = Resolve(name, R32(a[0]));
     std::error_code ec;
     if (t.disc ? !t.entry : t.host.empty() || !fs::exists(t.host, ec)) {
-        LOG_FIRST(200, "missing %s", name.c_str());
+        FILE_LOG(200, "missing %s", name.c_str());
         return kObjectNameNotFound;
     }
     if (t.disc) FillNetworkInfo(a[1], *t.entry);

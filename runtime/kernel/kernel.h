@@ -184,6 +184,7 @@ bool CreateSymbolicLink(const std::string& link, const std::string& target);
 bool DeleteSymbolicLink(const std::string& link);
 std::string QuerySymbolicLink(const std::string& link);
 std::string ResolvePath(const std::string& xbox_path, uint32_t root_handle);  // host path or empty
+bool GameFileExists(const std::string& xbox_path);  // a file there, on the disc image or a host folder
 uint32_t FileObjectBody(const ObjectRef& o);  // the guest FILE_OBJECT of a file, made on first use
 bool ReadGameFile(const std::string& xbox_path, std::vector<uint8_t>& out);  // from a host folder or the disc image
 

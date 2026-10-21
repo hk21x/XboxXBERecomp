@@ -1,6 +1,10 @@
 // headless host: <exe> <game folder or disc image> [--instance N], run from the folder that gets logs, hdd and cap
 // the game folder may come from GAME_DIR instead
 #include <chrono>
+#include <csignal>
+#include <execinfo.h>
+#include <ucontext.h>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,7 +21,28 @@
 #include "image_symbols.h"
 #include "kernel/kernel.h"
 
+// a crash: the faulting address, the host instruction and a backtrace on stderr (run.out); addr2line -e <exe> turns
+// the addresses into functions (recompiled guest code is __imp__sub_<guest address>)
+void OnCrash(int sig, siginfo_t* info, void* uc) {
+    char line[160];
+    auto* ctx = static_cast<ucontext_t*>(uc);
+    int n = std::snprintf(line, sizeof line, "crash: signal %d at %p, rip %llx, guest esp (rdi+16) %08x\n", sig, info->si_addr,
+                          (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP],
+                          ctx->uc_mcontext.gregs[REG_RDI] ? *reinterpret_cast<const uint32_t*>(ctx->uc_mcontext.gregs[REG_RDI] + 16) : 0u);
+    if (n > 0) (void)!write(2, line, size_t(n));
+    void* frames[32];
+    backtrace_symbols_fd(frames, backtrace(frames, 32), 2);
+    logx::Flush();
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
 int main(int argc, char** argv) {
+    struct sigaction sa{};
+    sa.sa_sigaction = OnCrash;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
     std::string game;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--instance") && i + 1 < argc) setenv("INSTANCE", argv[++i], 1);
