@@ -99,6 +99,7 @@ struct DrawConstants {
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
     float wdepth[4];     // PixelKey::wbuf: polygon offset units, slope factor (per host pixel), 1 / the guest depth format's steps, w scale
     float hud[4];        // pretransformed x squeezed about hud[1] (half the width) by hud[0] (ultrawide 2D), else 1
+    float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
 };
 
 }  // namespace gpu

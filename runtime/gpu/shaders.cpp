@@ -33,6 +33,7 @@ struct VOut {
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
     float wlin : TEXCOORD6;  // w, interpolated perspective correct: the pixel's own
+    float psize : TEXCOORD7;  // a point's size in console pixels (oPts), 0 for the render state's
 };
 cbuffer VC : register(b0) { float4 c[192]; };
 cbuffer DC : register(b1) {
@@ -56,6 +57,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 lt[56];
     float4 wdepth;
     float4 hud;
+    float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
 };
 )";
 
@@ -244,6 +246,7 @@ const char* kVsEpilogue = R"(
     o.tc3 = oT3;
     o.fogamt = fogfactor(oFog.x);
     o.wlin = p.w;
+    o.psize = oPts.x;
     return o;
 }
 )";
@@ -796,6 +799,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     o.tc3 = oT3;
     o.fogamt = fogfactor(abs(cp.z));
     o.wlin = cp.w;
+    o.psize = 0;
     return o;
 }
 )";
@@ -924,6 +928,24 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
     float2 half_pixel = v[0].pos.w / surf.xy;  // in clip units, the target spans 2 across surf.xy pixels
     // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
     float2 back = (0.5 - 1e-3) * 2 * half_pixel / surf.w;
+    // a point sprite (D3DRS_POINTSPRITEENABLE): a square of the point's size in console pixels (the vertex program's
+    // oPts, else D3DRS_POINTSIZE), clamped to the min and max, every stage's coordinates 0 to 1 across it (PGR2's trees)
+    if (pts.x > 0) {
+        float size = clamp(v[0].psize > 0 ? v[0].psize : pts.w, pts.y, max(pts.y, pts.z));
+        float2 half_size = size * v[0].pos.w / surf.xy;
+        for (int i = 0; i < 4; i++) {
+            VOut o = v[0];
+            o.pos.x += (i & 1) ? half_size.x : -half_size.x;
+            o.pos.y += (i & 2) ? -half_size.y : half_size.y;
+            float4 tc = float4(i & 1, (i & 2) ? 1 : 0, 0, 1);
+            o.tc0 = tc;
+            o.tc1 = tc;
+            o.tc2 = tc;
+            o.tc3 = tc;
+            strip.Append(o);
+        }
+        return;
+    }
     for (int i = 0; i < 4; i++) {
         VOut o = v[0];
         o.pos.x += (i & 1) ? half_pixel.x : -half_pixel.x - back.x;

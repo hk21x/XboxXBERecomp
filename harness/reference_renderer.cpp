@@ -1156,7 +1156,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     g_raw_vertices = false;
     bool ok = Assemble(s, prim, start, count, indices, as);
     g_raw_vertices = raw;
-    if (!ok || as.topology != Topology::Triangles) return;
+    // points are drawn only as point sprites (D3DRS_POINTSPRITEENABLE: PGR2's trees), as squares below
+    bool sprites = as.topology == Topology::Points && s.rs[kRsPointSpriteEnable];
+    if (!ok || (as.topology != Topology::Triangles && !sprites)) return;
     Plane rt = OpenPlane(s.rt);
     Plane zs = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? OpenPlane(s.zs) : Plane{};
     if (!rt.ok && !zs.ok) return;
@@ -1199,6 +1201,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     auto input = [&](uint32_t v, int r) { return &as.vertices[(size_t(v) * regs + slot[r]) * 4]; };
     uint32_t gw = rt.ok ? rt.w : zs.w, gh = rt.ok ? rt.h : zs.h;
     std::vector<Shaded> verts(as.vertex_count);
+    std::vector<float> point_size(sprites ? as.vertex_count : 0, 0.0f);  // oPts, 0 for D3DRS_POINTSIZE
     // ultrawide (FRAME_ASPECT_X100 over 16:9): 2D without a depth test is squeezed into the centred 16:9 part, a corner
     // on the frame's left or right edge staying there, as D3D12's HudSqueeze and vertex shader do
     float squeeze = 1;
@@ -1226,6 +1229,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             o.attr[kB1] = vp.out[8];
             o.attr[kFog] = Splat(FogAmount(s, vp.out[5][0]));
             for (int t = 0; t < 4; t++) o.attr[kT0 + t] = vp.out[9 + t];
+            if (sprites) point_size[vi] = vp.out[6][0];
         } else {
             const Vec& q = vp.in[0];
             if (as.pretransformed) {
@@ -1257,6 +1261,36 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         for (int a : {kD0, kD1, kB0, kB1})
             for (int j = 0; j < 4; j++) o.attr[a][j] = Sat(o.attr[a][j]);
         if (!s.rs[kRsSpecularEnable]) o.attr[kD1] = o.attr[kB1] = V(0, 0, 0, 1);
+    }
+
+    // point sprites: each point a square of its size in console pixels, clamped to D3DRS_POINTSIZE_MIN and _MAX, every
+    // stage's coordinates 0 to 1 across it (D3D12's PointHlsl), drawn as two triangles
+    if (sprites) {
+        auto f = [&](uint32_t rs) {
+            float v;
+            std::memcpy(&v, &s.rs[rs], 4);
+            return v;
+        };
+        float smin = f(kRsPointSizeMin), smax = std::max(f(kRsPointSizeMax), smin), fixed = f(kRsPointSize);
+        std::vector<Shaded> quads;
+        std::vector<uint32_t> idx, points = as.indices;
+        if (points.empty())
+            for (uint32_t i = 0; i < as.vertex_count; i++) points.push_back(i);
+        for (uint32_t pi = 0; pi < points.size(); pi++) {
+            uint32_t vi = points[pi];
+            float size = std::clamp(point_size[vi] > 0 ? point_size[vi] : fixed, smin, smax) * 0.5f;
+            uint32_t first = uint32_t(quads.size());
+            for (int c = 0; c < 4; c++) {
+                Shaded q = verts[vi];
+                q.pos[0] += (c & 1) ? size : -size;
+                q.pos[1] += (c & 2) ? size : -size;
+                for (int t = 0; t < 4; t++) q.attr[kT0 + t] = V(float(c & 1), (c & 2) ? 1.0f : 0.0f, 0, 1);
+                quads.push_back(q);
+            }
+            for (uint32_t k : {0u, 1u, 2u, 2u, 1u, 3u}) idx.push_back(first + k);
+        }
+        verts = std::move(quads);
+        as.indices = std::move(idx);
     }
 
     // REF_VERTS_VS=handle with REF_DRAWLOG: that vertex shader's vertices listed (input v0, screen position)
@@ -1317,7 +1351,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     uint32_t op_fail = s.rs[kRsStencilFail], op_zfail = simple(kMStencilZFail), op_pass = simple(kMStencilPass);
     bool atest = simple(kMAlphaTestEnable) != 0;
     uint32_t afunc = simple(kMAlphaFunc), aref = simple(kMAlphaRef) & 0xFF;
-    uint32_t cull = s.rs[kRsCullMode];
+    uint32_t cull = sprites ? 0 : s.rs[kRsCullMode];  // a sprite faces the camera
     bool flat = simple(kMShadeMode) == 0x1D00, two_sided = s.rs[kRsTwoSidedLighting] != 0;  // 0x1D00 GL_FLAT
     Vec blend_color = Unpack(simple(kMBlendColor));
     int left = int(s.viewport.x), top = int(s.viewport.y), right = left + int(s.viewport.w), bottom = top + int(s.viewport.h);

@@ -395,6 +395,11 @@ void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
     c.misc[1] = SimpleState(s, kMAlphaTestEnable) ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
     c.misc[2] = float(Cmp(s.rs[kRsShadowFunc]) - 1);
     c.misc[3] = s.rs[kRsSpecularEnable] ? 1.0f : 0.0f;
+    // point sprites: the geometry shader makes each point a square (PointHlsl)
+    c.pts[0] = s.rs[kRsPointSpriteEnable] ? 1.0f : 0.0f;
+    c.pts[1] = Bits(s.rs[kRsPointSizeMin]);
+    c.pts[2] = Bits(s.rs[kRsPointSizeMax]);
+    c.pts[3] = Bits(s.rs[kRsPointSize]);
 }
 
 void FillCombinerConstants(const State& s, DrawConstants& c) {
