@@ -126,6 +126,9 @@ struct GameInfo {
     void (*pad)(int port, input::Pad& pad);  // a polled pad before the game gets it
     void (*rumble)(int port, uint16_t& left, uint16_t& right);
     std::vector<achievements::Def> achievements = {};  // core/achievements.h
+    // other releases' xbe SHA-1s whose code and data are the recompiled one's, differing only in the signature and
+    // certificate (region, version, keys): started without the "different release" question
+    std::vector<const char*> same_code = {};
 };
 extern const GameInfo kGame;
 

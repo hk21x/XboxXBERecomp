@@ -79,8 +79,10 @@ bool FindGame(GameFiles& game) {
     fs::path other_name;
     auto consider = [&](const fs::path& name, std::vector<uint8_t> xbe, std::unique_ptr<kernel::Disc> disc) {
         std::string sha = Sha1(xbe);
-        bool match = sha == kImageSha1;
-        LOGR("Game: %s in %s, sha1 %s%s", IMAGE_XBE, name.string().c_str(), sha.c_str(), match ? "" : ", another release");
+        bool same = std::any_of(kGame.same_code.begin(), kGame.same_code.end(), [&](const char* c) { return sha == c; });
+        bool match = sha == kImageSha1 || same;
+        LOGR("Game: %s in %s, sha1 %s%s", IMAGE_XBE, name.string().c_str(), sha.c_str(),
+             sha == kImageSha1 ? "" : same ? ", another release with the same code" : ", another release");
         if (match) {
             game = {assets, std::move(xbe)};
             kernel::MountDisc(std::move(disc));
