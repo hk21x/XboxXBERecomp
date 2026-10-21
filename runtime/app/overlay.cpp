@@ -138,7 +138,7 @@ void Graphics(Settings& s) {
         s.antialiasing = uint32_t(aa);
         Save();
     }
-    ImGui::TextDisabled("MSAA smooths the edges of the 3D scene at once; render scale above 100% also smooths edges.");
+    ImGui::TextDisabled("MSAA smooths the edges of the 3D scene at once; render scale above 100%% also smooths edges.");
     if (ImGui::Checkbox("Show frames a second", &s.show_fps)) Save();
 }
 

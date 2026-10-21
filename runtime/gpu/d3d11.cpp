@@ -1,6 +1,12 @@
 // Direct3D 11 renderer (renderer = "d3d11" in the settings file), for GPUs and drivers where Direct3D 12 runs badly.
 // In progress: the device, the swap chain, presenting and the settings window work; the title's draws are not
 // drawn yet, copies and visibility tests are answered from guest memory as the headless renderer does.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_6.h>
