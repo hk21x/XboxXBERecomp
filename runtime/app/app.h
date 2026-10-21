@@ -38,7 +38,7 @@ struct Settings {
     bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
     bool show_fps = false;           // frames a second in a corner
     uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
-    uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11 (in progress), at the next start
+    uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
 };
 // the default keys for input::Control c
 std::array<uint16_t, 2> DefaultKeys(int c);

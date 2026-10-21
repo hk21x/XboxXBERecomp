@@ -56,6 +56,8 @@ private:
 std::unique_ptr<Backend> CreateBackend();
 // Windows: the Direct3D 11 renderer, which CreateBackend returns when the settings ask for it
 std::unique_ptr<Backend> CreateD3D11Backend();
+// another renderer to try when the first one's Init fails (Direct3D 11 after 12), null when there is none
+std::unique_ptr<Backend> CreateFallbackBackend();
 // the same backend driven from a thread of its own: calls return once recorded
 std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner);
 
