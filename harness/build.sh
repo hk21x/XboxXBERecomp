@@ -31,7 +31,7 @@ ls "$GEN"/x86_recomp.*.cpp "$GEN"/x86_func_mapping.cpp | xargs -P "$JOBS" -I{} s
     $CXX $BASE ${GEN_OPT:--O1} -g0 -w -I"$RT" -I"$GEN" -c {} -o "$o.tmp" && mv "$o.tmp" "$o"'
 
 others=$(ls "$GEN/.." | grep -vx "$(basename "$GEN")" | paste -sd'|' -)
-SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/gpu/d3d12.cpp|/gpu/d3d11.cpp|/audio/xaudio2.cpp")
+SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/gpu/d3d12.cpp|/gpu/d3d11.cpp|/gpu/d3d_common.cpp|/audio/xaudio2.cpp")
 SRC="$SRC $(ls "$REPO"/src/*/*.cpp | grep -Ev "/src/(${others:-^$})/" || true)"
 SRC="$SRC $(ls "$H"/*.cpp) ${EXTRA[*]}"
 for x in "${EXCL[@]}"; do SRC=$(echo $SRC | tr ' ' '\n' | grep -Ev -- "$x"); done
