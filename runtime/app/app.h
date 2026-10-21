@@ -11,6 +11,7 @@
 
 namespace input {
 struct Pad;
+struct WheelFeel;
 }
 
 // the host side: window, settings
@@ -39,7 +40,25 @@ struct Settings {
     bool show_fps = false;           // frames a second in a corner
     uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
+    // a steering wheel (core/input.cpp), playing as controller 1: axes by their index on the wheel, -1 none; a pedal
+    // reads 0 at rest and 1 at full, from those raw values (-32768 to 32767)
+    struct Pedal {
+        int32_t axis = -1, rest = 32767, full = -32768;
+    };
+    int32_t wheel_steer_axis = 0;
+    bool wheel_steer_invert = false;
+    // DirectInput's axes in order: X Y Z Rx Ry Rz, slider 1, slider 2; Logitech G920/G923/G29: steering X, throttle Y,
+    // brake Rz, clutch slider 1, pedals at the top released
+    Pedal wheel_throttle{1}, wheel_brake{5}, wheel_clutch{6};
+    uint32_t wheel_range = 900;      // the wheel's rotation lock to lock, as its driver sets it (Logitech G HUB: 900)
+    uint32_t wheel_lock = 360;       // degrees of wheel turn for the game's full steering
+    uint32_t wheel_deadzone = 0;     // percent of the steering around the centre that reads as straight
+    std::vector<int8_t> wheel_buttons;  // per input::Control: the wheel button that presses it, -1 none
+    uint32_t ffb_strength = 70;      // force feedback overall, percent, 0 off
+    uint32_t ffb_road = 50;          // the game's rumble (kerbs, impacts) felt in the wheel, percent
 };
+// the wheel buttons of a Logitech G920/G923 (Xbox) for each input::Control, -1 none
+int8_t DefaultWheelButton(int c);
 // the default keys for input::Control c
 std::array<uint16_t, 2> DefaultKeys(int c);
 std::string KeyToName(uint16_t vk);  // settings file names of Windows virtual keys
@@ -129,6 +148,8 @@ struct GameInfo {
     // other releases' xbe SHA-1s whose code and data are the recompiled one's, differing only in the signature and
     // certificate (region, version, keys): started without the "different release" question
     std::vector<const char*> same_code = {};
+    // a steering wheel's force feedback: what the player's car is doing, each poll of controller 1 (input.h)
+    void (*wheel)(input::WheelFeel& feel) = nullptr;
 };
 extern const GameInfo kGame;
 

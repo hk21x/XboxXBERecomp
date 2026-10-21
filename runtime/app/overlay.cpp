@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
@@ -172,6 +173,149 @@ void GameOptions() {
         }
         if (o.help) ImGui::TextDisabled("%s", o.help);
     }
+}
+
+// the steering wheel (core/wheel.cpp): what it reports now, its settings, a Detect for each axis and button
+const char* kAxisNames[8] = {"X", "Y", "Z", "Rx", "Ry", "Rz", "Slider 1", "Slider 2"};
+struct WheelDetect {
+    enum Kind { None, Steer, Pedal, Button } kind = None;
+    Settings::Pedal* pedal = nullptr;
+    int control = -1;
+    int32_t start[8] = {};
+} g_detect;
+
+void AxisCombo(const char* label, int32_t& axis) {
+    const char* names[9] = {"none", "X", "Y", "Z", "Rx", "Ry", "Rz", "Slider 1", "Slider 2"};
+    int i = std::clamp(axis + 1, 0, 8);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+    if (ImGui::Combo(label, &i, names, 9)) {
+        axis = i - 1;
+        Save();
+    }
+}
+
+void Wheel(Settings& s) {
+    input::WheelInfo w = input::Wheel();
+    if (!w.connected) {
+        ImGui::TextUnformatted("No steering wheel found.");
+        ImGui::TextDisabled("Logitech wheels need G HUB installed. A wheel plugged in later is found within two seconds.");
+        g_detect = {};
+        return;
+    }
+    ImGui::Text("%s", w.name.c_str());
+    ImGui::TextDisabled("Force feedback: %s", w.ffb ? w.effects.c_str() : "none (the wheel offers none, or another program has it)");
+    ImGui::TextDisabled("The wheel plays as controller 1, with the keyboard and any pad.");
+
+    // detection: an axis moved far from where it was, or a button pressed
+    if (g_detect.kind == WheelDetect::Steer || g_detect.kind == WheelDetect::Pedal) {
+        int best = -1;
+        int32_t moved = 0;
+        for (int a = 0; a < 8; a++) {
+            int32_t d = w.axes[a] - g_detect.start[a];
+            if (std::abs(d) > std::abs(moved)) best = a, moved = d;
+        }
+        int32_t need = g_detect.kind == WheelDetect::Steer ? 8000 : 20000;
+        if (best >= 0 && std::abs(moved) > need) {
+            if (g_detect.kind == WheelDetect::Steer) {
+                s.wheel_steer_axis = best;
+                s.wheel_steer_invert = moved < 0;  // turned right
+            } else {
+                g_detect.pedal->axis = best;
+                g_detect.pedal->rest = g_detect.start[best];
+                g_detect.pedal->full = moved > 0 ? 32767 : -32768;
+            }
+            Save();
+            g_detect = {};
+        }
+    } else if (g_detect.kind == WheelDetect::Button && !w.pressed.empty()) {
+        s.wheel_buttons[g_detect.control] = int8_t(w.pressed.front());
+        Save();
+        g_detect = {};
+    }
+    auto start_detect = [&](WheelDetect::Kind kind, Settings::Pedal* pedal, int control) {
+        g_detect = {};
+        g_detect.kind = kind;
+        g_detect.pedal = pedal;
+        g_detect.control = control;
+        std::copy(std::begin(w.axes), std::end(w.axes), g_detect.start);
+    };
+
+    ImGui::SeparatorText("Steering");
+    float degrees = w.steer * float(s.wheel_lock) * 0.5f;
+    ImGui::ProgressBar(0.5f + w.steer * 0.5f, ImVec2(-1, 0), (std::to_string(int(std::lround(degrees))) + " degrees").c_str());
+    AxisCombo("Axis##steer", s.wheel_steer_axis);
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Invert", &s.wheel_steer_invert)) Save();
+    ImGui::SameLine();
+    if (ImGui::Button(g_detect.kind == WheelDetect::Steer ? "Turn the wheel right..." : "Detect##steer"))
+        start_detect(WheelDetect::Steer, nullptr, -1);
+    int range = int(s.wheel_range), lock = int(s.wheel_lock), dz = int(s.wheel_deadzone);
+    if (ImGui::SliderInt("Wheel rotation (degrees, as set in G HUB)", &range, 180, 1080)) s.wheel_range = uint32_t(range), Save();
+    if (ImGui::SliderInt("Steering lock (degrees for full lock)", &lock, 90, 1080)) s.wheel_lock = uint32_t(lock), Save();
+    if (ImGui::SliderInt("Dead zone (%)", &dz, 0, 20)) s.wheel_deadzone = uint32_t(dz), Save();
+    ImGui::TextDisabled("Steering lock: a smaller value turns the car fully with less wheel (360 suits most cars).");
+
+    ImGui::SeparatorText("Pedals");
+    struct Row {
+        const char* name;
+        Settings::Pedal* pedal;
+        float value;
+    } rows[3] = {{"Throttle", &s.wheel_throttle, w.throttle}, {"Brake", &s.wheel_brake, w.brake},
+                 {"Clutch (unused by the game)", &s.wheel_clutch, w.clutch}};
+    for (Row& r : rows) {
+        ImGui::PushID(r.name);
+        ImGui::ProgressBar(r.value, ImVec2(ImGui::GetFontSize() * 10, 0), r.name);
+        ImGui::SameLine();
+        AxisCombo("Axis", r.pedal->axis);
+        ImGui::SameLine();
+        bool waiting = g_detect.kind == WheelDetect::Pedal && g_detect.pedal == r.pedal;
+        if (ImGui::Button(waiting ? "Press the pedal fully..." : "Detect")) start_detect(WheelDetect::Pedal, r.pedal, -1);
+        ImGui::PopID();
+    }
+    ImGui::TextDisabled("Detect: let the pedal rest, click, then press it all the way.");
+
+    ImGui::SeparatorText("Force feedback");
+    int strength = int(s.ffb_strength), road = int(s.ffb_road);
+    if (ImGui::SliderInt("Strength (%)", &strength, 0, 100)) s.ffb_strength = uint32_t(strength), Save();
+    if (ImGui::SliderInt("Road and impacts (%)", &road, 0, 100)) s.ffb_road = uint32_t(road), Save();
+    if (ImGui::Button("Push left")) input::WheelTestForce(-0.6f);
+    ImGui::SameLine();
+    if (ImGui::Button("Push right")) input::WheelTestForce(0.6f);
+    ImGui::TextDisabled("Centring firms up with speed; kerbs, gravel and impacts shake the wheel.");
+
+    ImGui::SeparatorText("Buttons");
+    std::string held;
+    for (int b : w.pressed) held += (held.empty() ? "" : " ") + std::to_string(b);
+    ImGui::TextDisabled("Held now: %s%s", held.empty() ? "none" : held.c_str(),
+                        w.pov >= 0 ? (", hat " + std::to_string(w.pov / 100)).c_str() : "");
+    if (ImGui::Button("Default buttons (Logitech G920/G923)")) {
+        for (int c = 0; c < input::kControls; c++) s.wheel_buttons[c] = DefaultWheelButton(c);
+        Save();
+    }
+    if (ImGui::BeginTable("wheel_buttons", 2, ImGuiTableFlags_RowBg)) {
+        for (int c = input::kStart; c <= input::kWhite; c++) {
+            if (c == input::kLT || c == input::kRT) continue;
+            ImGui::PushID(c);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(input::ControlLabel(c));
+            ImGui::TableNextColumn();
+            int b = s.wheel_buttons[c];
+            bool waiting = g_detect.kind == WheelDetect::Button && g_detect.control == c;
+            std::string text = waiting ? "press a wheel button..." : b < 0 ? "-" : "Button " + std::to_string(b);
+            if (ImGui::Button(text.c_str(), ImVec2(ImGui::GetFontSize() * 12, 0))) start_detect(WheelDetect::Button, nullptr, c);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("clear")) s.wheel_buttons[c] = -1, Save();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::TextDisabled("The wheel's hat is the d-pad.");
+
+    ImGui::SeparatorText("Raw axes");
+    for (int a = 0; a < 8; a++)
+        ImGui::ProgressBar((w.axes[a] + 32768) / 65535.0f, ImVec2(-1, 0),
+                           (std::string(kAxisNames[a]) + " " + std::to_string(w.axes[a])).c_str());
 }
 
 void Controls(Settings& s) {
@@ -366,6 +510,10 @@ void DrawOverlay() {
             }
             if (ImGui::BeginTabItem("General")) {
                 General(s);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Wheel")) {
+                Wheel(s);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Controls")) {

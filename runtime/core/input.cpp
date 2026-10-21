@@ -32,6 +32,12 @@ bool g_sdl = false;
 SDL_Gamepad* g_pads[4] = {};
 
 void AddPad(SDL_JoystickID id) {
+    // a steering wheel is core/wheel.cpp's, through DirectInput, never a pad here as well
+    if (SDL_GetJoystickTypeForID(id) == SDL_JOYSTICK_TYPE_WHEEL) {
+        const char* name = SDL_GetJoystickNameForID(id);
+        LOGR("input: %s is a steering wheel, left to the wheel support", name ? name : "a controller");
+        return;
+    }
     for (SDL_Gamepad* pad : g_pads)
         if (pad && SDL_GetGamepadID(pad) == id) return;
     SDL_Gamepad** slot = std::find(std::begin(g_pads), std::end(g_pads), nullptr);
@@ -81,6 +87,7 @@ void Init() {
     }
     int v = SDL_GetVersion();
     LOGI("input: SDL %d.%d.%d", SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v), SDL_VERSIONNUM_MICRO(v));
+    WheelInit(app::Window());
     std::lock_guard lock(g_lock);
     g_sdl = true;
     int count = 0;
@@ -129,6 +136,7 @@ int16_t Stick(float neg, float pos) {
     return int16_t(std::lround(v * 32767.0f));
 }
 std::atomic<uint32_t> g_held[4];  // HeldControls, per port
+std::atomic<uint16_t> g_rumble[2];  // controller 1's motors as the game last set them, for the wheel
 }  // namespace
 
 const char* ControlName(int c) { return c >= 0 && c < kControls ? kNames[c] : ""; }
@@ -157,6 +165,18 @@ Pad Poll(int port) {
     for (int c = 0; c < kControls; c++) {
         int from = c < int(s.pad_map.size()) && s.pad_map[c] < kControls ? s.pad_map[c] : c;
         out[c] = in[from];
+    }
+    // a steering wheel plays as controller 1 too, by its own button map (the settings window's Wheel tab)
+    float wheel[kControls] = {};
+    if (port == 0 && WheelRead(wheel)) {
+        p.connected = true;
+        for (int c = 0; c < kControls; c++) {
+            out[c] = std::max(out[c], wheel[c]);
+            in[c] = std::max(in[c], wheel[c]);  // its Back + Start opens the settings window as a pad's does
+        }
+        WheelFeel feel;
+        if (app::kGame.wheel) app::kGame.wheel(feel);
+        WheelFeedback(feel, g_rumble[0], g_rumble[1]);
     }
     // the keyboard is controller 1, plugged in while keyboard play is on (alt-tabbing away must not unplug it), its
     // keys read while the game window has the focus
@@ -203,6 +223,7 @@ Pad Poll(int port) {
 // the motors run until set again
 void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
+    if (port == 0) g_rumble[0] = left, g_rumble[1] = right;
     std::lock_guard lock(g_lock);
     if (port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);
 }
