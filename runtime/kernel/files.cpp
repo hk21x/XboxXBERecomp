@@ -87,6 +87,7 @@ struct File : Object {
         if (delete_on_close) {
             std::error_code ec;
             fs::remove(host, ec);
+            LOGI("files: %s deleted", xbox.c_str());
         }
     }
 };
@@ -797,6 +798,7 @@ KERNEL_EXPORT(195, NtDeleteFile, 1) {
     std::string host = ResolvePath(ReadAnsiString(R32(a[0] + 4)), R32(a[0]));
     std::error_code ec;
     if (host.empty() || !fs::remove(host, ec)) return kObjectNameNotFound;
+    LOGI("files: %s deleted", host.c_str());
     return kSuccess;
 }
 
