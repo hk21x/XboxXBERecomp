@@ -1955,7 +1955,7 @@ void D3D12Backend::CaptureInputs(const State& s, const Assembled& a, const DrawC
     fprintf(cap_, "\n     verts");
     uint32_t n = 0;
     for (int r = 0; r < 16; r++) n += (a.regs >> r) & 1;
-    for (size_t v = 0; v < std::min<size_t>(4, n ? a.vertices.size() / (n * 4) : 0); v++) {
+    for (size_t v = 0; v < std::min<size_t>(16, n ? a.vertices.size() / (n * 4) : 0); v++) {
         fprintf(cap_, " [");
         for (uint32_t k = 0; k < n * 4; k++) fprintf(cap_, " %g", a.vertices[v * n * 4 + k]);
         fprintf(cap_, " ]");
