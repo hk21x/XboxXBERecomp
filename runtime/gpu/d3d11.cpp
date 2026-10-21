@@ -1,6 +1,6 @@
 // The title's Direct3D 8 calls drawn with Direct3D 11 (renderer = "d3d11" in the settings file), for GPUs and drivers
 // where Direct3D 12 runs badly. The console path of d3d12.cpp, with what does not depend on the API shared through
-// d3d_common. Not here yet: MSAA, F3 captures, renderer extensions and the perf report.
+// d3d_common. Not here yet: F3 captures, renderer extensions and the perf report.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -78,6 +78,13 @@ struct Target {
     bool drawn = false;           // the GPU wrote it since the last readback
     bool linear32 = true;         // a 32 bit linear surface in guest memory, the only kind written back
     std::vector<uint8_t> read;    // what Sync left in guest memory
+    // MSAA: a multisampled twin that draws go to, resolved into res before anything reads res
+    ComPtr<ID3D11Texture2D> ms;
+    ComPtr<ID3D11RenderTargetView> ms_rtv;
+    ComPtr<ID3D11DepthStencilView> ms_dsv;
+    ComPtr<ID3D11ShaderResourceView> ms_srv;  // a depth twin read by its resolve
+    bool ms_dirty = false;  // the twin has pixels res has not
+    bool ms_stale = false;  // res has pixels the twin has not
 };
 
 // a texture from guest memory
@@ -277,9 +284,19 @@ private:
     bool BindTargets(const State& s);
     void Unbind() {
         bound_rt_ = bound_ds_ = nullptr;
+        bound_ms_ = false;
         ForgetDrawState();
     }
     void UploadTarget(Target& t, const Surface& s);
+    // MSAA twins (msaa_ samples): colour targets at least half the console's screen, and the depth drawn with them
+    bool MsEligible(const Target& t) const { return msaa_ > 1 && (t.depth || (t.gw >= 320 && t.gh >= 240)); }
+    bool EnsureMs(Target& t);
+    void Settle(Target& t);   // the twin's pixels into res
+    void Refresh(Target& t);  // res's pixels into the twin
+    void Wrote(Target& t) {   // res written by other than a draw: the twin is behind
+        if (t.ms) t.ms_stale = true, t.ms_dirty = false;
+    }
+    void DropMs(Target& t);
     ComPtr<ID3D11Texture2D> PrepareCopySource(Target& t);  // guest sized BGRA: the target, or a shrunk copy
     ComPtr<ID3D11Texture2D> Shrink(Target& t, uint32_t w, uint32_t h);
     bool ReadBack(ID3D11Texture2D* src, uint32_t w, uint32_t h, std::vector<uint8_t>& out);
@@ -378,6 +395,8 @@ private:
     Assembled asm_;  // kept between draws for its buffers
     Target* bound_rt_ = nullptr;
     Target* bound_ds_ = nullptr;
+    bool bound_ms_ = false;  // the bound targets are twins
+    uint32_t msaa_ = 1;
     Target* draw_rt_ = nullptr;  // the draw's targets, the bound ones go when a texture's copy is drawn
     Target* draw_ds_ = nullptr;
     uint32_t guest_w_ = 640, guest_h_ = 480;
@@ -641,13 +660,27 @@ bool D3D11Backend::BindTargets(const State& s) {
                  rt->gh, (unsigned long long)presents_);
         UploadTarget(*rt, s.rt);
     }
-    if (rt) rt->drawn = true;
-    if (ds) ds->drawn = true;
-    if (rt != bound_rt_ || ds != bound_ds_) {
-        ID3D11RenderTargetView* rtv = rt ? rt->rtv.Get() : nullptr;
-        ctx_->OMSetRenderTargets(rt ? 1 : 0, rt ? &rtv : nullptr, ds ? ds->dsv.Get() : nullptr);
+    // MSAA: an eligible colour target and its depth draw into their twins; otherwise into res, with the twins'
+    // pixels settled into it first and the twins behind after
+    bool ms = rt && MsEligible(*rt) && EnsureMs(*rt) && (!ds || EnsureMs(*ds));
+    for (Target* t : {rt, ds}) {
+        if (!t) continue;
+        if (ms) {
+            Refresh(*t);
+            t->ms_dirty = true;
+        } else {
+            Settle(*t);
+            Wrote(*t);
+        }
+        t->drawn = true;
+    }
+    if (rt != bound_rt_ || ds != bound_ds_ || ms != bound_ms_) {
+        ID3D11RenderTargetView* rtv = rt ? (ms ? rt->ms_rtv : rt->rtv).Get() : nullptr;
+        ID3D11DepthStencilView* dsv = ds ? (ms ? ds->ms_dsv : ds->dsv).Get() : nullptr;
+        ctx_->OMSetRenderTargets(rt ? 1 : 0, rt ? &rtv : nullptr, dsv);
         bound_rt_ = rt;
         bound_ds_ = ds;
+        bound_ms_ = ms;
     }
     return true;
 }
@@ -674,6 +707,8 @@ void D3D11Backend::UploadTarget(Target& t, const Surface& s) {
     ComPtr<ID3D11ShaderResourceView> srv;
     if (FAILED(dev_->CreateTexture2D(&td, &init, &tex)) || FAILED(dev_->CreateShaderResourceView(tex.Get(), nullptr, &srv)))
         return;
+    Settle(t);
+    Wrote(t);
     SetPassTarget(t.rtv.Get(), nullptr, t.w, t.h);
     float uv[4] = {0, 0, 1, 1};
     Blit(srv.Get(), uv, {.alpha = true, .over = over});
@@ -695,6 +730,7 @@ ComPtr<ID3D11Texture2D> D3D11Backend::Shrink(Target& t, uint32_t w, uint32_t h) 
 }
 
 ComPtr<ID3D11Texture2D> D3D11Backend::PrepareCopySource(Target& t) {
+    Settle(t);
     if (t.w != t.gw || t.h != t.gh) return Shrink(t, t.gw, t.gh);
     return t.res;
 }
@@ -797,6 +833,90 @@ void D3D11Backend::RecordLate(uint32_t data) {
     ctx_->CopyResource(l.staging[slot].Get(), src.Get());
     l.frame[slot] = presents_ + 1;
     l.next = (slot + 1) % kLateSlots;
+}
+
+// t's twin, made on first need; false when it can't be (the target is drawn without MSAA)
+bool D3D11Backend::EnsureMs(Target& t) {
+    if (t.ms) return true;
+    DXGI_FORMAT fmt = t.depth ? DXGI_FORMAT_D24_UNORM_S8_UINT : kBgra;
+    UINT quality = 0;
+    if (FAILED(dev_->CheckMultisampleQualityLevels(fmt, msaa_, &quality)) || !quality) return false;
+    D3D11_TEXTURE2D_DESC td = Texture2DDesc(t.depth ? DXGI_FORMAT_R24G8_TYPELESS : kBgra, t.w, t.h,
+                                            t.depth ? D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE
+                                                    : D3D11_BIND_RENDER_TARGET);
+    td.SampleDesc.Count = msaa_;
+    bool made = SUCCEEDED(dev_->CreateTexture2D(&td, nullptr, &t.ms));
+    if (made && t.depth) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dv{};
+        dv.Format = fmt;
+        dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        made = SUCCEEDED(dev_->CreateDepthStencilView(t.ms.Get(), &dv, &t.ms_dsv)) &&
+               SUCCEEDED(dev_->CreateShaderResourceView(t.ms.Get(), &sv, &t.ms_srv));
+    } else if (made) {
+        D3D11_RENDER_TARGET_VIEW_DESC rv{};
+        rv.Format = fmt;
+        rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+        made = SUCCEEDED(dev_->CreateRenderTargetView(t.ms.Get(), &rv, &t.ms_rtv));
+    }
+    if (!made) {
+        LOG_FIRST(4, "d3d11: MSAA twin of %08X %ux%u could not be made", t.data, t.w, t.h);
+        t.ms.Reset();
+        t.ms_rtv.Reset();
+        t.ms_dsv.Reset();
+        t.ms_srv.Reset();
+        return false;
+    }
+    t.ms_dirty = false;
+    t.ms_stale = true;  // filled from res before its first draw
+    LOG_FIRST(8, "d3d11: MSAA %ux twin for %s %08X %ux%u", msaa_, t.depth ? "depth" : "target", t.data, t.w, t.h);
+    return true;
+}
+
+// colour by the hardware resolve; depth by a pass writing each pixel's first sample
+void D3D11Backend::Settle(Target& t) {
+    if (!t.ms || !t.ms_dirty) return;
+    t.ms_dirty = false;
+    if (!t.depth) {
+        ctx_->ResolveSubresource(t.res.Get(), 0, t.ms.Get(), 0, kBgra);
+        return;
+    }
+    uint64_t h;
+    ID3D11VertexShader* vs = VertexShader(Compile(kDepthResolveHlsl, "vs", "vs_5_0", h), h);
+    ID3D11PixelShader* ps = PixelShader(Compile(kDepthResolveHlsl, "psmain", "ps_5_0", h), h);
+    SetPassTarget(nullptr, t.dsv.Get(), t.w, t.h);
+    ID3D11ShaderResourceView* srv = t.ms_srv.Get();
+    FullScreen(vs, ps, nullptr, 0, &srv, 1, opaque_.Get(), depth_always_.Get());
+}
+
+void D3D11Backend::Refresh(Target& t) {
+    if (!t.ms || !t.ms_stale) return;
+    t.ms_stale = false;
+    float uv[4] = {0, 0, 1, 1};
+    if (!t.depth) {
+        SetPassTarget(t.ms_rtv.Get(), nullptr, t.w, t.h);
+        Blit(t.srv.Get(), uv, {.alpha = true});
+        return;
+    }
+    uint64_t h;
+    ID3D11VertexShader* vs = VertexShader(Compile(kDepthHlsl, "vs", "vs_5_0", h), h);
+    ID3D11PixelShader* ps = PixelShader(Compile(kDepthHlsl, "psmain", "ps_5_0", h), h);
+    SetPassTarget(nullptr, t.ms_dsv.Get(), t.w, t.h);
+    ID3D11ShaderResourceView* srv = t.srv.Get();
+    FullScreen(vs, ps, nullptr, 0, &srv, 1, opaque_.Get(), depth_always_.Get());
+}
+
+// the twin goes, its pixels settled into res first
+void D3D11Backend::DropMs(Target& t) {
+    if (!t.ms) return;
+    Settle(t);
+    t.ms.Reset();
+    t.ms_rtv.Reset();
+    t.ms_dsv.Reset();
+    t.ms_srv.Reset();
+    t.ms_dirty = t.ms_stale = false;
 }
 
 // ---- full screen passes
@@ -905,6 +1025,9 @@ bool D3D11Backend::DepthCopy(const State& s) {
     ID3D11VertexShader* vs = VertexShader(Compile(kDepthHlsl, "vs", "vs_5_0", h), h);
     ID3D11PixelShader* ps = PixelShader(Compile(kDepthHlsl, "psmain", "ps_5_0", h), h);
     if (!vs || !ps) return false;
+    Settle(src);
+    Settle(dst);
+    Wrote(dst);
     SetPassTarget(nullptr, dst.dsv.Get(), dst.w, dst.h);
     ID3D11ShaderResourceView* srv = src.srv.Get();
     FullScreen(vs, ps, nullptr, 0, &srv, 1, opaque_.Get(), depth_always_.Get());
@@ -964,17 +1087,23 @@ void D3D11Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
         }
         bool whole = rs.size() == 1 && rs[0].left == 0 && rs[0].top == 0 && rs[0].right == LONG(t->w) &&
                      rs[0].bottom == LONG(t->h);
+        // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
+        if (!t->depth && LatchCpuWrite(*t)) UploadTarget(*t, s.rt);
+        // a whole clear goes to the twin too and leaves both alike; part of one goes to res, the twin refreshed later
+        if (!whole) Settle(*t);
         if (!t->depth) {
-            // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
-            if (LatchCpuWrite(*t)) UploadTarget(*t, s.rt);
-            if (whole) ctx_->ClearRenderTargetView(t->rtv.Get(), col);
-            else ClearRects(*t, rs, flags, col, z, stencil);
+            if (!whole) ClearRects(*t, rs, flags, col, z, stencil);
+            else ctx_->ClearRenderTargetView(t->rtv.Get(), col);
+            if (whole && t->ms) ctx_->ClearRenderTargetView(t->ms_rtv.Get(), col);
         } else if (whole) {
             UINT cf = ((flags & kClearZ) ? D3D11_CLEAR_DEPTH : 0) | ((flags & kClearStencil) ? D3D11_CLEAR_STENCIL : 0);
             ctx_->ClearDepthStencilView(t->dsv.Get(), cf, std::clamp(z, 0.0f, 1.0f), UINT8(stencil));
+            if (t->ms) ctx_->ClearDepthStencilView(t->ms_dsv.Get(), cf, std::clamp(z, 0.0f, 1.0f), UINT8(stencil));
         } else {
             ClearRects(*t, rs, flags, col, std::clamp(z, 0.0f, 1.0f), stencil);
         }
+        if (whole && t->ms) t->ms_dirty = t->ms_stale = false;
+        else Wrote(*t);
         t->drawn = true;
     }
 }
@@ -983,6 +1112,8 @@ void D3D11Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
 
 // one Blit per rect: the targets' scales differ
 void D3D11Backend::CopyByDraw(Target& src_t, Target& dst_t, uint32_t count, uint32_t src_rects, uint32_t dst_points) {
+    Settle(dst_t);
+    Wrote(dst_t);
     SetPassTarget(dst_t.rtv.Get(), nullptr, dst_t.w, dst_t.h);
     float src_scale = float(src_t.w) / src_t.gw;
     float dst_scale = float(dst_t.w) / dst_t.gw;
@@ -1012,6 +1143,8 @@ void D3D11Backend::CopyByDraw(Target& src_t, Target& dst_t, uint32_t count, uint
 
 // one CopySubresourceRegion per rect, clamped to both targets
 void D3D11Backend::CopyByRegion(Target& src_t, Target& dst_t, uint32_t count, uint32_t src_rects, uint32_t dst_points) {
+    Settle(dst_t);
+    Wrote(dst_t);
     float dst_scale = float(dst_t.w) / dst_t.gw;
     float dst_scale_y = float(dst_t.h) / dst_t.gh;
     bool listed = count && src_rects;
@@ -1052,6 +1185,7 @@ void D3D11Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
         }
         return;
     }
+    Settle(*src_t);
     Target* dst_t = EnsureTarget(dst, false);
     if (!dst_t || src_t == dst_t) return;
     bool same_scale = src_t->w * dst_t->gw == dst_t->w * src_t->gw && src_t->h * dst_t->gh == dst_t->h * src_t->gh;
@@ -1065,6 +1199,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindTargetTexture(const State& s, int st
                                                           DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
     if (&t == draw_ds_) return nullptr;
+    Settle(t);
     stages.reads.rt[stage] = true;
     if (!t.depth && LatchCpuWrite(t)) {
         if (++reloads_[t.data] <= 3)
@@ -1536,7 +1671,8 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // pipeline state
     PsoKey k;
     PipelineTargets pt{.rt = bound_rt_ != nullptr, .rtfmt = bound_rt_ ? uint32_t(kBgra) : 0u, .ds = bound_ds_ != nullptr,
-                       .ds_scale = bound_ds_ ? float(bound_ds_->h) / bound_ds_->gh : 1.0f, .samples = 1};
+                       .ds_scale = bound_ds_ ? float(bound_ds_->h) / bound_ds_->gh : 1.0f,
+                       .samples = bound_ms_ ? msaa_ : 1};
     BuildPipelineKey(s, a, sh.vh, sh.ph, pt, k);
     if (!adjust.depth_test) k.zen = k.zwrite = 0;
     k.zbias += adjust.depth_bias;
@@ -1607,7 +1743,7 @@ ComPtr<ID3D11Query> D3D11Backend::NewQuery() {
 float D3D11Backend::SamplesPerPixel() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
     if (!t || !t->gw || !t->gh) return 1;
-    return float(t->w) * float(t->h) / (float(t->gw) * float(t->gh));
+    return float(t->w) * float(t->h) / (float(t->gw) * float(t->gh)) * float(bound_ms_ ? msaa_ : 1);
 }
 
 // reports whose draws the GPU has finished, written as the console's GPU writes them: time, count, then 0 for done
@@ -1730,6 +1866,7 @@ void D3D11Backend::Present(const Surface& front) {
     ResizeSwap();
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
+    if (t) Settle(*t);
     if (ramp_dirty_) UploadGammaRamp();
     float black[4] = {0, 0, 0, 1};
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
@@ -1751,7 +1888,15 @@ void D3D11Backend::Present(const Surface& front) {
 }
 
 void D3D11Backend::ApplySettings() {
-    if (app::Get().antialiasing >= 2) LOG_FIRST(1, "d3d11: MSAA is not in the Direct3D 11 renderer yet");
+    // antialiasing 2, 3, 4: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
+    static const uint32_t kSamples[] = {1, 1, 2, 4, 8};
+    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().antialiasing, 4)];
+    if (want_ms != msaa_) {
+        for (auto& [key, t] : targets_) DropMs(t);
+        msaa_ = want_ms;
+        Unbind();
+        LOGR("d3d11: MSAA %ux", msaa_);
+    }
     float aspect = app::FrameAspect();
     if (std::fabs(aspect - aspect_) > 1e-4f) {
         aspect_ = aspect;
@@ -1776,6 +1921,7 @@ void D3D11Backend::ApplySettings() {
 // a new render scale or shape: colour targets keep their pictures, scaled into new ones (a title may draw a target
 // once and sample it for long after: PGR2's mini map), depth targets start again
 void D3D11Backend::RescaleTargets() {
+    for (auto& [key, t] : targets_) DropMs(t);
     Unbind();
     for (auto it = targets_.begin(); it != targets_.end();) {
         Target& old = it->second;
