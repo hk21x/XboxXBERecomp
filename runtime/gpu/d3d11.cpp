@@ -406,7 +406,7 @@ bool D3D11Backend::Init(uint32_t width, uint32_t height) {
     if (!CreateDevice() || !CreateSwapChain(hwnd) || !CreateFixed()) return false;
     ui_ = ImGui_ImplDX11_Init(dev_.Get(), ctx_.Get());
     if (g_extension) LOGW("d3d11: the renderer extension is not used under Direct3D 11");
-    LOGI("d3d11: %ux%u guest, %ux%u window, render scale %.3f", width, height, bb_w_, bb_h_, scale_);
+    LOGR("d3d11: drawing renderer, %ux%u guest, %ux%u window, render scale %.3f", width, height, bb_w_, bb_h_, scale_);
     return true;
 }
 
