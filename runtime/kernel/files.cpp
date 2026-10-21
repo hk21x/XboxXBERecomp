@@ -204,7 +204,7 @@ bool FilesLogAll() {
 }
 #define FILE_LOG(n, ...)                    \
     do {                                    \
-        if (FilesLogAll()) LOGI(__VA_ARGS__); \
+        if (FilesLogAll()) LOGR(__VA_ARGS__); \
         else LOG_FIRST(n, __VA_ARGS__);     \
     } while (0)
 

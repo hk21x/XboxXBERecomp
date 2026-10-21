@@ -305,6 +305,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         DispatchMessageW(&msg);
     }
     if (app::g_mode_changed) ChangeDisplaySettingsW(nullptr, 0);
+    LOGR("the window closed");
     logx::Flush();
     kernel::Shutdown(0);
 }

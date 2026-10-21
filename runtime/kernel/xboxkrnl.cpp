@@ -1192,7 +1192,7 @@ KERNEL_EXPORT(95, KeBugCheck, 1) {
 }
 
 KERNEL_EXPORT(49, HalReturnToFirmware, 1) {
-    LOGI("HalReturnToFirmware(%u): the title asked to leave", a[0]);
+    LOGR("HalReturnToFirmware(%u): the title asked to leave, from %08X", a[0], R32(ctx.esp));
     // quick reboot into a recompiled image, the XAPI wrote the launch data page: restart into its executable with it
     uint32_t page = R32(g_launch_data_page_va);
     if (a[0] == 2 && page) {
@@ -1211,7 +1211,10 @@ KERNEL_EXPORT(49, HalReturnToFirmware, 1) {
     Shutdown(0);
 }
 
-KERNEL_EXPORT(360, HalInitiateShutdown, 0) { Shutdown(0); }
+KERNEL_EXPORT(360, HalInitiateShutdown, 0) {
+    LOGR("HalInitiateShutdown: the title shut down, from %08X", R32(ctx.esp));
+    Shutdown(0);
+}
 KERNEL_EXPORT(358, HalIsResetOrShutdownPending, 0) { return 0; }
 KERNEL_EXPORT(47, HalRegisterShutdownNotification, 2) { return 0; }
 // the file cache in pages: nothing is cached here, the size only goes back to the title
