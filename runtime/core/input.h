@@ -32,23 +32,35 @@ void Rumble(int port, uint16_t left, uint16_t right);
 // navigation)
 uint32_t HeldControls();
 
-// a steering wheel through DirectInput (core/wheel.cpp), merged into controller 1
-// what the game tells the force feedback, each poll of controller 1 (GameInfo::wheel)
+// a steering wheel and the rest of a rig through DirectInput (core/wheel.cpp): every game controller DirectInput lists
+// but Xbox pads (SDL's), each control bound to one of them (app::Settings::WheelBind), merged into controller 1
+constexpr int kGearUnknown = -100;
+// what the game tells the force feedback and the shifter, each poll of controller 1 (GameInfo::wheel)
 struct WheelFeel {
-    bool racing = false;  // the player drives: the wheel's forces follow the car, else a light centring
-    float speed = 0;      // m/s
+    bool racing = false;     // the player drives: the wheel's forces follow the car, else a light centring
+    float speed = 0;         // m/s
+    int gear = kGearUnknown;  // the player's gear: -1 reverse, 0 neutral, 1 first ...; kGearUnknown when not known
+    int shift_up = -1, shift_down = -1;  // the console controls (Control) that change gear, for an H-pattern shifter
+};
+struct WheelDevice {  // one device, as the settings window shows it
+    std::string name, guid;  // DirectInput's product name, the instance GUID as text
+    bool ffb = false;        // it offers force feedback
+    bool feedback = false;   // the forces go to it (the steering's device)
+    int axes_count = 0, buttons_count = 0, povs_count = 0;
+    int32_t axes[8] = {};    // raw, -32768 to 32767: X Y Z Rx Ry Rz slider 1, slider 2
+    std::vector<int> pressed;  // buttons held
+    int pov = -1;            // its first hat in hundredths of a degree, -1 centred
 };
 struct WheelInfo {
-    bool connected = false, ffb = false;
-    std::string name, effects;  // effects: the force feedback ones made
-    int axes_count = 8, buttons_count = 0;
-    int32_t axes[8] = {};       // raw, -32768 to 32767: X Y Z Rx Ry Rz slider 1, slider 2
-    std::vector<int> pressed;   // buttons held
-    int pov = -1;               // hat in hundredths of a degree, -1 centred
+    std::vector<WheelDevice> devices;
+    bool active = false;     // some binding reads a device: the rig plays as controller 1
+    std::string effects;     // the force feedback effects made
     float steer = 0, throttle = 0, brake = 0, clutch = 0;  // as the game gets them: steer -1 to 1, pedals 0 to 1
+    int gear_selected = kGearUnknown, gear_game = kGearUnknown;  // the shifter's position and the car's gear
 };
 void WheelInit(void* hwnd);  // with the game window (force feedback needs it): starts the wheel thread
-// the wheel's console inputs, 0 to 1 each in Control order; false when there is none
+void WheelSetup();           // the bindings again from app::Get(), after the settings window changed them
+// the rig's console inputs, 0 to 1 each in Control order; false when no binding reads a device
 bool WheelRead(float* v);
 void WheelFeedback(const WheelFeel& feel, uint16_t rumble_left, uint16_t rumble_right);
 WheelInfo Wheel();           // the settings window's view

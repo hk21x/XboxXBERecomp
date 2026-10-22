@@ -56,6 +56,8 @@ void Apply(const std::string& s, Pad& p) {
         else if (b == "B") p.analog[1] = 255;
         else if (b == "X") p.analog[2] = 255;
         else if (b == "Y") p.analog[3] = 255;
+        else if (b == "BLACK") p.analog[4] = 255;
+        else if (b == "WHITE") p.analog[5] = 255;
         else if (b == "LT") p.analog[6] = 255;
         else if (b == "RT") p.analog[7] = 255;
         else if (b == "LS") p.ly = 32767;
