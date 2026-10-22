@@ -153,6 +153,8 @@ struct GameInfo {
     // movies step one frame per game frame and the host holds a frame BinkWait says is early (xdk/bink.cpp); off for a
     // title whose movie loop waits on BinkWait itself
     bool bink_frame_hold = true;
+    // the shape the title lays out its 2D for (HUD, menus): shown wider, that 2D is squeezed into it (gpu::HudSqueeze)
+    float hud_aspect = 16.0f / 9.0f;
 };
 extern const GameInfo kGame;
 

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "app/app.h"
 #include "core/log.h"
 #include "kernel/kernel.h"
 
@@ -643,15 +644,19 @@ DrawnRect ReadDrawnRect(uint32_t src_rects, uint32_t dst_points, uint32_t i) {
 // a guest coordinate read as unsigned, times the host scale
 UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 
-// Ultrawide: a title lays out its 2D (HUD, menus) for 16:9; shown wider it would stretch. Pretransformed draws without
-// a depth test on a stretched screen target are squeezed into the centred 16:9 part, each corner on its own: one on
+// Ultrawide: a title lays out its 2D (HUD, menus) for 16:9 (GameInfo::hud_aspect, 4:3 for a title without widescreen);
+// shown wider it would stretch. Pretransformed draws without a depth test on a stretched screen target are squeezed
+// into the centred part of that shape, each corner on its own: one on
 // the frame's left or right edge stays there (the vertex shader), so HUD bars from the edge still reach it and full
 // screen passes (the frame's own copy, blurs, movies) and full width lines keep their width. Depth tested ones (light
 // glows, their visibility probes) sit at world positions and stay.
+// depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
+bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
+
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
-    constexpr float kWide = 16.0f / 9.0f;
-    if (!a.pretransformed || s.rs[kRsZEnable] || aspect <= kWide + 1e-3f || stretch <= 1) return 1;
-    return kWide / aspect;
+    const float wide = app::kGame.hud_aspect;
+    if (!a.pretransformed || DepthTested(s) || aspect <= wide + 1e-3f || stretch <= 1) return 1;
+    return wide / aspect;
 }
 
 }  // namespace gpu
