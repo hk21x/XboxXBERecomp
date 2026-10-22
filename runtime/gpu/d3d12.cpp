@@ -1562,6 +1562,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     if (ext_) ext_->Sampled(d, &t, 0, info);
     sv.Format = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.fmt;
     if (!t.depth && t.fmt == kBgra) sv.Shader4ComponentMapping = OneByteMapping(d.format);
+    if (!t.depth && NoAlphaFormat(d.format)) info.flags |= kTexOpaque;
     // the console reads the pixels it is about to overwrite: give the draw a copy
     if (feedback) return Feedback(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

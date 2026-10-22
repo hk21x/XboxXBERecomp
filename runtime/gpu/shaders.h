@@ -17,8 +17,12 @@ struct TexInfo {
     uint8_t flags = 0;   // kTexWide; bits 0 and 1 are a backend extension's
 };
 enum : uint8_t {
-    kTexWide = 4,  // an upscaled target shrunk by the pass: each tap averaged over console texels
+    kTexWide = 4,    // an upscaled target shrunk by the pass: each tap averaged over console texels
+    kTexOpaque = 8,  // a target read as a format without alpha (R5G6B5, X1R5G5B5, X8R8G8B8): alpha reads 1, whatever
+                     // the draws into it wrote
 };
+// a format without an alpha channel, swizzled or linear: sampled, its alpha is 1
+inline bool NoAlphaFormat(uint32_t f) { return f == 0x03 || f == 0x05 || f == 0x07 || f == 0x11 || f == 0x1C || f == 0x1E; }
 
 struct PixelKey {
     uint32_t programmable = 0;
