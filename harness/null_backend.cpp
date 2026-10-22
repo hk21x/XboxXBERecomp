@@ -144,14 +144,14 @@ private:
     // one draw's state, textures, transforms, declaration and first vertex
     void List(const State& s, uint32_t prim, uint32_t start, uint32_t count) {
         FILE* f = list_;
-        std::fprintf(f, "DRAW prim=%u n=%u vs=%X ps=%X rt=%08X tex0=%08X light=%u blend=%u %X %X cw=%X at=%u z=%u zf=%X\n", prim, count,
-                     s.vs_handle, s.ps ? s.ps->handle : 0, s.rt.data, s.textures[0], s.rs[kRsLighting], s.simple[kMBlendEnable >> 2],
+        std::fprintf(f, "DRAW prim=%u n=%u vs=%X ps=%X rt=%08X zs=%08X tex0=%08X light=%u blend=%u %X %X cw=%X at=%u z=%u zf=%X\n", prim, count,
+                     s.vs_handle, s.ps ? s.ps->handle : 0, s.rt.data, s.zs.data, s.textures[0], s.rs[kRsLighting], s.simple[kMBlendEnable >> 2],
                      s.simple[kMSrcBlend >> 2], s.simple[kMDestBlend >> 2], s.simple[kMColorWriteEnable >> 2],
                      s.simple[kMAlphaTestEnable >> 2], s.rs[kRsZEnable], s.simple[kMZFunc >> 2]);
         const auto& t0 = s.tss[0];
         TextureDesc d;
         if (s.textures[0] && Describe(s.textures[0], d))
-            std::fprintf(f, "  tex %ux%u fmt %X cop %u %X %X aop %u %X %X\n", d.width, d.height, d.format, t0[kTssColorOp],
+            std::fprintf(f, "  tex %ux%u fmt %X data %08X cop %u %X %X aop %u %X %X\n", d.width, d.height, d.format, d.data, t0[kTssColorOp],
                          t0[kTssColorArg1], t0[kTssColorArg2], t0[kTssAlphaOp], t0[kTssAlphaArg1], t0[kTssAlphaArg2]);
         std::fprintf(f, "  ttf %X tci %X addr %u %u t16", t0[kTssTextureTransformFlags], t0[kTssTexCoordIndex], t0[kTssAddressU],
                      t0[kTssAddressV]);

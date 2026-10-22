@@ -1241,7 +1241,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindTargetTexture(const State& s, int st
         ctx_->CopyResource(t.fb.Get(), t.res.Get());
         return t.fb_srv.Get();
     }
-    if (t.depth) info.shadow = ShadowDepthKind(d.format);
+    if (t.depth) DepthRead(d.format, info);
     return t.srv.Get();
 }
 
