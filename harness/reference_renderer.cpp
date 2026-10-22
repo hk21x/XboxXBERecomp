@@ -1202,10 +1202,12 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     uint32_t gw = rt.ok ? rt.w : zs.w, gh = rt.ok ? rt.h : zs.h;
     std::vector<Shaded> verts(as.vertex_count);
     std::vector<float> point_size(sprites ? as.vertex_count : 0, 0.0f);  // oPts, 0 for D3DRS_POINTSIZE
-    // ultrawide (FRAME_ASPECT_X100 over GameInfo::hud_aspect): 2D without a depth test is squeezed into the centred part, a corner
-    // on the frame's left or right edge staying there, as D3D12's HudSqueeze and vertex shader do
+    // ultrawide (FRAME_ASPECT_X100 over GameInfo::hud_aspect): 2D is squeezed into the centred part, a corner on the
+    // frame's left or right edge staying there, a depth tested draw only where at the near plane (rhw 0.25 or more), as
+    // the renderers' HudSqueeze and vertex shader do
     float squeeze = 1;
-    if (as.pretransformed && slot[0] >= 0 && !(s.rs[kRsZEnable] && s.simple[kMZFunc >> 2] != 0x207) && rt.ok && rt.h == 480 && rt.w >= rt.h &&
+    const bool depth_tested = s.rs[kRsZEnable] && s.simple[kMZFunc >> 2] != 0x207;
+    if (as.pretransformed && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
     for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
@@ -1234,7 +1236,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             const Vec& q = vp.in[0];
             if (as.pretransformed) {
                 o.pos = V(q[0], q[1], q[2] * s.zscale, q[3] == 0 ? 1 : 1 / q[3]);
-                if (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f) o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
+                if (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f && (!depth_tested || q[3] >= 0.25f))
+                    o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
             } else {
                 // world, view, projection, then the viewport, as the D3D12 path builds it
                 auto mul = [](const float* x, const float* y, float* r) {

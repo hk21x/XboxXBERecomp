@@ -1577,7 +1577,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     if (ext_) ext_->Sampled(d, &t, 0, info);
     sv.Format = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.fmt;
     if (!t.depth && t.fmt == kBgra) sv.Shader4ComponentMapping = OneByteMapping(d.format);
-    if (!t.depth && NoAlphaFormat(d.format)) info.flags |= kTexOpaque;
+    if (NoAlphaFormat(d.format)) info.flags |= kTexOpaque;  // also a depth buffer read as X8R8G8B8
     // the console reads the pixels it is about to overwrite: give the draw a copy
     if (feedback) return Feedback(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1815,6 +1815,9 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
+    if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
+        tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height) | alt);
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
