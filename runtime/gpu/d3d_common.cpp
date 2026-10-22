@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 #include "app/app.h"
 #include "core/log.h"
@@ -652,6 +654,23 @@ UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 // glows, their visibility probes) sit at world positions and stay.
 // depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
 bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
+
+void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, uint32_t gh, uint32_t w, float aspect,
+                 float stretch, float squeeze) {
+    if (!a.pretransformed || aspect <= app::kGame.hud_aspect + 1e-3f) return;
+    static std::mutex lock;
+    static std::unordered_map<uint32_t, int> last;  // per target: 0 squeezed, 1 depth tested, 2 not screen shaped
+    static int said = 0;
+    int why = squeeze < 1 ? 0 : DepthTested(s) ? 1 : 2;
+    std::lock_guard l(lock);
+    auto it = last.find(rt);
+    if (it != last.end() && it->second == why) return;
+    last[rt] = why;
+    if (said++ >= 200) return;
+    const char* text[] = {"squeezed into the centre", "not squeezed: depth tested", "not squeezed: not a screen shaped target"};
+    LOGR("ultrawide: 2D on target %08X (%ux%u, %u pixels wide, stretch %.2f, depth %u func %X): %s", rt, gw, gh, w,
+         stretch, s.rs[kRsZEnable], SimpleState(s, kMZFunc), text[why]);
+}
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
     const float wide = app::kGame.hud_aspect;

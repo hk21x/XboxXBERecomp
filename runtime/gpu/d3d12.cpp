@@ -2310,6 +2310,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     DrawConstants c{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
+    if (bound_rt_)
+        NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_,
+                    XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);
     c.hud[1] = guest_w_ * 0.5f;
     if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f;
     UploadConstants(s, sh, k, stages, size, c);
