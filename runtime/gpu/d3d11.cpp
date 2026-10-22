@@ -1763,6 +1763,7 @@ void D3D11Backend::DeliverReports(bool wait) {
         kernel::W32(r.va + kTime, uint32_t(presents_));
         kernel::W32(r.va + kTimeHigh, 0);
         kernel::W32(r.va + kCount, uint32_t(std::lround(pixels)));
+        NoteReport(r.va, uint32_t(std::lround(pixels)));
         std::atomic_thread_fence(std::memory_order_release);
         kernel::W32(r.va + kStatus, 0);
         // its queries are free again once no later report and no count in progress holds them

@@ -1471,8 +1471,25 @@ void ApplyVisibilityMethod(uint32_t m, uint32_t v) {
             W32(report + 12, 0);
             return;
         }
+        // answered at once with the count the GPU last gave this report, the GPU's own written over it when it is past
+        // these draws: a title that reads it straight after (PGR2: every frame, after resetting it to pending) would
+        // otherwise wait for the render thread to finish the frame so far, a stall every other frame. The first one
+        // waits. XBE_REPORTS_EXACT=1: every read waits for the exact count, as before
+        static const bool exact = [] {
+            const char* e = std::getenv("XBE_REPORTS_EXACT");
+            bool on = e && *e == '1';
+            if (on) LOGR("d3d: XBE_REPORTS_EXACT=1, a visibility report read waits for the GPU");
+            return on;
+        }();
+        uint32_t count = 0;
+        bool answered = !exact && gpu::LastReport(report, count);
+        if (answered) {
+            W32(report + 8, count);
+            std::atomic_thread_fence(std::memory_order_release);
+            W32(report + 12, 0);  // done
+        }
         g_backend->GetReport(report);
-        g_report_asked = true;
+        g_report_asked = !answered;
     }
 }
 
