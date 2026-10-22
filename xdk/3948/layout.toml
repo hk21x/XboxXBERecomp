@@ -1,0 +1,46 @@
+# XDK 3948 library data layouts the runtime reads or writes. Each value is proven by the default.xbe
+# (Project Gotham Racing, PAL) code at the address given.
+[layout]
+# D3D8 render and texture stage state numbers (runtime xdk/state_numbering.h): SetRenderStateNotInline 0xEA5E0 takes
+# states < 0x52 as simple (0xEA5E5), < 0x74 as deferred (0xEA609), the rest through the complex setter table
+# 0xF8258 (0xEA62F); the texture setup 0xF1140 packs stage states 10-12 into the address method 0x1B04
+StateNumbering        = 3948
+# D3D8 CDevice, the static device D3D__pDevice points at (Direct3D_CreateDevice 0xEF7C0 stores 0xF9A60)
+CDevice_Push          = 0x0     # D3DDevice_SetRenderState_Simple 0xEA590 reads it, 0xEA5A0 stores the advanced pointer
+CDevice_PushThreshold = 0x4     # D3DDevice_SetRenderState_Simple 0xEA598 compares the push pointer with it
+CDevice_Flags         = 0xC     # Direct3D_CreateDevice 0xEF7B8 ors BehaviorFlags & 0x10 into it; D3DDevice_Begin 0xEDF3E sets 0x800
+CDevice_RenderTarget  = 0x40C   # D3DDevice_SetRenderTarget 0xEBC38 stores it
+CDevice_Depth         = 0x410   # D3DDevice_SetRenderTarget 0xEBC5D stores it; D3DDevice_GetDepthStencilSurface 0xEC0C5 returns it
+CDevice_PixelShader   = 0x414   # D3DDevice_SetPixelShader 0xECC04 stores the handle
+CDevice_BaseVertex    = 0x478   # D3DDevice_SetIndices 0xEC709 stores BaseVertexIndex
+CDevice_IndexBuffer   = 0x47C   # D3DDevice_SetIndices 0xEC6DA reads the old one, 0xEC702 stores the new one
+CDevice_ZScale        = 0x4F8   # the viewport offset and scale 0xF0B77 (in 0xF0B00) scales the Z range by it
+CDevice_SuperSampleX  = 0x500   # the viewport offset and scale 0xF0B27 scales the width by it
+CDevice_SuperSampleY  = 0x504   # the viewport offset and scale 0xF0B4D scales the height by it
+CDevice_Transforms    = 0x880   # D3DDevice_SetTransform 0xEB641 copies 16 dwords to +(type + 0x22) * 64
+CDevice_Viewport      = 0xB00   # D3DDevice_SetViewport 0xEC1ED to 0xEC211 stores X, Y, Width, Height, MinZ, MaxZ
+CDevice_Textures      = 0xBA0   # D3DDevice_SetTexture 0xEC55E reads, 0xEC593 stores [stage]
+CDevice_Palettes      = 0xBB0   # the device teardown 0xF3EB0 releases [stage] at 0xF3F4D/0xF3F79, after the textures
+# 3948 keeps the frame buffers' surface objects inside the device (24 bytes each) instead of pointers to them
+CDevice_FrameSurfaces = 0x2150  # D3DDevice_GetBackBuffer 0xEBE3E returns +0x2150 + n * 24: 0 the back buffer, 1 (index -1) the front
+CDevice_AutoDepthSurface = 0x219C # D3DDevice_Reset 0xEBB0E makes it the depth buffer when +0x2198 (its memory, 0xF3839) is set
+CDevice_SwapCount     = 0x2B60  # D3DDevice_Swap 0xEED8C increments it
+CDevice_Size          = 0x2B90  # D3DDevice_Release 0xEB83B clears 0xAE4 dwords of the device after the last reference
+# the display miniport lives at +0x2308 (D3DDevice_Reset 0xEBA9F); the vertical blank handler 0xF4340 works on it
+CDevice_VBlankCount   = 0x2B28  # the vertical blank handler 0xF434E increments miniport + 0x820
+CDevice_VBlankEvent   = 0x24F0  # D3DDevice_BlockUntilVerticalBlank 0xEB95D waits on it, 0xEB94B clears its SignalState; 0xF443C sets miniport + 0x1E8
+CDevice_VBlankCallback = 0x24EC # the vertical blank handler 0xF4442 calls miniport + 0x1E4
+VBlankCallback_Count  = 1       # with the blank count itself (0xF444C pushes miniport + 0x820), not a D3DVBLANKDATA
+CDevice_GammaRamps    = 0x251C  # the vertical blank handler 0xF43CA passes miniport + 0x214 + index * 0x300 to the gamma load 0xF2944
+CDevice_GammaPending  = 0x2B1C  # the vertical blank handler 0xF43BA tests, 0xF43D9 clears miniport + 0x814 + index * 4
+# D3D8 globals
+DirtyFlags_Texture    = 0x408   # D3DDevice_SetTexture 0xEC5C2 ors it into the dirty flags (device + 8, D3D__DirtyFlags)
+TextureState_Stage    = 32      # D3DDevice_SetTextureState_TexCoordIndex 0xEAB3B scales the stage by 0x80, 0xEAB3F stores at 0xF9470 (+28)
+Stream_Size           = 12      # D3DDevice_SetStreamSource 0xE9FDB indexes the stream table by n * 12
+Stream_Stride         = 0x0     # D3DDevice_SetStreamSource 0xEA03A stores Stride
+Stream_Buffer         = 0x8     # D3DDevice_SetStreamSource 0xEA034 stores the vertex buffer
+PixelShader_Definition = 0x8    # D3DDevice_SetPixelShader 0xECC5B reads the definition pointer
+# XAPI XPP device type record
+XPP_Current           = 0x0     # XGetDevices 0x13BEA8 returns it
+XPP_Changed           = 0x4     # XGetDevices 0x13BEAA clears it, XGetDeviceChanges 0x13BEC8 tests it
+XPP_Previous          = 0x8     # XGetDevices 0x13BEB0 copies Current into it

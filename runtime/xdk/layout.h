@@ -105,6 +105,18 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_ScreenSpaceOffset
 #define XDK_CDevice_ScreenSpaceOffset 0xFFFFFFFFu
 #endif
+// 3948: the frame buffers' surface objects inside the device, 24 bytes each (back, front, third), and the auto depth
+// buffer's; when known the runtime builds its surfaces there and CDevice_BackBuffer / FrontBuffer are not needed
+#ifndef XDK_CDevice_FrameSurfaces
+#define XDK_CDevice_FrameSurfaces 0xFFFFFFFFu
+#endif
+#ifndef XDK_CDevice_AutoDepthSurface
+#define XDK_CDevice_AutoDepthSurface 0xFFFFFFFFu
+#endif
+// 1: the vertical blank callback takes the blank count itself (3948), not a D3DVBLANKDATA pointer
+#ifndef XDK_VBlankCallback_Count
+#define XDK_VBlankCallback_Count 0
+#endif
 #ifndef XDK_CDevice_AutoDepth
 #define XDK_CDevice_AutoDepth 0xFFFFFFFFu
 #endif

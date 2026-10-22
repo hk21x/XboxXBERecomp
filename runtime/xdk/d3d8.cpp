@@ -190,10 +190,11 @@ gpu::Surface SurfaceOf(uint32_t header) {
     return s;
 }
 
-uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp) {
+// hdr: where the surface object goes, 0 for a new one
+uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0) {
     uint32_t pitch = (w * bpp + 63) & ~63u;
     uint32_t data = mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000);
-    uint32_t hdr = mem::AllocSystem(24);
+    if (!hdr) hdr = mem::AllocSystem(24);
     W32(hdr + 0, 0x000D0001);  // surface, one reference, one internal reference held by the device
     W32(hdr + 4, mem::PhysicalFromVirtual(data));
     W32(hdr + 8, 0);
@@ -277,7 +278,9 @@ void VerticalBlank(X86Context& ctx) {
         SetDev(XDK_CDevice_VBlankCount, count);
         ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
         SetEvent(*event);
-        if (uint32_t callback = Dev(XDK_CDevice_VBlankCallback)) {
+        if (uint32_t callback = Dev(XDK_CDevice_VBlankCallback); callback && XDK_VBlankCallback_Count) {
+            CallGuest(ctx, callback, {count});
+        } else if (callback) {
             // blank count, swaps shown, 1 when this blank showed one
             W32(info, count);
             W32(info + 4, swaps);
@@ -327,22 +330,30 @@ bool MakeFrameBuffers(uint32_t pp) {
     static uint32_t made[5];
     uint32_t want[5] = {w, h, fmt, count, auto_depth ? depth_fmt : 0xFFFFFFFFu};
     bool fresh = !g_buffers[1] || std::memcmp(made, want, sizeof made);
+    if (XDK_CDevice_FrameSurfaces != xdk::kUnknown && g_buffers[1] && !R32(g_buffers[1])) fresh = true;  // device cleared
     if (fresh) {
         uint32_t color_fmt = gpu::LinearColorFormat(fmt);
         g_buffer_count = std::min<uint32_t>(count + 1, 3);
-        for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
+        // in the device (3948) the back buffer is slot 0 and the front slot 1, as its GetBackBuffer counts them
+        constexpr uint32_t kSlot[3] = {1, 0, 2};
+        for (uint32_t i = 0; i < g_buffer_count; i++)
+            g_buffers[i] = NewSurface(w, h, color_fmt, 4,
+                                      XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0 : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
         g_copy_target = NewSurface(w, h, color_fmt, 4);
         g_depth = 0;
         if (auto_depth) {
             uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
-            g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4);  // 0x30 LIN_D16, 0x31 LIN_F16
+            g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4,  // 0x30 LIN_D16, 0x31 LIN_F16
+                                 XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0 : kDevice + XDK_CDevice_AutoDepthSurface);
         }
         std::memcpy(made, want, sizeof made);
     }
     SetDev(kDevRenderTarget, g_buffers[1]);
     SetDev(kDevDepth, g_depth);
-    SetDev(kDevBackBuffer, g_buffers[1]);
-    SetDev(kDevFrontBuffer, g_buffers[1]);
+    if (XDK_CDevice_FrameSurfaces == xdk::kUnknown) {
+        SetDev(kDevBackBuffer, g_buffers[1]);
+        SetDev(kDevFrontBuffer, g_buffers[1]);
+    }
     float one = 1.0f, zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
     std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
     std::memcpy(HostPtr(kDevice + kDevSuperY), &one, 4);
@@ -367,10 +378,11 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     XDK_REQUIRE("d3d", XDK_KEY(CDevice_Push), XDK_KEY(CDevice_PushThreshold), XDK_KEY(CDevice_BaseVertex),
                 XDK_KEY(CDevice_IndexBuffer), XDK_KEY(CDevice_ZScale), XDK_KEY(CDevice_SuperSampleX),
                 XDK_KEY(CDevice_SuperSampleY), XDK_KEY(CDevice_Transforms), XDK_KEY(CDevice_Textures),
-                XDK_KEY(CDevice_RenderTarget), XDK_KEY(CDevice_Depth), XDK_KEY(CDevice_BackBuffer),
-                XDK_KEY(CDevice_FrontBuffer), XDK_KEY(CDevice_SwapCount), XDK_KEY(CDevice_Size),
+                XDK_KEY(CDevice_RenderTarget), XDK_KEY(CDevice_Depth), XDK_KEY(CDevice_SwapCount), XDK_KEY(CDevice_Size),
                 XDK_KEY(DirtyFlags_Texture), XDK_KEY(TextureState_Stage), XDK_KEY(Stream_Size),
                 XDK_KEY(Stream_Stride), XDK_KEY(Stream_Buffer));
+    if (XDK_CDevice_FrameSurfaces == xdk::kUnknown)
+        XDK_REQUIRE("d3d", XDK_KEY(CDevice_BackBuffer), XDK_KEY(CDevice_FrontBuffer));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t pp = a[4];  // D3DPRESENT_PARAMETERS
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
