@@ -1217,7 +1217,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindTargetTexture(const State& s, int st
         stages.reads.wide[stage] = k;
         info.flags |= kTexWide;
     }
-    if (!t.depth && NoAlphaFormat(d.format)) info.flags |= kTexOpaque;
+    if (NoAlphaFormat(d.format)) info.flags |= kTexOpaque;  // also a depth buffer read as X8R8G8B8
     // the console draws an 8 bit surface as its blue byte; read as L8, AL8 or A8 the D3D12 renderer spreads that byte
     // with the view's swizzle, which D3D11 views lack
     if (!t.depth) {
@@ -1391,6 +1391,9 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
     stages.info[stage].rect = d.linear;
     // rendered by the GPU: sample the target itself; DXT data loaded over a target's memory is not it
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height));
+    // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
+    if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
+        tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height));
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed)
         return BindTargetTexture(s, stage, d, tit->second, stages);
     return BindGuestTexture(s, stage, d, fi, stages);

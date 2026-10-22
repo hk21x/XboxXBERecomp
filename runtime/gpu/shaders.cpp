@@ -838,16 +838,19 @@ std::string PixelHlsl(const PixelKey& k) {
     s += "    float4 fogin = float4(fogcolor.rgb, saturate(i.fogamt));\n";
     std::string body;
     if (k.programmable) {
+        // each stage's value as the console gives it before a later stage reads it (texbem, texm3x* ...)
         for (int i = 0; i < 4; i++) {
             body += TexFetch(k, i);
             body += Hooks().Fetched(k.tex[i], i);
-        }
-        for (int i = 0; i < 4; i++) {
             uint32_t m = (k.tex_modes >> (i * 5)) & 0x1F;
             bool fetch = m && m != 4 && m != 5 && m != 0xA && m != 0x11;
             if (fetch && (k.tex[i].flags & kTexDepthBytes))
                 body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, (k.tex[i].flags & kTexDepthAbgr) ? 1 : 0);
             if (fetch && (k.tex[i].flags & kTexOpaque)) body += F("t%d.a = 1;\n", i);
+        }
+        for (int i = 0; i < 4; i++) {
+            uint32_t m = (k.tex_modes >> (i * 5)) & 0x1F;
+            bool fetch = m && m != 4 && m != 5 && m != 0xA && m != 0x11;
             if (fetch && ((k.alphakill >> i) & 1)) body += F("if (t%d.a == 0) discard;\n", i);
         }
         uint32_t mode0 = k.tex_modes & 0x1F;
