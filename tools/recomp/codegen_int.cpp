@@ -416,7 +416,8 @@ bool CodeGen::EmitInteger(uint32_t va, const ZydisDecodedInstruction& in, const 
         case ZYDIS_MNEMONIC_STD: Line("\tctx.df = 1;"); return true;
 
         case ZYDIS_MNEMONIC_PUSH:
-            if (ops[0].size == 16 && ops[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+            // the stack slot follows the operand size attribute: a segment register takes 4 bytes without a 66h prefix
+            if (in.operand_width == 16 && ops[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE) {
                 emit(F("uint16_t v = (uint16_t)(%s); ctx.esp -= 2; X86_MEM16(ctx.esp) = v;", Read(ops[0], ea).c_str()));
             } else {
                 emit(F("uint32_t v = (uint32_t)(%s); X86_PUSH32(v);", Read(ops[0], ea).c_str()));

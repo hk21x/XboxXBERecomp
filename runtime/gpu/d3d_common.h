@@ -155,6 +155,7 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
     return std::max(1.0f, aspect * float(gh) / float(gw));
 }
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
+bool DepthTested(const State& s);
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
 
 // a guest rect scaled to the target and clamped to it (any target with w, h, gw, gh)

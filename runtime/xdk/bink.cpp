@@ -3,6 +3,7 @@
 #include <mutex>
 #include <unordered_set>
 
+#include "app/app.h"
 #include "xdk/hle.h"
 
 using namespace kernel;
@@ -32,7 +33,7 @@ std::unordered_set<uint32_t> g_held;  // movies whose frame was not decoded this
 X86_EXTERN_FUNC(GUEST_ORIG(BinkDoFrame));
 X86_FUNC(GUEST(BinkDoFrame)) {
     uint32_t bink = R32(ctx.esp + 4);
-    if (bink && CallGuest(ctx, kBinkWait, {bink})) {
+    if (bink && app::kGame.bink_frame_hold && CallGuest(ctx, kBinkWait, {bink})) {
         std::lock_guard<std::mutex> lock(g_held_lock);
         g_held.insert(bink);
         ctx.eax = 0;

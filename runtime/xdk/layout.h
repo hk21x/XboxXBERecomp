@@ -105,6 +105,34 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_ScreenSpaceOffset
 #define XDK_CDevice_ScreenSpaceOffset 0xFFFFFFFFu
 #endif
+// mix bin headroom the library's DirectSoundCreate sets on every bin, in 6 dB steps (3936: 1; 5659 sets none)
+#ifndef XDK_DSound_MixBinHeadroom
+#define XDK_DSound_MixBinHeadroom 0
+#endif
+// 3936 DSOUND: mix bins are a mask of bins at full volume (0: the default for the channel count), not a DSMIXBINS
+#ifndef XDK_DSound_MixBinMask
+#define XDK_DSound_MixBinMask 0
+#endif
+// 3936 DSOUND: Lock's flag 1 is DSBLOCK_FROMWRITECURSOR and 2 DSBLOCK_ENTIREBUFFER (later XDKs: 1 ENTIREBUFFER)
+#ifndef XDK_DSound_LockFlagsSwapped
+#define XDK_DSound_LockFlagsSwapped 0
+#endif
+// 3948: the frame buffers' surface objects inside the device, 24 bytes each (back, front, third), and the auto depth
+// buffer's; when known the runtime builds its surfaces there and CDevice_BackBuffer / FrontBuffer are not needed
+// 3948: the present interval as a device field (later XDKs: the D3D_PresentInterval global)
+#ifndef XDK_CDevice_PresentInterval
+#define XDK_CDevice_PresentInterval 0xFFFFFFFFu
+#endif
+#ifndef XDK_CDevice_FrameSurfaces
+#define XDK_CDevice_FrameSurfaces 0xFFFFFFFFu
+#endif
+#ifndef XDK_CDevice_AutoDepthSurface
+#define XDK_CDevice_AutoDepthSurface 0xFFFFFFFFu
+#endif
+// 1: the vertical blank callback takes the blank count itself (3948), not a D3DVBLANKDATA pointer
+#ifndef XDK_VBlankCallback_Count
+#define XDK_VBlankCallback_Count 0
+#endif
 #ifndef XDK_CDevice_AutoDepth
 #define XDK_CDevice_AutoDepth 0xFFFFFFFFu
 #endif

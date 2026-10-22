@@ -101,6 +101,12 @@ bool Analysis::DecodeFlow(uint32_t va, Insn& out, JumpTable* jt) {
     out.flow = Flow::Normal;
     out.target = 0;
     auto m = in.mnemonic;
+    // int 2Dh, the debug service (DbgPrint, DbgLoadImageSymbols), steps over the int3 after it as the kernel does
+    if (m == ZYDIS_MNEMONIC_INT && ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && ops[0].imm.value.u == 0x2D) {
+        uint32_t avail = 0;
+        const uint8_t* p = Bytes(va + in.length, avail);
+        if (p && avail && *p == 0xCC) out.len = in.length + 1;
+    }
     if (m == ZYDIS_MNEMONIC_CALL) {
         if (ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
             out.flow = Flow::Call;
