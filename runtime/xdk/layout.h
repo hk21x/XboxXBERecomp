@@ -105,6 +105,14 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_ScreenSpaceOffset
 #define XDK_CDevice_ScreenSpaceOffset 0xFFFFFFFFu
 #endif
+// 3936 DSOUND: mix bins are a mask of bins at full volume (0: the default for the channel count), not a DSMIXBINS
+#ifndef XDK_DSound_MixBinMask
+#define XDK_DSound_MixBinMask 0
+#endif
+// 3936 DSOUND: Lock's flag 1 is DSBLOCK_FROMWRITECURSOR and 2 DSBLOCK_ENTIREBUFFER (later XDKs: 1 ENTIREBUFFER)
+#ifndef XDK_DSound_LockFlagsSwapped
+#define XDK_DSound_LockFlagsSwapped 0
+#endif
 // 3948: the frame buffers' surface objects inside the device, 24 bytes each (back, front, third), and the auto depth
 // buffer's; when known the runtime builds its surfaces there and CDevice_BackBuffer / FrontBuffer are not needed
 #ifndef XDK_CDevice_FrameSurfaces

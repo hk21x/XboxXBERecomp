@@ -384,6 +384,14 @@ void ReadFormat(Voice& v, uint32_t wfx) {
 void SetBins(Voice& v, uint32_t mixbins) {
     v.nbins = 0;  // none listed: front left and right
     if (!mixbins) return;
+    if (XDK_DSound_MixBinMask) {  // a mask: each bin set plays at full volume
+        for (uint32_t b = 0; b < 32 && v.nbins < 8; b++)
+            if (mixbins >> b & 1) {
+                v.bin[v.nbins++] = uint8_t(b);
+                v.bin_mb[b] = 0;
+            }
+        return;
+    }
     uint32_t n = std::min<uint32_t>(R32(mixbins), 8), pairs = R32(mixbins + 4);
     for (uint32_t i = 0; i < n; i++) {
         v.bin[i] = R32(pairs + i * 8) & 31;
@@ -710,8 +718,12 @@ BUFFER(SetCurrentPosition, 2) {
 }
 BUFFER(Lock, 8) {
     uint32_t off = a[1], n = a[2];
-    if (a[7] & 1) n = v.bytes;  // DSBLOCK_ENTIREBUFFER
     if (!v.bytes) return 0x80004005u;  // E_FAIL
+    if (XDK_DSound_LockFlagsSwapped && (a[7] & 1)) {  // DSBLOCK_FROMWRITECURSOR, as GetCurrentPosition reports it
+        uint32_t p = BytesOf(v, uint32_t(v.pos));
+        off = v.play_len ? (p + BytesOf(v, 64 * 4)) % v.play_len : 0;
+    }
+    if (a[7] & (XDK_DSound_LockFlagsSwapped ? 2 : 1)) n = v.bytes;  // DSBLOCK_ENTIREBUFFER
     off %= v.bytes;
     uint32_t first = std::min(n, v.bytes - off);
     W32(a[3], v.data + off);

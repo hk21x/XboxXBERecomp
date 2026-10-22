@@ -40,6 +40,16 @@ Stream_Size           = 12      # D3DDevice_SetStreamSource 0xE9FDB indexes the 
 Stream_Stride         = 0x0     # D3DDevice_SetStreamSource 0xEA03A stores Stride
 Stream_Buffer         = 0x8     # D3DDevice_SetStreamSource 0xEA034 stores the vertex buffer
 PixelShader_Definition = 0x8    # D3DDevice_SetPixelShader 0xECC5B reads the definition pointer
+# DSOUND 3936
+CDirectSoundStream_Vtable  = 0x0  # CDirectSoundStream constructor 0xFEB71 stores the first vtable
+CDirectSoundStream_Vtable2 = 0x4  # CDirectSoundStream constructor 0xFEB6A stores the second vtable
+EffectsImage_Skip0    = 0x804   # 0x100AA9 (reached from IDirectSound_DownloadEffectsImage) adds this dword count
+EffectsImage_Skip1    = 0x80C   # 0x100AA3 loads this dword count
+EffectsImage_Desc     = 0x818   # 0x100AB1: descriptor at image + 0x818 + (Skip0 + Skip1) * 4
+DSound_MixBinMask     = 1       # the mix bin setter 0xFD78C stores its argument as a bin mask at +0x20 (0xFD7B1); 0 takes
+                                # the channel count's default from 0x1070B0 (0xFD7AA)
+DSound_LockFlagsSwapped = 1     # IDirectSoundBuffer_Lock 0xFDB44: flag 1 starts at the write cursor (0xFDB53, 0xFDB66),
+                                # flag 2 locks the whole buffer (0xFDB72, size at 0xFDB7B)
 # XAPI XPP device type record
 XPP_Current           = 0x0     # XGetDevices 0x13BEA8 returns it
 XPP_Changed           = 0x4     # XGetDevices 0x13BEAA clears it, XGetDeviceChanges 0x13BEC8 tests it
