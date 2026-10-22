@@ -150,6 +150,9 @@ struct GameInfo {
     std::vector<const char*> same_code = {};
     // a steering wheel's force feedback: what the player's car is doing, each poll of controller 1 (input.h)
     void (*wheel)(input::WheelFeel& feel) = nullptr;
+    // movies step one frame per game frame and the host holds a frame BinkWait says is early (xdk/bink.cpp); off for a
+    // title whose movie loop waits on BinkWait itself
+    bool bink_frame_hold = true;
 };
 extern const GameInfo kGame;
 

@@ -44,6 +44,26 @@ using namespace kernel;
 #define SYM_D3DDevice_SetPalette FFFFFE02
 #define HAS_D3DDevice_SetPalette 0
 #endif
+#ifndef SYM_D3DDevice_Present
+#define SYM_D3DDevice_Present FFFFFE04
+#define HAS_D3DDevice_Present 0
+#endif
+#ifndef SYM_D3DDevice_GetBackBuffer
+#define SYM_D3DDevice_GetBackBuffer FFFFFE05
+#define HAS_D3DDevice_GetBackBuffer 0
+#endif
+#ifndef SYM_D3DDevice_GetDepthStencilSurface
+#define SYM_D3DDevice_GetDepthStencilSurface FFFFFE06
+#define HAS_D3DDevice_GetDepthStencilSurface 0
+#endif
+#ifndef SYM_D3DDevice_SetVertexShaderConstant
+#define SYM_D3DDevice_SetVertexShaderConstant FFFFFE07
+#define HAS_D3DDevice_SetVertexShaderConstant 0
+#endif
+#ifndef SYM_D3DDevice_RunPushBuffer
+#define SYM_D3DDevice_RunPushBuffer FFFFFE08
+#define HAS_D3DDevice_RunPushBuffer 0
+#endif
 #ifndef SYM_D3DDevice_GetVertexShaderFunction
 #define SYM_D3DDevice_GetVertexShaderFunction FFFFFE03
 #define HAS_D3DDevice_GetVertexShaderFunction 0
@@ -412,6 +432,8 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     }
     g_state = gpu::State{};
     MakeFrameBuffers(pp);
+    // where the library's own CreateDevice keeps the present parameters' interval (3948)
+    if (XDK_CDevice_PresentInterval != xdk::kUnknown) SetDev(XDK_CDevice_PresentInterval, interval);
     // 60 Hz, widescreen
     if (XDK_CDevice_DisplayFlags != xdk::kUnknown) SetDev(XDK_CDevice_DisplayFlags, 0x400000 | (app::Widescreen() ? 0x10000 : 0));
 #if HAS_D3D_FvfShader
@@ -643,6 +665,22 @@ HLE_STDCALL(D3DDevice_GetBackBuffer2, 1) {
     return s;
 }
 
+// 3948's forms hand the surface out through a pointer and return an HRESULT
+HLE_STDCALL(D3DDevice_GetBackBuffer, 3) {
+    int32_t i = int32_t(a[0]);
+    uint32_t s = i < 0 ? g_buffers[0] : g_buffers[std::min<uint32_t>(uint32_t(i) + 1, g_buffer_count - 1)];
+    W32(s, R32(s) + 1);
+    if (a[2]) W32(a[2], s);
+    return 0;
+}
+HLE_STDCALL(D3DDevice_GetDepthStencilSurface, 1) {
+    uint32_t s = Dev(kDevDepth);
+    if (a[0]) W32(a[0], s);
+    if (!s) return 0x88760866u;  // D3DERR_NOTFOUND
+    W32(s, R32(s) + 1);
+    return 0;
+}
+
 HLE_STDCALL(D3DDevice_GetRenderTarget2, 0) {
     uint32_t s = Dev(kDevRenderTarget);
     if (s) W32(s, R32(s) + 1);
@@ -662,8 +700,8 @@ std::atomic<uint32_t> g_presents{0};
 // global the swap reads): DEFAULT 0 and ONE 1 wait for one, TWO 2 to FOUR 4 for that many, IMMEDIATE 0x80000000
 // none, and the _OR_IMMEDIATE values 0x80000001 to 0x80000003 as many unless the frame is late. 1 when unknown.
 uint32_t PresentVblanks() {
-    if (!HAS_D3D_PresentInterval) return 1;
-    uint32_t v = R32(SYM(D3D_PresentInterval));
+    if (!HAS_D3D_PresentInterval && XDK_CDevice_PresentInterval == xdk::kUnknown) return 1;
+    uint32_t v = HAS_D3D_PresentInterval ? R32(SYM(D3D_PresentInterval)) : Dev(XDK_CDevice_PresentInterval);
     static uint32_t last = ~0u;
     if (v != last) LOGR("d3d: present interval %08X", last = v);
     if (v == 0x80000000) return 0;
@@ -675,9 +713,10 @@ uint32_t PresentVblanks() {
 // Swap(flags): D3DSWAP_COPY 1 and D3DSWAP_BYPASSCOPY 2 without D3DSWAP_FINISH 4 open the copy to the front buffer
 // (the target becomes the front, texture 0 the back buffer, as the library sets them); FINISH shows the frame and
 // gives the back buffer and depth back as the target. 0 is COPY | FINISH. The count moves on once a frame.
-HLE_STDCALL(D3DDevice_Swap, 1) {
+namespace {
+uint32_t SwapFrame(uint32_t swap_flags) {
     constexpr uint32_t kCopy = 1, kBypassCopy = 2, kFinish = 4;
-    uint32_t flags = a[0] ? a[0] : kCopy | kFinish;
+    uint32_t flags = swap_flags ? swap_flags : kCopy | kFinish;
     if (!(flags & kFinish)) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         if (!(flags & (kCopy | kBypassCopy)) || !g_copy_target) return Dev(kDevSwapCount);
@@ -747,6 +786,14 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
     return Dev(kDevSwapCount);
+}
+}  // namespace
+
+HLE_STDCALL(D3DDevice_Swap, 1) { return SwapFrame(a[0]); }
+// 3948: Present(source rect, dest rect, window, dirty region) is the swap, the rects unused on the console
+HLE_STDCALL(D3DDevice_Present, 4) {
+    SwapFrame(0);
+    return 0;
 }
 
 HLE_STDCALL(D3DDevice_Clear, 6) {
@@ -1189,6 +1236,16 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
     uint32_t reg = a[0], src = a[1], dwords = a[2];
     for (uint32_t i = 0; i < dwords / 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     WatchConstants("SetVertexShaderConstantNotInlineFast", reg, dwords / 4, R32(ctx.esp));
+    return 0;
+}
+
+// 3948: SetVertexShaderConstant(register -96 to 95, data, count of vectors); the hardware slot is register + 96
+HLE_STDCALL(D3DDevice_SetVertexShaderConstant, 3) {
+    WalkPending();
+    int32_t reg = int32_t(a[0]) + 96;
+    for (uint32_t i = 0; i < a[2]; i++)
+        if (reg + int32_t(i) >= 0 && reg + i < 192) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(a[1] + i * 16), 16);
+    WatchConstants("SetVertexShaderConstant", uint32_t(reg), a[2], R32(ctx.esp));
     return 0;
 }
 
@@ -1665,6 +1722,24 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     DrawUp(a[0], a[1], HostPtr(a[2]), a[3]);
+    return 0;
+}
+
+// RunPushBuffer(push buffer, fixup) runs recorded hardware commands; not replayed yet: each one is logged once (its
+// size, Common and first commands) so what they hold can be read
+HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    static std::unordered_set<uint32_t> seen;
+    uint32_t pb = a[0];
+    if (pb && seen.size() < 64 && seen.insert(pb).second) {
+        uint32_t data = R32(pb + 4), size = R32(pb + 12);
+        char head[200] = {};
+        for (uint32_t i = 0, n = 0; i < 8 && i * 4 < size && data; i++)
+            n += std::snprintf(head + n, sizeof head - n, " %08X", R32(data + i * 4));
+        LOGW("d3d: RunPushBuffer %08X (Common %08X, data %08X, %u bytes, fixup %08X) not replayed:%s", pb, R32(pb), data,
+             size, a[1], head);
+    }
     return 0;
 }
 

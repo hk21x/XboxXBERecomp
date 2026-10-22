@@ -23,6 +23,14 @@ X86Func* Find(uint32_t guest);
 }
 
 // configs written before the SDK knew the name
+#ifndef SYM_IDirectSoundBuffer_SetMode
+#define SYM_IDirectSoundBuffer_SetMode FFFFFF40
+#define HAS_IDirectSoundBuffer_SetMode 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetConeOrientation
+#define SYM_IDirectSoundBuffer_SetConeOrientation FFFFFF41
+#define HAS_IDirectSoundBuffer_SetConeOrientation 0
+#endif
 #ifndef SYM_IDirectSound_SynchPlayback
 #define SYM_IDirectSound_SynchPlayback FFFFFF00
 #define HAS_IDirectSound_SynchPlayback 0
@@ -455,7 +463,7 @@ static void AuditExports() {
         SYM(IDirectSound_DownloadEffectsImage), SYM(IDirectSound_GetEffectData), SYM(IDirectSound_CommitEffectData),
         SYM(IDirectSound_GetOutputLevels), SYM(IDirectSoundBuffer_SetPlayRegion), SYM(IDirectSoundBuffer_SetAllParameters),
         SYM(IDirectSoundBuffer_SetFormat), SYM(IDirectSoundBuffer_SetOutputBuffer), SYM(IDirectSoundBuffer_SetRolloffCurve),
-        SYM(IDirectSoundBuffer_StopEx),
+        SYM(IDirectSoundBuffer_StopEx), SYM(IDirectSoundBuffer_SetMode), SYM(IDirectSoundBuffer_SetConeOrientation),
         SYM(XAudioDownloadEffectsImage), SYM(DirectSoundCreateBuffer), SYM(IDirectSound_CreateSoundBuffer),
         SYM(IDirectSoundBuffer_Release), SYM(IDirectSoundBuffer_Unlock), SYM(IDirectSoundBuffer_SetBufferData),
         SYM(IDirectSoundBuffer_Play), SYM(IDirectSoundBuffer_Stop), SYM(IDirectSoundBuffer_SetLoopRegion),
@@ -757,6 +765,13 @@ BUFFER(SetMaxDistance, 3) {
     v.max_dist = F32(a[1]);
     return 0;
 }
+// (this, DS3DMODE, apply)
+BUFFER(SetMode, 3) {
+    v.mode = a[1];
+    return 0;
+}
+// (this, x, y, z, apply): the cone is not modelled
+BUFFER(SetConeOrientation, 5) { return 0; }
 BUFFER(SetMinDistance, 3) {
     v.min_dist = F32(a[1]);
     return 0;
