@@ -112,7 +112,6 @@ public:
         kernel::W32(report + kTimeHigh, 0);
         kernel::W32(report + kCount, 0);
         kernel::W32(report + kStatus, 0);
-        NoteReport(report, 0);
     }
 
 private:

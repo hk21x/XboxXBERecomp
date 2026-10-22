@@ -508,13 +508,24 @@ HLE_STDCALL(D3DDevice_IsFencePending, 1) {
     return g_backend && g_backend->FencePending(a[0]) ? 1 : 0;
 }
 // The library's GetVisibilityTestResult sets a fence when the test's own one is current, so the GPU runs on to the
-// report, and titles poll it in a loop without presenting: the report is written here.
+// report, and titles poll it in a loop without presenting: a fence after a report asks for it to be written. The
+// title does not wait for that here: the render thread finishes what it has and writes the report in its own time
+// (a title polling in a loop sees it then). Waiting stalled every frame with a report in it: Swap sets a fence too
+// (PGR2: about 9 ms, the render thread's backlog, in frames with its sun and light tests).
+// XBE_REPORTS_EXACT=1: the title waits, as before
 HLE_STDCALL(D3D_SetFence, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     if (g_backend && g_report_asked) {
+        static const bool exact = [] {
+            const char* e = std::getenv("XBE_REPORTS_EXACT");
+            bool on = e && *e == '1';
+            if (on) LOGR("d3d: XBE_REPORTS_EXACT=1, a fence after a visibility report waits for the GPU");
+            return on;
+        }();
         g_report_asked = false;
-        g_backend->Flush();
+        if (exact) g_backend->Flush();
+        else g_backend->Kick();
     }
     return g_backend ? g_backend->Fence() : 0;
 }
@@ -1471,25 +1482,8 @@ void ApplyVisibilityMethod(uint32_t m, uint32_t v) {
             W32(report + 12, 0);
             return;
         }
-        // answered at once with the count the GPU last gave this report, the GPU's own written over it when it is past
-        // these draws: a title that reads it straight after (PGR2: every frame, after resetting it to pending) would
-        // otherwise wait for the render thread to finish the frame so far, a stall every other frame. The first one
-        // waits. XBE_REPORTS_EXACT=1: every read waits for the exact count, as before
-        static const bool exact = [] {
-            const char* e = std::getenv("XBE_REPORTS_EXACT");
-            bool on = e && *e == '1';
-            if (on) LOGR("d3d: XBE_REPORTS_EXACT=1, a visibility report read waits for the GPU");
-            return on;
-        }();
-        uint32_t count = 0;
-        bool answered = !exact && gpu::LastReport(report, count);
-        if (answered) {
-            W32(report + 8, count);
-            std::atomic_thread_fence(std::memory_order_release);
-            W32(report + 12, 0);  // done
-        }
         g_backend->GetReport(report);
-        g_report_asked = !answered;
+        g_report_asked = true;
     }
 }
 

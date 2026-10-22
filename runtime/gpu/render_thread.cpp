@@ -207,6 +207,10 @@ public:
         cur_->cmds.push_back(Cmd{Op::Flush});
         Wait(Submit(), WaitFor::Flush, "flush");
     }
+    void Kick() override {
+        cur_->cmds.push_back(Cmd{Op::Flush});
+        Submit();
+    }
 
     void SetGamma(const uint8_t* ramp) override {
         Cmd c{Op::Gamma};

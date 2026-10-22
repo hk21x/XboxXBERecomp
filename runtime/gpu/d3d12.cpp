@@ -2196,7 +2196,6 @@ void D3D12Backend::DeliverReports() {
         kernel::W32(r.va + kTime, uint32_t(presents_));
         kernel::W32(r.va + kTimeHigh, 0);
         kernel::W32(r.va + kCount, uint32_t(std::lround(pixels)));
-        NoteReport(r.va, uint32_t(std::lround(pixels)));
         std::atomic_thread_fence(std::memory_order_release);
         kernel::W32(r.va + kStatus, 0);
         reports_.pop_front();

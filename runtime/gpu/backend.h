@@ -2,8 +2,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <mutex>
-#include <unordered_map>
 
 #include "gpu/state.h"
 
@@ -38,6 +36,9 @@ public:
     virtual bool DeliverLate(uint32_t) { return false; }
     virtual void RecordLate(uint32_t) {}
     virtual void Flush() = 0;
+    // as Flush, but the caller need not wait for it: the render thread runs it in turn (reports written once the GPU
+    // is past them); a backend that draws at once just flushes
+    virtual void Kick() { Flush(); }
     virtual void SetGamma(const uint8_t* ramp /*3 x 256*/) = 0;
     // visibility tests: draws count passing pixels while simple[kMCountEnable / 4] is set, ClearReport zeroes the
     // count, GetReport writes it to a 16 byte report once the GPU is past those draws; without them it stays pending
@@ -67,22 +68,6 @@ std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner);
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};
 inline std::atomic<uint64_t> g_perf_wait_kind_ns[6];  // read-back, resource, fence, flush, copy, next frame
 inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read-backs the title waited for, by cause
-
-// visibility reports: the count the GPU last wrote to each report, noted by the backends as they write it, so the
-// title's read can be answered at once with it while the render thread is still behind (xdk/d3d8.cpp)
-inline std::mutex g_reports_lock;
-inline std::unordered_map<uint32_t, uint32_t> g_reports;
-inline void NoteReport(uint32_t va, uint32_t count) {
-    std::lock_guard lock(g_reports_lock);
-    g_reports[va] = count;
-}
-inline bool LastReport(uint32_t va, uint32_t& count) {
-    std::lock_guard lock(g_reports_lock);
-    auto it = g_reports.find(va);
-    if (it == g_reports.end()) return false;
-    count = it->second;
-    return true;
-}
 
 // F3: save the next frame, every draw and target, under diag::CaptureDir
 inline std::atomic<bool> g_capture{false};
