@@ -130,6 +130,39 @@ int8_t DefaultWheelButton(int c) {
     }
 }
 
+const char* GearName(int g) {
+    static const char* kNames[kGears] = {"R", "1", "2", "3", "4", "5", "6", "7"};
+    return g >= 0 && g < kGears ? kNames[g] : "";
+}
+
+namespace {
+
+void ReadBind(const toml::table& b, Settings::WheelBind& w) {
+    w.device = b["device"].value_or(w.device);
+    w.guid = b["guid"].value_or(w.guid);
+    w.axis = int32_t(b["axis"].value_or(int64_t(-1)));
+    w.button = int32_t(b["button"].value_or(int64_t(-1)));
+    w.rest = int32_t(b["rest"].value_or(int64_t(w.rest)));
+    w.full = int32_t(b["full"].value_or(int64_t(w.full)));
+    w.invert = b["invert"].value_or(w.invert);
+}
+
+toml::table BindTable(const Settings::WheelBind& w) {
+    toml::table b;
+    if (!w.device.empty()) b.insert("device", w.device);
+    if (!w.guid.empty()) b.insert("guid", w.guid);
+    if (w.axis >= 0) {
+        b.insert("axis", int64_t(w.axis));
+        b.insert("rest", int64_t(w.rest));
+        b.insert("full", int64_t(w.full));
+        b.insert("invert", w.invert);
+    }
+    if (w.button >= 0) b.insert("button", int64_t(w.button));
+    return b;
+}
+
+}  // namespace
+
 Settings& Get() {
     // the control tables have their size from the start: the settings window changes entries, game threads read them
     static Settings s = [] {
@@ -137,9 +170,10 @@ Settings& Get() {
         d.keys.resize(input::kControls);
         d.pad_map.resize(input::kControls);
         d.wheel_buttons.resize(input::kControls);
+        d.wheel_gears.resize(kGears);
         for (int c = 0; c < input::kControls; c++) {
             d.keys[c] = DefaultKeys(c);
-            d.wheel_buttons[c] = DefaultWheelButton(c);
+            d.wheel_buttons[c].button = DefaultWheelButton(c);
             d.pad_map[c] = uint8_t(c);
         }
         return d;
@@ -178,27 +212,40 @@ void Load() {
     std::string renderer = t["renderer"].value_or(std::string(kRenderers[s.renderer % kRendererCount]));
     for (uint32_t i = 0; i < kRendererCount; i++)
         if (renderer == kRenderers[i]) s.renderer = i;
-    // the steering wheel: pedals as [axis, rest, full], [wheel_buttons] input = button
-    s.wheel_steer_axis = t["wheel_steer_axis"].value_or(s.wheel_steer_axis);
-    s.wheel_steer_invert = t["wheel_steer_invert"].value_or(s.wheel_steer_invert);
+    // the steering wheel: each control a table { device, guid, axis or button, rest, full, invert }; older files gave
+    // the wheel's own axes as wheel_steer_axis, pedals as [axis, rest, full] and buttons as numbers
+    s.wheel_steer.axis = int32_t(t["wheel_steer_axis"].value_or(int64_t(s.wheel_steer.axis)));
+    s.wheel_steer.invert = t["wheel_steer_invert"].value_or(s.wheel_steer.invert);
     s.wheel_range = t["wheel_range"].value_or(s.wheel_range);
     s.wheel_lock = t["wheel_lock"].value_or(s.wheel_lock);
     s.wheel_deadzone = t["wheel_deadzone"].value_or(s.wheel_deadzone);
     s.ffb_strength = t["ffb_strength"].value_or(s.ffb_strength);
     s.ffb_road = t["ffb_road"].value_or(s.ffb_road);
-    for (auto [key, pedal] : {std::pair{"wheel_throttle", &s.wheel_throttle}, std::pair{"wheel_brake", &s.wheel_brake},
-                              std::pair{"wheel_clutch", &s.wheel_clutch}})
+    for (auto [key, bind] : {std::pair{"wheel_steer", &s.wheel_steer}, std::pair{"wheel_throttle", &s.wheel_throttle},
+                             std::pair{"wheel_brake", &s.wheel_brake}, std::pair{"wheel_clutch", &s.wheel_clutch}}) {
         if (const toml::array* a = t[key].as_array(); a && a->size() == 3) {
-            pedal->axis = int32_t((*a)[0].value_or(int64_t(pedal->axis)));
-            pedal->rest = int32_t((*a)[1].value_or(int64_t(pedal->rest)));
-            pedal->full = int32_t((*a)[2].value_or(int64_t(pedal->full)));
+            bind->axis = int32_t((*a)[0].value_or(int64_t(bind->axis)));
+            bind->rest = int32_t((*a)[1].value_or(int64_t(bind->rest)));
+            bind->full = int32_t((*a)[2].value_or(int64_t(bind->full)));
+        } else if (const toml::table* b = t[key].as_table()) {
+            ReadBind(*b, *bind);
         }
+    }
     if (const toml::table* wb = t["wheel_buttons"].as_table()) {
         for (auto& [name, v] : *wb) {
             int c = input::ControlByName(std::string(name.str()).c_str());
-            if (c >= 0) s.wheel_buttons[c] = int8_t(v.value_or(int64_t(-1)));
+            if (c < 0) continue;
+            if (const toml::table* b = v.as_table()) {
+                s.wheel_buttons[c] = {};
+                ReadBind(*b, s.wheel_buttons[c]);
+            } else {
+                s.wheel_buttons[c] = {.button = int32_t(v.value_or(int64_t(-1)))};
+            }
         }
     }
+    if (const toml::table* wg = t["wheel_gears"].as_table())
+        for (int g = 0; g < kGears; g++)
+            if (const toml::table* b = (*wg)[GearName(g)].as_table()) ReadBind(*b, s.wheel_gears[g]);
     // [keys] input = ["key", "key"], [gamepad] input = "physical input"
     if (const toml::table* keys = t["keys"].as_table()) {
         for (auto& [name, v] : *keys) {
@@ -242,16 +289,14 @@ toml::table Table() {
                   {"show_fps", s.show_fps},
                   {"antialiasing", kAntialiasing[s.antialiasing % kAntialiasingCount]},
                   {"renderer", kRenderers[s.renderer % kRendererCount]},
-                  {"wheel_steer_axis", int64_t(s.wheel_steer_axis)},
-                  {"wheel_steer_invert", s.wheel_steer_invert},
                   {"wheel_range", int64_t(s.wheel_range)},
                   {"wheel_lock", int64_t(s.wheel_lock)},
                   {"wheel_deadzone", int64_t(s.wheel_deadzone)},
                   {"ffb_strength", int64_t(s.ffb_strength)},
                   {"ffb_road", int64_t(s.ffb_road)}};
-    for (auto [key, pedal] : {std::pair{"wheel_throttle", &s.wheel_throttle}, std::pair{"wheel_brake", &s.wheel_brake},
-                              std::pair{"wheel_clutch", &s.wheel_clutch}})
-        t.insert(key, toml::array{int64_t(pedal->axis), int64_t(pedal->rest), int64_t(pedal->full)});
+    for (auto [key, bind] : {std::pair{"wheel_steer", &s.wheel_steer}, std::pair{"wheel_throttle", &s.wheel_throttle},
+                             std::pair{"wheel_brake", &s.wheel_brake}, std::pair{"wheel_clutch", &s.wheel_clutch}})
+        t.insert(key, BindTable(*bind));
     // only what differs from the defaults
     toml::table keys, pad;
     for (int c = 0; c < input::kControls; c++) {
@@ -259,11 +304,14 @@ toml::table Table() {
             keys.insert(input::ControlName(c), toml::array{KeyToName(s.keys[c][0]), KeyToName(s.keys[c][1])});
         if (c < int(s.pad_map.size()) && s.pad_map[c] != c) pad.insert(input::ControlName(c), input::ControlName(s.pad_map[c]));
     }
-    toml::table wheel_buttons;
+    toml::table wheel_buttons, wheel_gears;
     for (int c = 0; c < input::kControls; c++)
-        if (c < int(s.wheel_buttons.size()) && s.wheel_buttons[c] != DefaultWheelButton(c))
-            wheel_buttons.insert(input::ControlName(c), int64_t(s.wheel_buttons[c]));
+        if (c < int(s.wheel_buttons.size()) && !(s.wheel_buttons[c] == Settings::WheelBind{.button = DefaultWheelButton(c)}))
+            wheel_buttons.insert(input::ControlName(c), BindTable(s.wheel_buttons[c]));
+    for (int g = 0; g < kGears && g < int(s.wheel_gears.size()); g++)
+        if (s.wheel_gears[g].button >= 0) wheel_gears.insert(GearName(g), BindTable(s.wheel_gears[g]));
     if (!wheel_buttons.empty()) t.insert("wheel_buttons", wheel_buttons);
+    if (!wheel_gears.empty()) t.insert("wheel_gears", wheel_gears);
     if (!keys.empty()) t.insert("keys", keys);
     if (!pad.empty()) t.insert("gamepad", pad);
     for (const Option& o : kGame.options) {

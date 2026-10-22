@@ -40,25 +40,31 @@ struct Settings {
     bool show_fps = false;           // frames a second in a corner
     uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
-    // a steering wheel (core/input.cpp), playing as controller 1: axes by their index on the wheel, -1 none; a pedal
-    // reads 0 at rest and 1 at full, from those raw values (-32768 to 32767)
-    struct Pedal {
-        int32_t axis = -1, rest = 32767, full = -32768;
+    // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,
+    // named by the device (and its instance, telling two of the same apart), then an axis (0-7: X Y Z Rx Ry Rz,
+    // slider 1, slider 2) or a button (0-127). No device: the wheel found by itself (the first driving device, else the
+    // first with force feedback). A pedal reads 0 at rest and 1 at full, from those raw values (-32768 to 32767).
+    struct WheelBind {
+        std::string device, guid;
+        int32_t axis = -1, button = -1;
+        int32_t rest = 32767, full = -32768;
+        bool invert = false;  // steering: turning right reads negative
+        bool operator==(const WheelBind&) const = default;
     };
-    int32_t wheel_steer_axis = 0;
-    bool wheel_steer_invert = false;
-    // DirectInput's axes in order: X Y Z Rx Ry Rz, slider 1, slider 2; Logitech G920/G923/G29: steering X, throttle Y,
-    // brake Rz, clutch slider 1, pedals at the top released
-    Pedal wheel_throttle{1}, wheel_brake{5}, wheel_clutch{6};
+    // the defaults, a Logitech G920/G923/G29: steering X, throttle Y, brake Rz, clutch slider 1, pedals released at the top
+    WheelBind wheel_steer{.axis = 0}, wheel_throttle{.axis = 1}, wheel_brake{.axis = 5}, wheel_clutch{.axis = 6};
     uint32_t wheel_range = 900;      // the wheel's rotation lock to lock, as its driver sets it (Logitech G HUB: 900)
     uint32_t wheel_lock = 360;       // degrees of wheel turn for the game's full steering
     uint32_t wheel_deadzone = 0;     // percent of the steering around the centre that reads as straight
-    std::vector<int8_t> wheel_buttons;  // per input::Control: the wheel button that presses it, -1 none
+    std::vector<WheelBind> wheel_buttons;  // per input::Control: the button that presses it
+    std::vector<WheelBind> wheel_gears;    // an H-pattern shifter's positions: R, 1 to 7 (kGears)
     uint32_t ffb_strength = 70;      // force feedback overall, percent, 0 off
     uint32_t ffb_road = 50;          // the game's rumble (kerbs, impacts) felt in the wheel, percent
 };
 // the wheel buttons of a Logitech G920/G923 (Xbox) for each input::Control, -1 none
 int8_t DefaultWheelButton(int c);
+constexpr int kGears = 8;  // an H-pattern shifter's positions: R, 1 to 7
+const char* GearName(int g);  // "R", "1" ... "7"
 // the default keys for input::Control c
 std::array<uint16_t, 2> DefaultKeys(int c);
 std::string KeyToName(uint16_t vk);  // settings file names of Windows virtual keys
