@@ -20,6 +20,7 @@
 #include "xdk/d3d8.h"
 #include "xdk/hle.h"
 #include "xdk/layout.h"
+#include "xdk/state_numbering.h"
 
 using namespace kernel;
 
@@ -93,7 +94,7 @@ constexpr uint32_t kDevicePtr = SYM(D3D_pDevice);
 constexpr uint32_t kIndexData = SYM(D3D_IndexData);  // index data base the inline draws read
 constexpr uint32_t kDirtyFlags = SYM(D3D_DirtyFlags);
 constexpr uint32_t kTextureState = SYM(D3D_DeferredTextureState);  // [4][32]
-constexpr uint32_t kRenderState = SYM(D3D_RenderState);            // [166]
+constexpr uint32_t kRenderState = SYM(D3D_RenderState);            // [states::kNumbering.count]
 constexpr uint32_t kStreams = SYM(D3D_Streams);                    // [16] stride, offset, buffer
 constexpr uint32_t kSimpleEncode = SYM(D3D_SimpleRenderStateEncode);
 
@@ -204,9 +205,12 @@ uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp) {
 
 void SyncDeferred() {
     // deferred states live in the title's memory, the inline SetRenderState and SetTextureStageState write them
-    for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) g_state.rs[i] = R32(kRenderState + i * 4);
+    const auto& n = xdk::states::kNumbering;
+    for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++)
+        if (n.rs[i] != xdk::states::kNone) g_state.rs[i] = R32(kRenderState + n.rs[i] * 4);
     for (int s = 0; s < 4; s++)
-        for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
+        for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++)
+            g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + n.tss[i]) * 4);
 }
 
 float ZScale(const gpu::Surface& zs) {
@@ -239,7 +243,13 @@ void UpdateViewportConstants() {
 
 void SetComplex(uint32_t rs, uint32_t v) {
     g_state.rs[rs] = v;
-    W32(kRenderState + rs * 4, v);
+    if (uint32_t t = xdk::states::kNumbering.rs[rs]; t != xdk::states::kNone) W32(kRenderState + t * 4, v);
+}
+
+// a texture stage state as the library stores it, in the title's numbering
+void StoreTss(uint32_t stage, uint32_t tss, uint32_t v) {
+    g_state.tss[stage][tss] = v;
+    W32(kTextureState + (stage * kStageStates + xdk::states::kNumbering.tss[tss]) * 4, v);
 }
 
 // The library's default render and texture stage states; its pushes land in the scratch buffer
@@ -779,13 +789,15 @@ HLE_FASTCALL(D3DDevice_SetRenderState_Simple, 0) {
 
 HLE_STDCALL(D3DDevice_SetRenderStateNotInline, 2) {
     WalkBeforeState();
-    uint32_t rs = a[0], v = a[1];
-    if (rs < gpu::kRsDeferredFirst) {
+    uint32_t rs = a[0], v = a[1];  // the title's numbering
+    if (rs < xdk::states::kNumbering.deferred_first) {
         uint32_t method = R32(kSimpleEncode + rs * 4) & 0x1FFC;
         g_state.simple[method >> 2] = v;
         W32(kRenderState + rs * 4, v);  // titles read their states back from the library's table
-    } else if (rs < gpu::kRsMax) {
-        SetComplex(rs, v);
+    } else if (uint32_t c = xdk::states::RsFromTitle(rs); c != xdk::states::kNone) {
+        SetComplex(c, v);
+    } else if (rs < xdk::states::kNumbering.count) {
+        W32(kRenderState + rs * 4, v);  // a state 5659 lacks (3948's MultiSampleType): kept for the title only
     }
     return 0;
 }
@@ -827,13 +839,13 @@ COMPLEX_STATE(DoNotCullUncompressed, gpu::kRsDoNotCullUncompressed)
 
 HLE_STDCALL(D3DDevice_SetTextureState_TexCoordIndex, 2) {
     WalkBeforeState();
-    g_state.tss[a[0] & 3][gpu::kTssTexCoordIndex] = a[1];
-    W32(kTextureState + ((a[0] & 3) * kStageStates + gpu::kTssTexCoordIndex) * 4, a[1]);
+    StoreTss(a[0] & 3, gpu::kTssTexCoordIndex, a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BumpEnv, 3) {
     WalkBeforeState();
-    if (a[1] >= gpu::kTssBumpEnvMat00 && a[1] <= gpu::kTssBumpEnvLOffset) g_state.tss[a[0] & 3][a[1]] = a[2];
+    uint32_t t = xdk::states::TssFromTitle(a[1]);
+    if (t >= gpu::kTssBumpEnvMat00 && t <= gpu::kTssBumpEnvLOffset) g_state.tss[a[0] & 3][t] = a[2];
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BorderColor, 2) {
@@ -848,11 +860,8 @@ HLE_STDCALL(D3DDevice_SetTextureState_ColorKeyColor, 2) {
 }
 HLE_STDCALL(D3DDevice_SetTextureStageStateNotInline, 3) {
     WalkBeforeState();
-    uint32_t stage = a[0] & 3, type = a[1], v = a[2];
-    if (type < gpu::kTssCount) {
-        g_state.tss[stage][type] = v;
-        W32(kTextureState + (stage * kStageStates + type) * 4, v);
-    }
+    uint32_t stage = a[0] & 3, type = xdk::states::TssFromTitle(a[1]), v = a[2];
+    if (type != xdk::states::kNone) StoreTss(stage, type, v);
     return 0;
 }
 
