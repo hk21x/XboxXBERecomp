@@ -2824,10 +2824,9 @@ void D3D12Backend::ApplySettings() {
         Flush();
         scale_ = want;
         if (ext_) {
-            // an extension may size its targets itself: they all start again
-            for (auto& [key, tg] : targets_) (tg.depth ? free_dsv_ : free_rtv_).push_back(tg.view);
-            targets_.clear();
-            targets_gen_++;
+            // an extension may size its targets itself: they all start again (their resources kept to the end of the
+            // frame: the commands recorded since the flush may still use them)
+            while (!targets_.empty()) ReleaseTarget(targets_.begin());
             ext_->Reset(*this);
         } else {
             RescaleTargets();
@@ -2848,9 +2847,10 @@ void D3D12Backend::RescaleTargets() {
     for (auto& [key, t] : targets_) DropMs(t);
     for (auto it = targets_.begin(); it != targets_.end();) {
         Target& old = it->second;
+        // a depth target starts again; its resources kept to the end of the frame: DropMs above recorded the twin's
+        // resolve into it (with MSAA, the GPU wrote freed memory and the device was removed)
         if (old.depth) {
-            free_dsv_.push_back(old.view);
-            it = targets_.erase(it);
+            ReleaseTarget(it++);
             continue;
         }
         Target t;
@@ -2866,8 +2866,7 @@ void D3D12Backend::RescaleTargets() {
         cv.Format = t.fmt;
         t.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
         if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.state, &cv, IID_PPV_ARGS(&t.res)))) {
-            free_rtv_.push_back(old.view);
-            it = targets_.erase(it);
+            ReleaseTarget(it++);
             continue;
         }
         t.view = old.view;  // the same descriptor slot, now viewing the new resource
