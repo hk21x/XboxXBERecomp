@@ -799,6 +799,11 @@ HLE_STDCALL(D3DDevice_Present, 4) {
 HLE_STDCALL(D3DDevice_Clear, 6) {
     WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    static const bool log_clears = std::getenv("XBE_CLEAR_LOG") != nullptr;  // each clear: target, flags, colour
+    if (log_clears)
+        LOG_FIRST(100000, "d3d: Clear frame %u target data %08X depth data %08X rects %u flags %X colour %08X", g_presents.load(),
+                  Dev(kDevRenderTarget) ? R32(Dev(kDevRenderTarget) + 4) : 0, Dev(kDevDepth) ? R32(Dev(kDevDepth) + 4) : 0,
+                  a[0], a[2], a[3]);
     const uint8_t* rects = a[0] && a[1] ? static_cast<const uint8_t*>(HostPtr(a[1])) : nullptr;
     if (g_backend) g_backend->Clear(g_state, a[0], rects, a[2], a[3], ArgF(a, 4), a[5]);
     return 0;
