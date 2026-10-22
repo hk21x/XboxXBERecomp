@@ -716,7 +716,9 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    oPos = float4(rhw.xy, rhw.z / surf.z, w);\n";
         // ultrawide: 2D drawn in a centred 16:9 part; a corner on the frame's left or right edge stays there (HUD bars
         // reaching the edge keep reaching it, full screen passes and full width lines keep their width)
-        s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5) oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
+        // a depth tested draw (hud.z) only at the near plane: 2D drawn with depth on, not a glow out in the world
+        s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5 && (hud.z == 0 || rhw.w >= 0.25))\n"
+             "        oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
     } else {
         s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
         s += "    float4 cp = mul(ip, wvp);\n";
