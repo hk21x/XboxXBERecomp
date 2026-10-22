@@ -1217,6 +1217,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindTargetTexture(const State& s, int st
         stages.reads.wide[stage] = k;
         info.flags |= kTexWide;
     }
+    if (!t.depth && NoAlphaFormat(d.format)) info.flags |= kTexOpaque;
     // the console draws an 8 bit surface as its blue byte; read as L8, AL8 or A8 the D3D12 renderer spreads that byte
     // with the view's swizzle, which D3D11 views lack
     if (!t.depth) {

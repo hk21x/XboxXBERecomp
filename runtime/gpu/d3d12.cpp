@@ -790,7 +790,8 @@ void D3D12Backend::Begin() {
 }
 
 void D3D12Backend::Submit(bool wait) {
-    cl_->Close();
+    if (HRESULT hr = cl_->Close(); FAILED(hr))
+        LOG_FIRST(4, "d3d12: command list close failed %08X (device %08X)", unsigned(hr), unsigned(dev_->GetDeviceRemovedReason()));
     ID3D12CommandList* lists[] = {cl_.Get()};
     queue_->ExecuteCommandLists(1, lists);
     queue_->Signal(fence_.Get(), ++fence_value_);
@@ -816,7 +817,12 @@ void D3D12Backend::Flush() {
 
 void D3D12Backend::WaitFence(uint64_t value) {
     fence_->SetEventOnCompletion(value, event_);
-    WaitForSingleObject(event_, INFINITE);
+    // a wait past 5 s is logged (a GPU that stopped, or work that takes that long), then waited out
+    for (int i = 0; WaitForSingleObject(event_, 5000) == WAIT_TIMEOUT; i++)
+        if (i < 4)
+            LOGR("d3d12: still waiting for the GPU after %d s (fence %llu of %llu, device %08X)", (i + 1) * 5,
+                 (unsigned long long)fence_->GetCompletedValue(), (unsigned long long)value,
+                 unsigned(dev_->GetDeviceRemovedReason()));
 }
 
 void D3D12Backend::SetFullViewport(uint32_t w, uint32_t h) {
@@ -1562,6 +1568,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     if (ext_) ext_->Sampled(d, &t, 0, info);
     sv.Format = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.fmt;
     if (!t.depth && t.fmt == kBgra) sv.Shader4ComponentMapping = OneByteMapping(d.format);
+    if (!t.depth && NoAlphaFormat(d.format)) info.flags |= kTexOpaque;
     // the console reads the pixels it is about to overwrite: give the draw a copy
     if (feedback) return Feedback(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2875,6 +2882,8 @@ void D3D12Backend::RescaleTargets() {
         ++it;
     }
     LOGR("d3d12: render scale %.2f, %zu targets kept", scale_, targets_.size());
+    for (auto& [key, t] : targets_)
+        if (MsEligible(t)) LOGR("d3d12:   %08X %ux%u now %ux%u, MSAA %ux", t.data, t.gw, t.gh, t.w, t.h, msaa_);
 }
 
 // colour targets at least half the console's screen (the scene, not reflections, maps or shadow maps), and depth

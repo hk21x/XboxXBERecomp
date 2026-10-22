@@ -837,6 +837,7 @@ std::string PixelHlsl(const PixelKey& k) {
         for (int i = 0; i < 4; i++) {
             uint32_t m = (k.tex_modes >> (i * 5)) & 0x1F;
             bool fetch = m && m != 4 && m != 5 && m != 0xA && m != 0x11;
+            if (fetch && (k.tex[i].flags & kTexOpaque)) body += F("t%d.a = 1;\n", i);
             if (fetch && ((k.alphakill >> i) & 1)) body += F("if (t%d.a == 0) discard;\n", i);
         }
         uint32_t mode0 = k.tex_modes & 0x1F;
@@ -887,6 +888,7 @@ std::string PixelHlsl(const PixelKey& k) {
             else if (t.kind) body += F("float4 t%d = tex%d.Sample(smp%d, tc%d.xyz);\n", i, i, i, i);
             else body += F("float4 t%d = float4(1,1,1,1);\n", i);
             body += Hooks().Fetched(t, i);
+            if (t.flags & kTexOpaque) body += F("t%d.a = 1;\n", i);
             if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
             const char* dst = f[8] == 5 ? "tmp" : "cur";
             std::string rgb = FfOp(f[0], FfArg(f[1], i, false), FfArg(f[2], i, false), FfArg(f[3], i, false), i, false);
