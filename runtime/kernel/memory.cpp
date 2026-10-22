@@ -227,8 +227,8 @@ static void EnsureRanges() {
     // the console keeps the top 128 KB (the GPU's instance memory and the kernel's page database): no title buffer ends
     // at the very top, and one a title overruns there (PGR's loading screen reads 80 KB past its buffer) stays in memory
     constexpr uint32_t kTopReserved = 0x20000;
+    // (physical memory is always mapped: only the allocator leaves it out)
     g_contig.Init(kContiguousBase + kKernelDataSize, kPhysicalSize - kKernelDataSize - kTopReserved);
-    Commit(kContiguousBase + kPhysicalSize - kTopReserved, kTopReserved);
     g_system.Init(kSystemBase, kSystemSize);
     g_stacks.Init(kStackBase, kStackSize);
     g_user.Init(kUserLow, kUserHigh - kUserLow);

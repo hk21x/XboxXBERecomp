@@ -281,10 +281,19 @@ void Deactivate(Voice& v) {
     if (v.active) v.active = v.paused = v.ending = false;
 }
 
+// XBE_DSOUND_LOG=1 (read once: the calls that log run often on the game's threads)
+bool DsoundLog() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_DSOUND_LOG");
+        return e && *e && *e != '0';
+    }();
+    return on;
+}
+
 void Render(float* out, uint32_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    static const bool log_voices = std::getenv("XBE_DSOUND_LOG") != nullptr;
+    const bool log_voices = DsoundLog();
     static uint64_t rendered = 0;
     if (log_voices && (rendered += frames) >= uint64_t(audio::kRate) * 5) {
         rendered = 0;
@@ -446,11 +455,7 @@ Voice* Find(uint32_t obj) {
 
 // XBE_DSOUND_LOG=1: each buffer and stream as it is made (format, size, flags, mix bins as the title gave them)
 void LogVoice(const char* what, const Voice& v, uint32_t flags, uint32_t bytes, uint32_t bins, uint32_t caller) {
-    static const bool on = [] {
-        const char* e = std::getenv("XBE_DSOUND_LOG");
-        return e && *e == '1';
-    }();
-    if (!on) return;
+    if (!DsoundLog()) return;
     LOGI("dsound: %s %08X from %08X: tag %X, %u ch, %u Hz, %u bit, %u bytes, flags %X, bins %08X (%u)", what, v.obj, caller,
          v.tag, v.channels, v.rate, v.bits, bytes, flags, bins, v.nbins);
 }
@@ -685,7 +690,7 @@ BUFFER(Release, 1) {
 }
 BUFFER(Unlock, 5) { return 0; }
 BUFFER(SetBufferData, 3) {
-    if (std::getenv("XBE_DSOUND_LOG")) LOG_FIRST(8, "dsound: SetBufferData %08X data %08X bytes %X", v.obj, a[1], a[2]);
+    if (DsoundLog()) LOG_FIRST(8, "dsound: SetBufferData %08X data %08X bytes %X", v.obj, a[1], a[2]);
     if (a[1] == v.data && a[2] == v.bytes) return 0;
     // the library frees its own memory, and makes it again for a size with no data
     if (v.owned && v.owned != a[1]) {
@@ -701,7 +706,7 @@ BUFFER(SetBufferData, 3) {
     return 0;
 }
 BUFFER(Play, 4) {
-    if (std::getenv("XBE_DSOUND_LOG")) LOG_FIRST(8, "dsound: Play %08X flags %X", v.obj, a[3]);
+    if (DsoundLog()) LOG_FIRST(8, "dsound: Play %08X flags %X", v.obj, a[3]);
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
@@ -762,7 +767,7 @@ BUFFER(SetCurrentPosition, 2) {
     return 0;
 }
 BUFFER(Lock, 8) {
-    if (std::getenv("XBE_DSOUND_LOG"))
+    if (DsoundLog())
         LOG_FIRST(16, "dsound: Lock %08X off %X bytes %X flags %X (play %X)", v.obj, a[1], a[2], a[7], BytesOf(v, uint32_t(v.pos)));
     uint32_t off = a[1], n = a[2];
     if (!v.bytes) return 0x80004005u;  // E_FAIL
@@ -780,7 +785,7 @@ BUFFER(Lock, 8) {
     return 0;
 }
 BUFFER(SetVolume, 2) {
-    if (std::getenv("XBE_DSOUND_LOG")) LOG_FIRST(40, "dsound: SetVolume %08X %d", v.obj, int32_t(a[1]));
+    if (DsoundLog()) LOG_FIRST(40, "dsound: SetVolume %08X %d", v.obj, int32_t(a[1]));
     v.volume = Db(int32_t(a[1]));
     return 0;
 }

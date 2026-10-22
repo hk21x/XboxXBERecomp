@@ -221,6 +221,12 @@ void Load() {
     s.wheel_deadzone = t["wheel_deadzone"].value_or(s.wheel_deadzone);
     s.ffb_strength = t["ffb_strength"].value_or(s.ffb_strength);
     s.ffb_road = t["ffb_road"].value_or(s.ffb_road);
+    // a hand edited file kept to the Wheel tab's ranges (a dead zone of 100% or more turned the steering round)
+    s.wheel_range = std::clamp(s.wheel_range, 180u, 2880u);
+    s.wheel_lock = std::clamp(s.wheel_lock, 90u, 1080u);
+    s.wheel_deadzone = std::min(s.wheel_deadzone, 50u);
+    s.ffb_strength = std::min(s.ffb_strength, 100u);
+    s.ffb_road = std::min(s.ffb_road, 100u);
     for (auto [key, bind] : {std::pair{"wheel_steer", &s.wheel_steer}, std::pair{"wheel_throttle", &s.wheel_throttle},
                              std::pair{"wheel_brake", &s.wheel_brake}, std::pair{"wheel_clutch", &s.wheel_clutch}}) {
         if (const toml::array* a = t[key].as_array(); a && a->size() == 3) {

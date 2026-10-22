@@ -116,12 +116,11 @@ struct Shared {
 std::mutex g_lock;
 
 // the device a binding reads, -1 none: no device named means the rig's wheel found by itself (the first driving
-// device, else the first with force feedback); a name with a GUID prefers that instance, then any of that name
+// device; a rumble pad that is not an Xbox pad would read its centred sticks as half pedals, so anything else is
+// bound in the Wheel tab); a name with a GUID prefers that instance, then any of that name
 int AutoDevice(const std::vector<View>& devs) {
     for (size_t i = 0; i < devs.size(); i++)
         if (GET_DIDEVICE_TYPE(devs[i].type) == DI8DEVTYPE_DRIVING) return int(i);
-    for (size_t i = 0; i < devs.size(); i++)
-        if (devs[i].ffb) return int(i);
     return -1;
 }
 int FindDevice(const std::vector<View>& devs, const Bind& b) {
@@ -337,6 +336,13 @@ void Scan() {
     g.next_scan = now + std::chrono::seconds(2);
     std::vector<DIDEVICEINSTANCEW> found;
     if (FAILED(g.di->EnumDevices(DI8DEVCLASS_GAMECTRL, Collect, &found, DIEDFL_ATTACHEDONLY))) return;
+    // an open device no longer attached is gone (the exclusive one only fails to acquire, never says unplugged)
+    for (size_t i = 0; i < g.devs.size();) {
+        bool attached = std::any_of(found.begin(), found.end(),
+                                    [&](const DIDEVICEINSTANCEW& inst) { return GuidText(inst.guidInstance) == g.devs[i].view.guid; });
+        if (attached) i++;
+        else Remove(i);
+    }
     for (const DIDEVICEINSTANCEW& inst : found) {
         std::string guid = GuidText(inst.guidInstance);
         if (g.skipped.count(guid)) continue;
@@ -383,8 +389,10 @@ void ReadAll() {
         Device& d = g.devs[i];
         d.dev->Poll();
         HRESULT hr = d.dev->GetDeviceState(sizeof(d.view.state), &d.view.state);
+        HRESULT acquired = S_OK;
         if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED) {
-            if (SUCCEEDED(d.dev->Acquire())) {
+            acquired = d.dev->Acquire();
+            if (SUCCEEDED(acquired)) {
                 d.dev->Poll();
                 hr = d.dev->GetDeviceState(sizeof(d.view.state), &d.view.state);
                 // effects stop when the device is lost: started again
@@ -395,8 +403,9 @@ void ReadAll() {
         }
         d.view.ok = SUCCEEDED(hr);
         // the exclusive one cannot be read while the window is behind another: that is not unplugged
-        d.failures = d.view.ok || (d.exclusive && hr == DIERR_NOTACQUIRED) ? 0 : d.failures + 1;
-        if (hr == DIERR_UNPLUGGED || d.failures > 500) {
+        bool behind = d.exclusive && hr == DIERR_NOTACQUIRED && GetForegroundWindow() != g.hwnd;
+        d.failures = d.view.ok || behind ? 0 : d.failures + 1;
+        if (hr == DIERR_UNPLUGGED || acquired == DIERR_UNPLUGGED || d.failures > 500) {
             Remove(i);
             continue;
         }

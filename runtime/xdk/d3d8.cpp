@@ -45,23 +45,23 @@ using namespace kernel;
 #define HAS_D3DDevice_SetPalette 0
 #endif
 #ifndef SYM_D3DDevice_Present
-#define SYM_D3DDevice_Present FFFFFE04
+#define SYM_D3DDevice_Present FFFFFE09
 #define HAS_D3DDevice_Present 0
 #endif
 #ifndef SYM_D3DDevice_GetBackBuffer
-#define SYM_D3DDevice_GetBackBuffer FFFFFE05
+#define SYM_D3DDevice_GetBackBuffer FFFFFE0A
 #define HAS_D3DDevice_GetBackBuffer 0
 #endif
 #ifndef SYM_D3DDevice_GetDepthStencilSurface
-#define SYM_D3DDevice_GetDepthStencilSurface FFFFFE06
+#define SYM_D3DDevice_GetDepthStencilSurface FFFFFE0B
 #define HAS_D3DDevice_GetDepthStencilSurface 0
 #endif
 #ifndef SYM_D3DDevice_SetVertexShaderConstant
-#define SYM_D3DDevice_SetVertexShaderConstant FFFFFE07
+#define SYM_D3DDevice_SetVertexShaderConstant FFFFFE0C
 #define HAS_D3DDevice_SetVertexShaderConstant 0
 #endif
 #ifndef SYM_D3DDevice_RunPushBuffer
-#define SYM_D3DDevice_RunPushBuffer FFFFFE08
+#define SYM_D3DDevice_RunPushBuffer FFFFFE0D
 #define HAS_D3DDevice_RunPushBuffer 0
 #endif
 #ifndef SYM_D3DDevice_GetVertexShaderFunction
@@ -350,7 +350,6 @@ bool MakeFrameBuffers(uint32_t pp) {
     static uint32_t made[5];
     uint32_t want[5] = {w, h, fmt, count, auto_depth ? depth_fmt : 0xFFFFFFFFu};
     bool fresh = !g_buffers[1] || std::memcmp(made, want, sizeof made);
-    if (XDK_CDevice_FrameSurfaces != xdk::kUnknown && g_buffers[1] && !R32(g_buffers[1])) fresh = true;  // device cleared
     if (fresh) {
         uint32_t color_fmt = gpu::LinearColorFormat(fmt);
         g_buffer_count = std::min<uint32_t>(count + 1, 3);
@@ -411,7 +410,20 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     if (!h) h = 480;
     LOGI("d3d: CreateDevice %ux%u format %X buffers %u depth %u format %X interval %X flags %X", w, h, fmt, count,
          auto_depth, depth_fmt, interval, R32(pp + 0x28));
+    // 3948 keeps the frame buffer objects in the device: kept across the clear, so the same parameters reuse them
+    uint8_t frame_surfaces[3 * 24], auto_depth_surface[24];
+    bool inline_surfaces = XDK_CDevice_FrameSurfaces != xdk::kUnknown && g_buffers[1];
+    if (inline_surfaces) {
+        std::memcpy(frame_surfaces, HostPtr(kDevice + XDK_CDevice_FrameSurfaces), sizeof frame_surfaces);
+        if (XDK_CDevice_AutoDepthSurface != xdk::kUnknown)
+            std::memcpy(auto_depth_surface, HostPtr(kDevice + XDK_CDevice_AutoDepthSurface), sizeof auto_depth_surface);
+    }
     std::memset(HostPtr(kDevice), 0, XDK_CDevice_Size);
+    if (inline_surfaces) {
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_FrameSurfaces), frame_surfaces, sizeof frame_surfaces);
+        if (XDK_CDevice_AutoDepthSurface != xdk::kUnknown)
+            std::memcpy(HostPtr(kDevice + XDK_CDevice_AutoDepthSurface), auto_depth_surface, sizeof auto_depth_surface);
+    }
     W32(kDevicePtr, kDevice);
     ScratchPush();
 
@@ -1248,7 +1260,8 @@ HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
 HLE_STDCALL(D3DDevice_SetVertexShaderConstant, 3) {
     WalkPending();
     int32_t reg = int32_t(a[0]) + 96;
-    for (uint32_t i = 0; i < a[2]; i++)
+    uint32_t count = std::min<uint32_t>(a[2], 192);  // a wild count would loop for minutes
+    for (uint32_t i = 0; i < count; i++)
         if (reg + int32_t(i) >= 0 && reg + i < 192) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(a[1] + i * 16), 16);
     WatchConstants("SetVertexShaderConstant", uint32_t(reg), a[2], R32(ctx.esp));
     return 0;
@@ -1737,10 +1750,12 @@ HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
     Walk(Dev(kDevPush));
     static std::unordered_set<uint32_t> seen;
     uint32_t pb = a[0];
-    if (pb && seen.size() < 64 && seen.insert(pb).second) {
+    if (pb && mem::IsCommitted(pb) && mem::IsCommitted(pb + 15) && seen.size() < 64 && seen.insert(pb).second) {
         uint32_t data = R32(pb + 4), size = R32(pb + 12);
+        // the first commands, only from memory that is there (the title may give a physical or unfinished address)
+        bool readable = data && mem::IsCommitted(data) && mem::IsCommitted(data + 31);
         char head[200] = {};
-        for (uint32_t i = 0, n = 0; i < 8 && i * 4 < size && data; i++)
+        for (uint32_t i = 0, n = 0; i < 8 && i * 4 < size && readable; i++)
             n += std::snprintf(head + n, sizeof head - n, " %08X", R32(data + i * 4));
         LOGW("d3d: RunPushBuffer %08X (Common %08X, data %08X, %u bytes, fixup %08X) not replayed:%s", pb, R32(pb), data,
              size, a[1], head);
