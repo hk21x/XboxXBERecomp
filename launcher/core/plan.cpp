@@ -223,7 +223,9 @@ bool ResolveMicrosoft(Http& http, const std::string& toolchain_json, Plan& plan,
                 std::to_string(want.size()) + ")";
         return false;
     }
+    // the installers taken, so a longer list extracts it again
     ws.stamp = sdk_id;
+    for (const FileRef& f : ws.files) ws.stamp += " " + f.name;
     plan.sdk_version = sdk.value("version", "");
     plan.tools.push_back(vc);
     plan.tools.push_back(ws);

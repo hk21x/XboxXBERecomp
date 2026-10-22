@@ -313,6 +313,17 @@ bool Builder::Compile(std::string& error) {
     std::string cmake = U8((ToolPath("cmake") / "bin" / ("cmake" + platform_.ExeSuffix())));
     std::error_code ec;
     if (!fs::exists(cmake, ec)) cmake = "cmake";
+    // a toolchain other than the last build's: CMake's cache (its compiler and header checks) is made again
+    std::string tools;
+    for (const Tool& t : plan_.tools) tools += t.id + " " + t.stamp + "\n";
+    fs::path build = src / "out" / "build" / "release", seen = build / ".launcher-tools";
+    std::string last;
+    // (a build folder from before this record counts as another toolchain)
+    if (fs::exists(build / "CMakeCache.txt", ec) && (!ReadAll(seen, last) || last != tools)) {
+        Log("the build tools changed: CMake's cache is made again");
+        fs::remove(build / "CMakeCache.txt", ec);
+        fs::remove_all(build / "CMakeFiles", ec);  // CMake's own folder in our build folder
+    }
     Say("Preparing the build", "the first time also downloads the libraries it uses");
     // clang links with lld (no Microsoft linker in the kit)
     int code = platform_.Run({cmake, "--preset", "release", "-DCMAKE_LINKER_TYPE=LLD"}, src, env,
@@ -321,6 +332,8 @@ bool Builder::Compile(std::string& error) {
         error = "Preparing the build failed, see launcher.log";
         return false;
     }
+    fs::create_directories(build, ec);
+    std::ofstream(seen) << tools;
     Say("Building " + game_.title, "the first build takes 30 to 90 minutes", 0);
     code = platform_.Run({cmake, "--build", "out/build/release"}, src, env, [&](const std::string& line) {
             Log(line);
