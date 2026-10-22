@@ -514,6 +514,7 @@ private:
 
     ComPtr<IDXGIFactory4> factory_;
     ComPtr<ID3D12Device> dev_;
+    ComPtr<IDXGIAdapter3> adapter3_;  // for the video memory in use (logged when a pipeline cannot be made)
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_;
     ComPtr<ID3D12Resource> bb_[kFrames];
@@ -659,6 +660,7 @@ bool D3D12Backend::CreateDevice() {
     }
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
+    if (adapter) adapter.As(&adapter3_);
     LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1514,7 +1516,14 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
-    if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) LOGE("d3d12: pipeline creation failed");
+    if (HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)); FAILED(hr)) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
+        if (adapter3_) adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
+        LOGE("d3d12: pipeline creation failed %08X (samples %u, colour %u format %u, depth %u, topology %u, fill %u; "
+             "video memory %llu of %llu MB)", unsigned(hr), d.SampleDesc.Count, d.NumRenderTargets, unsigned(d.RTVFormats[0]),
+             unsigned(d.DSVFormat), k.topo, k.fill, (unsigned long long)(vm.CurrentUsage >> 20),
+             (unsigned long long)(vm.Budget >> 20));
+    }
     psos_[h] = pso;
     return pso.Get();
 }
@@ -2881,6 +2890,10 @@ void D3D12Backend::RescaleTargets() {
     LOGR("d3d12: render scale %.2f, %zu targets kept", scale_, targets_.size());
     for (auto& [key, t] : targets_)
         if (MsEligible(t)) LOGR("d3d12:   %08X %ux%u now %ux%u, MSAA %ux", t.data, t.gw, t.gh, t.w, t.h, msaa_);
+    DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
+    if (adapter3_ && SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm)))
+        LOGR("d3d12:   video memory %llu of %llu MB", (unsigned long long)(vm.CurrentUsage >> 20),
+             (unsigned long long)(vm.Budget >> 20));
 }
 
 // colour targets at least half the console's screen (the scene, not reflections, maps or shadow maps), and depth
