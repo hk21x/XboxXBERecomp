@@ -37,3 +37,9 @@ endif()
 
 # target name = GAME_EXE in build.bat, xbe = GAME_XBE
 add_xbe_image(Game default.xbe game.toml ${GAME_PARTITIONS} game)
+
+# launcher/icon.ico, when there is one: the game's icon too (resource 1, which the window class loads)
+if(WIN32 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/launcher/icon.ico)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/game_icon.rc "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/launcher/icon.ico\"\n")
+    target_sources(Game PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/game_icon.rc)
+endif()

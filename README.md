@@ -32,6 +32,12 @@ This tool was originally created for porting [Tom Clancy's Splinter Cell: Double
 5. Game hooks go in `src/game`. Define `X86_FUNC(sub_XXXXXXXX)` to replace a recompiled function, and call `__imp__sub_XXXXXXXX` to reach the original. `python sdk/tools/symbols/xbe2pe.py config/game.toml game.exe` writes a flat PE with the recompiled functions as exports for Ghidra.
 6. Run `build.bat`. One game repo can build several images, one config and `add_xbe_image` each; `--name` sets the config's `generated/<name>`, which is the folder argument of `add_xbe_image`.
 
+The template also carries what a game repository needs beyond the build: `scripts/` (one-line wrappers for the shared
+scripts in `sdk/scripts`, the game's values in `scripts/game.env`: harness, smoke and soak tests, system link test,
+Windows syntax check, shader check, Ghidra helpers), `launcher/` and `launcher.bat` (the player's launcher, see
+`launcher/README.md`), `.github/workflows/release.yml` (builds the launcher and publishes a release on a tag `v*`),
+and CLAUDE.md, PROGRESS.md and FINDINGS.md to start from.
+
 A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles whose configs are complete: `xbe_symbols --sign config/a.toml [config/b.toml] --out sdk/xdk/<build>/signatures.toml`. Signatures are lengths and hashes of the functions with addresses masked, never library code.
 
 ## Features

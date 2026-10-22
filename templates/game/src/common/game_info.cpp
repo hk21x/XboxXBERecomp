@@ -20,4 +20,6 @@ const app::GameInfo app::kGame = {
     .ui = nullptr,                        // ImGui drawing each frame
     .pad = nullptr,                       // changes a polled pad
     .rumble = nullptr,                    // changes a rumble before it is set
+    // optional, after these: .achievements (conditions on guest memory), .same_code (other releases' xbe SHA-1s with
+    // the same code), .wheel (what a steering wheel's force feedback follows)
 };
