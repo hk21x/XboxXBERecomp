@@ -1,0 +1,4 @@
+#pragma once
+// the game's launcher/game.json and launcher/toolchain.json, built into the launcher (configure_file)
+inline constexpr const char kGameJson[] = R"json(@GAME_JSON@)json";
+inline constexpr const char kToolchainJson[] = R"json(@TOOLCHAIN_JSON@)json";

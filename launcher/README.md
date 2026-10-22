@@ -1,0 +1,42 @@
+# Launcher
+
+One exe a player runs to build and play a recompiled game from their own disc, with nothing installed in Windows.
+A game ships no recompiled code (it is derived from the disc), so the player's PC builds it: the launcher fetches
+portable build tools into its own folder, the game's source, takes the xbe from the player's disc image or folder,
+builds, and from then on is the Play button (and Update, when the game's branch moves on).
+
+## For a game
+
+A folder in the game's repository (`launcher/` in PGR2's) with:
+- `game.json`: `title`, `short` (the launcher's name and work folder), `exe`, `xbe`, `releases` (each supported
+  xbe's SHA-1 and its name), `repo` and `branch` (git, public), `toolchain` (where toolchain.json is published).
+- `toolchain.json`: the tools, each `id`, `title`, `kind` (`zip` or `tar.xz`), `url`, `sha256`, `size`, `strip`
+  (leading path parts dropped) and `keep` (what is unpacked: `dir/` or a path, `*` within a name); `msvc` (a
+  Visual Studio channel, an MSVC version and its packages) and `sdk` (a Windows SDK package and the .msi files taken
+  from it). The launcher reads the published copy each build, so versions move without a new launcher; it keeps the
+  last copy and has its own built in.
+- `icon.ico` (optional).
+
+Build it on Windows (Visual Studio's clang, CMake and Ninja on the PATH):
+`cmake -S sdk/launcher -B out/launcher -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -DLAUNCHER_GAME=<the folder>`.
+The exe is `<short>Launcher.exe`, one file with no runtime beside it.
+
+## What it does
+
+Under `<short>\` beside itself:
+- `tools\` clang (LLVM's release), CMake, Ninja, MinGit, Microsoft's C++ library packages (vsix) and the Windows SDK
+  (.msi files extracted with `msiexec /a`, which needs no rights). Every file is checked against its SHA-256; the
+  Microsoft ones come from the Visual Studio manifest with theirs. The player accepts Microsoft's license first.
+- `source\` the game's repository; its xbe goes in `source\assets`.
+- `play\` the built exe and what it writes (settings, saves, logs); `play\assets` is the player's game: a junction
+  to their folder, or their disc image hard linked (copied when it is on another drive).
+- `launcher.log`, `launcher.json` (the game chosen).
+
+The build runs with the environment Visual Studio's developer prompt would set (INCLUDE, LIB, PATH) and links with
+lld. Downloads resume and every step can run again: what is done is kept.
+
+## Testing on Linux
+
+`launcher_cli` (built on Linux from the same CMakeLists) runs the steps from a terminal: `plan` (resolves the tools
+from the manifests), `tool <id>` (downloads and unpacks one; not the SDK, which needs msiexec), `game <iso|folder>`,
+`source`, `env`, and `hash`/`untar` for the pieces. With a toolchain.json beside game.json it uses that one.
