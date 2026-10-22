@@ -227,6 +227,9 @@ void Complete(Voice& v, Packet& pk, uint32_t status) {
     }
 }
 
+// the bins' headroom as the library's DirectSoundCreate leaves it (the APU shifts each bin's sum down by it)
+constexpr float kMixBinGain = 1.0f / float(1u << XDK_DSound_MixBinHeadroom);
+
 // gain of voice channel c on host left and right. A hardware voice holds two channels and owns a run of slots,
 // which alternate left and right.
 void Levels(Voice& v, float g[2][2]) {
@@ -241,7 +244,7 @@ void Levels(Voice& v, float g[2][2]) {
         for (uint32_t s = c; c < v.channels && s < per && s < n; s += step) {
             uint32_t b = bin[s];
             if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
-            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f);
+            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f) * kMixBinGain;
             // even bins are left, odd right, 2 is the centre
             if (!speakers || b == 2 || !(b & 1)) g[c][0] = std::max(g[c][0], x);
             if (!speakers || b == 2 || (b & 1)) g[c][1] = std::max(g[c][1], x);
@@ -281,6 +284,26 @@ void Deactivate(Voice& v) {
 void Render(float* out, uint32_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    static const bool log_voices = std::getenv("XBE_DSOUND_LOG") != nullptr;
+    static uint64_t rendered = 0;
+    if (log_voices && (rendered += frames) >= uint64_t(audio::kRate) * 5) {
+        rendered = 0;
+        uint32_t n = 0;
+        std::string top;
+        for (auto& [obj, v] : g_voices) {
+            if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
+            n++;
+            float g[2][2];
+            Levels(v, g);
+            if (g[0][0] + g[0][1] > 0.25f && top.size() < 600) {
+                char b[120];
+                std::snprintf(b, sizeof b, " [%08X tag %X %uHz freq %u vol %.2f head %.2f gain %.2f/%.2f%s]", obj, v.tag, v.rate,
+                              v.freq, v.volume, v.headroom, g[0][0], g[0][1], v.is3d ? " 3d" : "");
+                top += b;
+            }
+        }
+        LOGI("dsound: %u voices playing, loud:%s", n, top.c_str());
+    }
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         float g[2][2];
@@ -421,7 +444,18 @@ Voice* Find(uint32_t obj) {
     return it == g_voices.end() ? nullptr : &it->second;
 }
 
-uint32_t NewBuffer(uint32_t desc, uint32_t out) {
+// XBE_DSOUND_LOG=1: each buffer and stream as it is made (format, size, flags, mix bins as the title gave them)
+void LogVoice(const char* what, const Voice& v, uint32_t flags, uint32_t bytes, uint32_t bins, uint32_t caller) {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_DSOUND_LOG");
+        return e && *e == '1';
+    }();
+    if (!on) return;
+    LOGI("dsound: %s %08X from %08X: tag %X, %u ch, %u Hz, %u bit, %u bytes, flags %X, bins %08X (%u)", what, v.obj, caller,
+         v.tag, v.channels, v.rate, v.bits, bytes, flags, bins, v.nbins);
+}
+
+uint32_t NewBuffer(uint32_t desc, uint32_t out, uint32_t caller = 0) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Start();
     uint32_t obj = mem::AllocSystem(0x40);
@@ -437,6 +471,7 @@ uint32_t NewBuffer(uint32_t desc, uint32_t out) {
         v.data = v.owned = mem::AllocContiguous(bytes, 0, 0xFFFFFFFF, 4);
         v.bytes = v.play_len = v.loop_len = bytes;
     }
+    LogVoice("buffer", v, flags, bytes, R32(desc + 16), caller);
     W32(out, obj);
     return 0;
 }
@@ -619,8 +654,8 @@ HLE_STDCALL(IDirectSound_GetOutputLevels, 3) {
 
 // buffers
 
-HLE_STDCALL(DirectSoundCreateBuffer, 2) { return NewBuffer(a[0], a[1]); }
-HLE_STDCALL(IDirectSound_CreateSoundBuffer, 4) { return NewBuffer(a[1], a[2]); }
+HLE_STDCALL(DirectSoundCreateBuffer, 2) { return NewBuffer(a[0], a[1], R32(ctx.esp)); }
+HLE_STDCALL(IDirectSound_CreateSoundBuffer, 4) { return NewBuffer(a[1], a[2], R32(ctx.esp)); }
 
 // DirectSoundGetSampleTime(): the audio processor's global counter of 48 kHz samples (register 0xFE80200C), which
 // titles time things by (menu animations, for one). Counted from the first call.
@@ -650,6 +685,7 @@ BUFFER(Release, 1) {
 }
 BUFFER(Unlock, 5) { return 0; }
 BUFFER(SetBufferData, 3) {
+    if (std::getenv("XBE_DSOUND_LOG")) LOG_FIRST(8, "dsound: SetBufferData %08X data %08X bytes %X", v.obj, a[1], a[2]);
     if (a[1] == v.data && a[2] == v.bytes) return 0;
     // the library frees its own memory, and makes it again for a size with no data
     if (v.owned && v.owned != a[1]) {
@@ -665,6 +701,7 @@ BUFFER(SetBufferData, 3) {
     return 0;
 }
 BUFFER(Play, 4) {
+    if (std::getenv("XBE_DSOUND_LOG")) LOG_FIRST(8, "dsound: Play %08X flags %X", v.obj, a[3]);
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
@@ -725,6 +762,8 @@ BUFFER(SetCurrentPosition, 2) {
     return 0;
 }
 BUFFER(Lock, 8) {
+    if (std::getenv("XBE_DSOUND_LOG"))
+        LOG_FIRST(16, "dsound: Lock %08X off %X bytes %X flags %X (play %X)", v.obj, a[1], a[2], a[7], BytesOf(v, uint32_t(v.pos)));
     uint32_t off = a[1], n = a[2];
     if (!v.bytes) return 0x80004005u;  // E_FAIL
     if (XDK_DSound_LockFlagsSwapped && (a[7] & 1)) {  // DSBLOCK_FROMWRITECURSOR, as GetCurrentPosition reports it
@@ -741,6 +780,7 @@ BUFFER(Lock, 8) {
     return 0;
 }
 BUFFER(SetVolume, 2) {
+    if (std::getenv("XBE_DSOUND_LOG")) LOG_FIRST(40, "dsound: SetVolume %08X %d", v.obj, int32_t(a[1]));
     v.volume = Db(int32_t(a[1]));
     return 0;
 }
@@ -827,6 +867,7 @@ HLE_STDCALL(DirectSoundCreateStream, 2) {
     SetBins(v, R32(desc + 20));
     v.is3d = flags & 0x10;  // DSBCAPS_CTRL3D
     v.headroom = DefaultHeadroom(flags);
+    LogVoice("stream", v, flags, 0, R32(desc + 20), R32(ctx.esp));
     W32(a[1], obj);
     return 0;
 }

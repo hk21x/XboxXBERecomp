@@ -105,6 +105,10 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_ScreenSpaceOffset
 #define XDK_CDevice_ScreenSpaceOffset 0xFFFFFFFFu
 #endif
+// mix bin headroom the library's DirectSoundCreate sets on every bin, in 6 dB steps (3936: 1; 5659 sets none)
+#ifndef XDK_DSound_MixBinHeadroom
+#define XDK_DSound_MixBinHeadroom 0
+#endif
 // 3936 DSOUND: mix bins are a mask of bins at full volume (0: the default for the channel count), not a DSMIXBINS
 #ifndef XDK_DSound_MixBinMask
 #define XDK_DSound_MixBinMask 0

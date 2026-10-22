@@ -51,6 +51,8 @@ DSound_MixBinMask     = 1       # the mix bin setter 0xFD78C stores its argument
                                 # the channel count's default from 0x1070B0 (0xFD7AA)
 DSound_LockFlagsSwapped = 1     # IDirectSoundBuffer_Lock 0xFDB44: flag 1 starts at the write cursor (0xFDB53, 0xFDB66),
                                 # flag 2 locks the whole buffer (0xFDB72, size at 0xFDB7B)
+DSound_MixBinHeadroom = 1       # the DirectSound init 0x1008A7 sets headroom 1 (6 dB) on bins 0-30 through 0x10003D,
+                                # which writes 0xFE820200 + bin * 4 (0x10005F); bin 31 gets 0 (0x1008BB)
 # XAPI XPP device type record
 XPP_Current           = 0x0     # XGetDevices 0x13BEA8 returns it
 XPP_Changed           = 0x4     # XGetDevices 0x13BEAA clears it, XGetDeviceChanges 0x13BEC8 tests it
