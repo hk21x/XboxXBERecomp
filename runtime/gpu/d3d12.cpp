@@ -1581,7 +1581,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     // the console reads the pixels it is about to overwrite: give the draw a copy
     if (feedback) return Feedback(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    if (t.depth) info.shadow = ShadowDepthKind(d.format);
+    if (t.depth) DepthRead(d.format, info);
     info.kind = kTex2D;
     return t.res.Get();
 }

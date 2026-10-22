@@ -157,6 +157,9 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
 bool DepthTested(const State& s);
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
+// a depth target sampled as format: through a depth format the console compares (a shadow map), through a 32 bit
+// colour format it reads the word's bytes (PGR2's depth of field weighs its blur by them)
+void DepthRead(uint32_t format, TexInfo& info);
 // Ultrawide: the squeeze decided for a pretransformed draw, logged whenever it changes for a target (rt the target's
 // data, gw x gh its console size, w its host width): why a menu or HUD is or is not kept in the centre
 void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, uint32_t gh, uint32_t w, float aspect,

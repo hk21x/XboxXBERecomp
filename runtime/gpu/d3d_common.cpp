@@ -655,6 +655,15 @@ UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 // depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
 bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
 
+void DepthRead(uint32_t format, TexInfo& info) {
+    if (!Format(format).depth && DepthBytesOrder(format)) {
+        info.flags |= kTexDepthBytes | (DepthBytesOrder(format) == 2 ? kTexDepthAbgr : 0);
+        LOG_FIRST(4, "gpu: a depth buffer read as colour format %X: its bytes, depth's top byte in alpha", format);
+        return;
+    }
+    info.shadow = ShadowDepthKind(format);
+}
+
 void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, uint32_t gh, uint32_t w, float aspect,
                  float stretch, float squeeze) {
     if (!a.pretransformed || aspect <= app::kGame.hud_aspect + 1e-3f) return;
