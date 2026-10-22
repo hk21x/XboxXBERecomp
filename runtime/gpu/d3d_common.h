@@ -157,6 +157,10 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
 bool DepthTested(const State& s);
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
+// Ultrawide: the squeeze decided for a pretransformed draw, logged whenever it changes for a target (rt the target's
+// data, gw x gh its console size, w its host width): why a menu or HUD is or is not kept in the centre
+void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, uint32_t gh, uint32_t w, float aspect,
+                 float stretch, float squeeze);
 
 // a guest rect scaled to the target and clamped to it (any target with w, h, gw, gh)
 template <class T>

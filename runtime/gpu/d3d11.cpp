@@ -1710,6 +1710,8 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     float stretch = bound_rt_ ? XStretch(aspect_, guest_h_, bound_rt_->gw, bound_rt_->gh) : 0;
     c.hud[0] = HudSqueeze(s, a, aspect_, stretch);
+    if (bound_rt_)
+        NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_, stretch, c.hud[0]);
     c.hud[1] = (bound_rt_ ? bound_rt_->gw : guest_w_) * 0.5f;
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
