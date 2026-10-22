@@ -47,7 +47,7 @@ struct WheelInfo {
     int pov = -1;               // hat in hundredths of a degree, -1 centred
     float steer = 0, throttle = 0, brake = 0, clutch = 0;  // as the game gets them: steer -1 to 1, pedals 0 to 1
 };
-void WheelInit(void* hwnd);  // window thread, with the game window (force feedback needs it)
+void WheelInit(void* hwnd);  // with the game window (force feedback needs it): starts the wheel thread
 // the wheel's console inputs, 0 to 1 each in Control order; false when there is none
 bool WheelRead(float* v);
 void WheelFeedback(const WheelFeel& feel, uint16_t rumble_left, uint16_t rumble_right);

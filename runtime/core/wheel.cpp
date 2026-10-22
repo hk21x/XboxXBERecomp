@@ -21,6 +21,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "app/app.h"
 #include "core/log.h"
@@ -49,9 +50,8 @@ struct Device {
     Effect spring, damper, constant, sine;
     DIJOYSTATE2 state{};
     bool have_state = false;
-    Clock::time_point next_scan{}, next_ffb{}, test_until{};
-    float test_level = 0;
-} g;
+    Clock::time_point next_scan{}, next_ffb{};
+} g;  // the wheel thread's own
 std::mutex g_wheel_lock;
 
 std::string Narrow(const wchar_t* w) {
@@ -278,11 +278,49 @@ void SetSine(LONG magnitude, DWORD period_us) {
     e.fx->SetParameters(&eff, DIEP_TYPESPECIFICPARAMS);
 }
 
-}  // namespace
+// What the game's threads and the wheel thread share (g_wheel_lock): the last state read, the forces asked for. Every
+// DirectInput call (looking for a wheel, reading it, setting its forces over USB) is on the wheel thread, never on a
+// thread the game waits on: looking for devices can take a tenth of a second.
+struct Shared {
+    bool connected = false, ffb = false;
+    std::string name, effects;
+    int buttons = 0;
+    DIJOYSTATE2 state{};
+    WheelFeel feel;
+    uint16_t rumble_left = 0, rumble_right = 0;
+    bool feedback = false;  // the game has asked for forces since the wheel was found
+    Clock::time_point test_until{};
+    float test_level = 0;
+} s_shared;
 
-void WheelInit(void* hwnd) {
-    std::lock_guard lock(g_wheel_lock);
-    g.hwnd = static_cast<HWND>(hwnd);
+// Forces, at most 60 times a second:
+// - spring: centring, light in the menus, firmer with speed while racing (a car's self-aligning feel)
+// - damper: a steady weight, so the wheel does not oscillate
+// - sine: the game's rumble (kerbs, gravel, impacts), its low motor as a slow shake, its high one as a fine buzz
+// - constant: the settings window's test pulse
+void Feedback(const Shared& want, Clock::time_point now) {
+    if (!g.ffb || now < g.next_ffb) return;
+    g.next_ffb = now + std::chrono::milliseconds(16);
+    const app::Settings& s = app::Get();
+    const WheelFeel& feel = want.feel;
+    float strength = std::clamp(float(s.ffb_strength) / 100.0f, 0.0f, 1.0f);
+    bool paused = app::OverlayOpen() && now >= want.test_until;
+    float speed = std::clamp(std::fabs(feel.speed) / 40.0f, 0.0f, 1.0f);  // full by 40 m/s, about 90 mph
+    float spring = feel.racing ? 0.15f + 0.65f * speed : 0.25f;
+    float damper = feel.racing ? 0.12f + 0.10f * speed : 0.10f;
+    if (paused) spring = 0.25f, damper = 0.10f;
+    SetCondition(g.spring, LONG(spring * strength * kForceMax));
+    SetCondition(g.damper, LONG(damper * strength * kForceMax));
+    float road = std::clamp(float(s.ffb_road) / 100.0f, 0.0f, 1.0f);
+    float low = want.rumble_left / 65535.0f, high = want.rumble_right / 65535.0f;
+    float shake = feel.racing && !paused ? std::max(low, high) * road * strength : 0;
+    SetSine(LONG(shake * 0.6f * kForceMax), low >= high ? 60000 : 25000);
+    float test = now < want.test_until ? want.test_level : 0;
+    SetConstant(LONG(std::clamp(test, -1.0f, 1.0f) * strength * kForceMax));
+}
+
+// the wheel thread: looks for a wheel every two seconds while there is none, reads it every 2 ms, sets its forces
+void Run() {
     if (FAILED(DirectInput8Create(GetModuleHandleW(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8W,
                                   reinterpret_cast<void**>(&g.di), nullptr))) {
         LOGW("wheel: DirectInput unavailable, no steering wheels");
@@ -291,14 +329,41 @@ void WheelInit(void* hwnd) {
     }
     Scan();
     if (!g.dev) LOGR("wheel: none found (one plugged in later is picked up)");
+    for (;;) {
+        Scan();
+        bool ok = Read();
+        Shared want;
+        {
+            std::lock_guard lock(g_wheel_lock);
+            s_shared.connected = ok;
+            s_shared.ffb = g.ffb;
+            s_shared.name = g.name;
+            s_shared.effects = g.effects;
+            s_shared.buttons = g.buttons;
+            if (ok) s_shared.state = g.state;
+            if (!g.dev) s_shared.feedback = false;
+            want = s_shared;
+        }
+        if (ok && want.feedback) Feedback(want, Clock::now());
+        Sleep(2);
+    }
+}
+
+}  // namespace
+
+void WheelInit(void* hwnd) {
+    g.hwnd = static_cast<HWND>(hwnd);
+    std::thread(Run).detach();
 }
 
 bool WheelRead(float* v) {
-    std::lock_guard lock(g_wheel_lock);
-    Scan();
-    if (!Read()) return false;
+    DIJOYSTATE2 st;
+    {
+        std::lock_guard lock(g_wheel_lock);
+        if (!s_shared.connected) return false;
+        st = s_shared.state;
+    }
     const app::Settings& s = app::Get();
-    const DIJOYSTATE2& st = g.state;
     float steer = SteerValue(st, s);
     v[kLSLeft] = std::max(-steer, 0.0f);
     v[kLSRight] = std::max(steer, 0.0f);
@@ -320,44 +385,27 @@ bool WheelRead(float* v) {
     return true;
 }
 
-// Forces, at most 60 times a second:
-// - spring: centring, light in the menus, firmer with speed while racing (a car's self-aligning feel)
-// - damper: a steady weight, so the wheel does not oscillate
-// - sine: the game's rumble (kerbs, gravel, impacts), its low motor as a slow shake, its high one as a fine buzz
-// - constant: the settings window's test pulse
 void WheelFeedback(const WheelFeel& feel, uint16_t rumble_left, uint16_t rumble_right) {
     std::lock_guard lock(g_wheel_lock);
-    if (!g.ffb) return;
-    auto now = Clock::now();
-    if (now < g.next_ffb) return;
-    g.next_ffb = now + std::chrono::milliseconds(16);
-    const app::Settings& s = app::Get();
-    float strength = std::clamp(float(s.ffb_strength) / 100.0f, 0.0f, 1.0f);
-    bool paused = app::OverlayOpen() && now >= g.test_until;
-    float speed = std::clamp(std::fabs(feel.speed) / 40.0f, 0.0f, 1.0f);  // full by 40 m/s, about 90 mph
-    float spring = feel.racing ? 0.15f + 0.65f * speed : 0.25f;
-    float damper = feel.racing ? 0.12f + 0.10f * speed : 0.10f;
-    if (paused) spring = 0.25f, damper = 0.10f;
-    SetCondition(g.spring, LONG(spring * strength * kForceMax));
-    SetCondition(g.damper, LONG(damper * strength * kForceMax));
-    float road = std::clamp(float(s.ffb_road) / 100.0f, 0.0f, 1.0f);
-    float low = rumble_left / 65535.0f, high = rumble_right / 65535.0f;
-    float shake = feel.racing && !paused ? std::max(low, high) * road * strength : 0;
-    SetSine(LONG(shake * 0.6f * kForceMax), low >= high ? 60000 : 25000);
-    float test = now < g.test_until ? g.test_level : 0;
-    SetConstant(LONG(std::clamp(test, -1.0f, 1.0f) * strength * kForceMax));
+    s_shared.feel = feel;
+    s_shared.rumble_left = rumble_left;
+    s_shared.rumble_right = rumble_right;
+    s_shared.feedback = true;
 }
 
 WheelInfo Wheel() {
-    std::lock_guard lock(g_wheel_lock);
+    DIJOYSTATE2 st;
     WheelInfo w;
-    w.connected = g.dev && g.have_state;
-    w.name = g.name;
-    w.ffb = g.ffb;
-    w.effects = g.effects;
-    w.buttons_count = g.buttons;
+    {
+        std::lock_guard lock(g_wheel_lock);
+        w.connected = s_shared.connected;
+        w.name = s_shared.name;
+        w.ffb = s_shared.ffb;
+        w.effects = s_shared.effects;
+        w.buttons_count = s_shared.buttons;
+        st = s_shared.state;
+    }
     if (!w.connected) return w;
-    const DIJOYSTATE2& st = g.state;
     for (int i = 0; i < 8; i++) w.axes[i] = Axis(st, i);
     for (int b = 0; b < 128; b++)
         if (st.rgbButtons[b] & 0x80) w.pressed.push_back(b);
@@ -372,9 +420,9 @@ WheelInfo Wheel() {
 
 void WheelTestForce(float level) {
     std::lock_guard lock(g_wheel_lock);
-    g.test_level = level;
-    g.test_until = Clock::now() + std::chrono::milliseconds(500);
-    g.next_ffb = {};
+    s_shared.test_level = level;
+    s_shared.test_until = Clock::now() + std::chrono::milliseconds(500);
+    s_shared.feedback = true;
 }
 
 }  // namespace input

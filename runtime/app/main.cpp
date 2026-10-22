@@ -235,6 +235,22 @@ void Pace(uint32_t vblanks) {
         return;
     }
     auto period = std::chrono::nanoseconds(1000000000ull / cap);
+    // stutter: frames that took more than one and a half periods, a line every 10 seconds that had any (loading
+    // screens count too)
+    static clock::time_point last = now, report = now + std::chrono::seconds(10);
+    static uint32_t frames = 0, slow = 0;
+    static double longest = 0;
+    double took = std::chrono::duration<double, std::milli>(now - last).count();
+    last = now;
+    frames++;
+    if (took > 1.5 * std::chrono::duration<double, std::milli>(period).count()) slow++, longest = std::max(longest, took);
+    if (now >= report) {
+        if (slow) LOGR("frames: %u of %u in the last 10 s over %.1f ms (%u a second paced), the longest %.1f ms", slow,
+                       frames, 1.5 * std::chrono::duration<double, std::milli>(period).count(), cap, longest);
+        report = now + std::chrono::seconds(10);
+        frames = slow = 0;
+        longest = 0;
+    }
     next += period;
     if (next < now - period) next = now;
     while (clock::now() + std::chrono::milliseconds(2) < next) Sleep(1);
