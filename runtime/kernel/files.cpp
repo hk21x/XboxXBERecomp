@@ -701,24 +701,28 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
     return kSuccess;
 }
 
-// volume information of class cls into out; the bytes written in *written
-static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* written) {
+// volume information of class cls into out; the bytes written in *written. The disc is a DVD: 2048 byte sectors,
+// one to an allocation unit, none free (XGetDiskSectorSize("D:\\") reads its sector size, and a title may choose how
+// it reads its data by it)
+static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* written, bool disc) {
     std::memset(HostPtr(out), 0, len);
     *written = 0;
+    uint64_t units = disc ? 0x3A0000 : 0x100000, free = disc ? 0 : 0x80000;  // the disc: 7.25 GiB, a dual layer DVD
+    uint32_t sectors_per_unit = disc ? 1 : 32, sector = disc ? 2048 : 512;
     switch (cls) {
         case 3:  // FileFsSizeInformation: 16 GiB total, 8 GiB free in 16 KiB units
-            W64(out, 0x100000);
-            W64(out + 8, 0x80000);
-            W32(out + 0x10, 32);
-            W32(out + 0x14, 512);
+            W64(out, units);
+            W64(out + 8, free);
+            W32(out + 0x10, sectors_per_unit);
+            W32(out + 0x14, sector);
             *written = 0x18;
             return kSuccess;
         case 7:  // FileFsFullSizeInformation
-            W64(out, 0x100000);
-            W64(out + 8, 0x80000);
-            W64(out + 0x10, 0x80000);
-            W32(out + 0x18, 32);
-            W32(out + 0x1C, 512);
+            W64(out, units);
+            W64(out + 8, free);
+            W64(out + 0x10, free);
+            W32(out + 0x18, sectors_per_unit);
+            W32(out + 0x1C, sector);
             *written = 0x20;
             return kSuccess;
         case 1:  // FileFsVolumeInformation
@@ -740,7 +744,8 @@ static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* 
 
 KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
     uint32_t iosb = a[1], out = a[2], len = a[3], cls = a[4], n;
-    uint32_t status = QueryVolume(out, len, cls, &n);
+    auto f = FileFromHandle(a[0]);
+    uint32_t status = QueryVolume(out, len, cls, &n, f && f->cdrom);
     if (status == kSuccess) IoStatus(iosb, kSuccess, n);
     return status;
 }
@@ -777,7 +782,7 @@ KERNEL_EXPORT(76, IoQueryVolumeInformation, 5) {
     }
     if (!o || o->type != ObjType::File) return kInvalidHandle;
     uint32_t n;
-    uint32_t status = QueryVolume(a[3], a[2], a[1], &n);
+    uint32_t status = QueryVolume(a[3], a[2], a[1], &n, std::static_pointer_cast<File>(o)->cdrom);
     if (a[4]) W32(a[4], n);
     return status;
 }
