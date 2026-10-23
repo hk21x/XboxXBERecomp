@@ -754,7 +754,7 @@ uint32_t PresentVblanks() {
 // (the target becomes the front, texture 0 the back buffer, as the library sets them); FINISH shows the frame and
 // gives the back buffer and depth back as the target. 0 is COPY | FINISH. The count moves on once a frame.
 namespace {
-uint32_t SwapFrame(uint32_t swap_flags) {
+uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
     constexpr uint32_t kCopy = 1, kBypassCopy = 2, kFinish = 4;
     uint32_t flags = swap_flags ? swap_flags : kCopy | kFinish;
     if (!(flags & kFinish)) {
@@ -767,7 +767,16 @@ uint32_t SwapFrame(uint32_t swap_flags) {
         SetDev(kDevDepth, 0);
         g_state.rt = SurfaceOf(g_copy_target);
         g_state.zs = SurfaceOf(0);
-        for (uint32_t i = 0; i < 4; i++) g_state.textures[i] = i ? 0 : g_buffers[1];
+        // in the device's slots too, with their references: the title may read them back (Forza 0x1DB3C0 takes
+        // texture 0 with GetTexture2 and releases it)
+        for (uint32_t i = 0; i < 4; i++) {
+            uint32_t tex = i ? 0 : g_buffers[1], old = Dev(kDevTextures + i * 4);
+            g_state.textures[i] = tex;
+            if (tex == old) continue;
+            AddRef(ctx, tex);
+            SetDev(kDevTextures + i * 4, tex);
+            Release(ctx, old);
+        }
         W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
         uint32_t w, h;
         gpu::SurfaceSize(g_state.rt, w, h);
@@ -829,10 +838,10 @@ uint32_t SwapFrame(uint32_t swap_flags) {
 }
 }  // namespace
 
-HLE_STDCALL(D3DDevice_Swap, 1) { return SwapFrame(a[0]); }
+HLE_STDCALL(D3DDevice_Swap, 1) { return SwapFrame(ctx, a[0]); }
 // 3948: Present(source rect, dest rect, window, dirty region) is the swap, the rects unused on the console
 HLE_STDCALL(D3DDevice_Present, 4) {
-    SwapFrame(0);
+    SwapFrame(ctx, 0);
     return 0;
 }
 
