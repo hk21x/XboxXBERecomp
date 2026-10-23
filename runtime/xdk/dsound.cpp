@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "audio/audio.h"
@@ -30,6 +32,90 @@ X86Func* Find(uint32_t guest);
 #ifndef SYM_IDirectSoundBuffer_SetConeOrientation
 #define SYM_IDirectSoundBuffer_SetConeOrientation FFFFFF41
 #define HAS_IDirectSoundBuffer_SetConeOrientation 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_Use3DVoiceData
+#define SYM_IDirectSoundBuffer_Use3DVoiceData FFFFFF53
+#define HAS_IDirectSoundBuffer_Use3DVoiceData 0
+#endif
+#ifndef SYM_IDirectSoundStream_Use3DVoiceData
+#define SYM_IDirectSoundStream_Use3DVoiceData FFFFFF54
+#define HAS_IDirectSoundStream_Use3DVoiceData 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_Set3DVoiceData
+#define SYM_IDirectSoundBuffer_Set3DVoiceData FFFFFF55
+#define HAS_IDirectSoundBuffer_Set3DVoiceData 0
+#endif
+#ifndef SYM_IDirectSoundStream_Set3DVoiceData
+#define SYM_IDirectSoundStream_Set3DVoiceData FFFFFF56
+#define HAS_IDirectSoundStream_Set3DVoiceData 0
+#endif
+#ifndef SYM_IDirectSound_CreateSoundStream
+#define SYM_IDirectSound_CreateSoundStream FFFFFF42
+#define HAS_IDirectSound_CreateSoundStream 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_GetVoiceProperties
+#define SYM_IDirectSoundBuffer_GetVoiceProperties FFFFFF43
+#define HAS_IDirectSoundBuffer_GetVoiceProperties 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetConeAngles
+#define SYM_IDirectSoundBuffer_SetConeAngles FFFFFF44
+#define HAS_IDirectSoundBuffer_SetConeAngles 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetConeOutsideVolume
+#define SYM_IDirectSoundBuffer_SetConeOutsideVolume FFFFFF45
+#define HAS_IDirectSoundBuffer_SetConeOutsideVolume 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetDopplerFactor
+#define SYM_IDirectSoundBuffer_SetDopplerFactor FFFFFF46
+#define HAS_IDirectSoundBuffer_SetDopplerFactor 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetEG
+#define SYM_IDirectSoundBuffer_SetEG FFFFFF47
+#define HAS_IDirectSoundBuffer_SetEG 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetLFO
+#define SYM_IDirectSoundBuffer_SetLFO FFFFFF48
+#define HAS_IDirectSoundBuffer_SetLFO 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetPitch
+#define SYM_IDirectSoundBuffer_SetPitch FFFFFF49
+#define HAS_IDirectSoundBuffer_SetPitch 0
+#endif
+#ifndef SYM_IDirectSoundStream_FlushEx
+#define SYM_IDirectSoundStream_FlushEx FFFFFF4A
+#define HAS_IDirectSoundStream_FlushEx 0
+#endif
+#ifndef SYM_IDirectSoundStream_GetVoiceProperties
+#define SYM_IDirectSoundStream_GetVoiceProperties FFFFFF4B
+#define HAS_IDirectSoundStream_GetVoiceProperties 0
+#endif
+#ifndef SYM_IDirectSoundStream_SetLFO
+#define SYM_IDirectSoundStream_SetLFO FFFFFF4C
+#define HAS_IDirectSoundStream_SetLFO 0
+#endif
+#ifndef SYM_IDirectSoundStream_SetOutputBuffer
+#define SYM_IDirectSoundStream_SetOutputBuffer FFFFFF4D
+#define HAS_IDirectSoundStream_SetOutputBuffer 0
+#endif
+#ifndef SYM_IDirectSoundStream_SetPitch
+#define SYM_IDirectSoundStream_SetPitch FFFFFF4E
+#define HAS_IDirectSoundStream_SetPitch 0
+#endif
+#ifndef SYM_XAudioSetEffectData
+#define SYM_XAudioSetEffectData FFFFFF4F
+#define HAS_XAudioSetEffectData 0
+#endif
+#ifndef SYM_XAudioCalculatePitch
+#define SYM_XAudioCalculatePitch FFFFFF50
+#define HAS_XAudioCalculatePitch 0
+#endif
+#ifndef SYM_XAudioCreatePcmFormat
+#define SYM_XAudioCreatePcmFormat FFFFFF51
+#define HAS_XAudioCreatePcmFormat 0
+#endif
+#ifndef SYM_XAudioCreateAdpcmFormat
+#define SYM_XAudioCreateAdpcmFormat FFFFFF52
+#define HAS_XAudioCreateAdpcmFormat 0
 #endif
 #ifndef SYM_IDirectSound_SynchPlayback
 #define SYM_IDirectSound_SynchPlayback FFFFFF00
@@ -522,6 +608,52 @@ float F32(uint32_t v) {
     return f;
 }
 
+// the audio processor's counter of 48 kHz samples, counted from the first use
+uint32_t SampleTime() {
+    constexpr uint64_t kSampleRate = 48000;
+    static const auto start = std::chrono::steady_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+    return uint32_t(uint64_t(us) * kSampleRate / 1000000);
+}
+
+// XACT reads the counter's register itself (Forza: 0x42FDD3): its page is mapped, and a host thread keeps the
+// register at the sample time, a millisecond (48 samples) at most behind
+void MapSampleCounter() {
+    constexpr uint32_t kPage = 0xFE802000, kCounter = 0xFE80200C;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (!mem::Commit(kPage, 0x1000)) {
+            LOGW("dsound: cannot map the sample counter page %08X", kPage);
+            return;
+        }
+        W32(kCounter, SampleTime());
+        std::thread([] {
+            for (;;) {
+                W32(kCounter, SampleTime());
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }).detach();
+    });
+}
+
+// pitch: 4096 per octave from 48 kHz, as DSOUND counts it; frequency in Hz
+uint32_t PitchToFreq(int32_t pitch) { return uint32_t(std::lround(48000.0 * std::exp2(pitch / 4096.0))); }
+int32_t FreqToPitch(uint32_t hz) { return hz ? int32_t(std::lround(4096.0 * std::log2(hz / 48000.0))) : 0; }
+
+// DSVOICEPROPS: mix bin count, 8 (bin, volume) pairs, pitch, I3DL2 direct and room volumes
+void VoiceProps(const Voice& v, uint32_t out) {
+    uint32_t n = v.nbins ? v.nbins : 2;
+    W32(out, n);
+    for (uint32_t i = 0; i < 8; i++) {
+        uint32_t b = i < n ? (v.nbins ? v.bin[i] : i) : 0;
+        W32(out + 4 + i * 8, i < n ? b : 0);
+        W32(out + 8 + i * 8, i < n ? uint32_t(v.bin_mb[b]) : 0);
+    }
+    W32(out + 0x44, uint32_t(FreqToPitch(v.freq ? v.freq : v.rate)));
+    W32(out + 0x48, 0);
+    W32(out + 0x4C, 0);
+}
+
 }  // namespace
 
 // device
@@ -555,7 +687,15 @@ static void AuditExports() {
         SYM(CDirectSoundStream_SetMixBinVolumes), SYM(CDirectSoundStream_SetMixBins), SYM(CDirectSoundStream_SetMaxDistance),
         SYM(CDirectSoundStream_SetMinDistance), SYM(CDirectSoundStream_SetPosition), SYM(CDirectSoundStream_SetVelocity),
         SYM(CDirectSoundStream_SetI3DL2Source), SYM(CDirectSoundStream_SetDopplerFactor), SYM(IDirectSoundStream_SetEG),
-        SYM(DirectSoundGetSampleTime)};
+        SYM(DirectSoundGetSampleTime), SYM(IDirectSound_CreateSoundStream), SYM(IDirectSoundBuffer_GetVoiceProperties),
+        SYM(IDirectSoundBuffer_SetConeAngles), SYM(IDirectSoundBuffer_SetConeOutsideVolume),
+        SYM(IDirectSoundBuffer_SetDopplerFactor), SYM(IDirectSoundBuffer_SetEG), SYM(IDirectSoundBuffer_SetLFO),
+        SYM(IDirectSoundBuffer_SetPitch), SYM(IDirectSoundStream_GetVoiceProperties),
+        SYM(IDirectSoundStream_SetLFO), SYM(IDirectSoundStream_SetOutputBuffer), SYM(IDirectSoundStream_SetPitch),
+        SYM(XAudioSetEffectData),
+        // their console code is right as it is: FlushEx only calls CDirectSoundStream_FlushEx, the rest are format
+        // and pitch arithmetic on no DSOUND object
+        SYM(IDirectSoundStream_FlushEx), SYM(XAudioCalculatePitch), SYM(XAudioCreatePcmFormat), SYM(XAudioCreateAdpcmFormat)};
     std::string left;
     // the library's own section: the WMA decoder shares the export ids and touches no DSOUND object
     uint32_t lo = 0, hi = 0;
@@ -579,6 +719,7 @@ static void AuditExports() {
 HLE_STDCALL(DirectSoundCreate, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Start();
+    MapSampleCounter();
     if (!g_ds) {
         AuditExports();
         g_ds = mem::AllocSystem(0x40);
@@ -588,13 +729,16 @@ HLE_STDCALL(DirectSoundCreate, 3) {
     return 0;
 }
 HLE_STDCALL(IDirectSound_Release, 1) { return 0; }
-HLE_STDCALL(DirectSoundUseFullHRTF, 0) { return 0; }
-HLE_STDCALL(DirectSoundUseLightHRTF, 0) { return 0; }
+// DirectSoundUseFullHRTF and DirectSoundUseLightHRTF run their console code: they fill the table of 3D routines
+// (Forza 0x410640) under DSOUND's statically initialised lock, and XACT calls the 3D calculation (0x3F44C5) that
+// uses the table itself, on its own listener and source records
 HLE_STDCALL(IDirectSound_GetSpeakerConfig, 2) {
     W32(a[1], 0);  // DSSPEAKER_STEREO
     return 0;
 }
 HLE_STDCALL(IDirectSound_SetEffectData, 6) { return 0; }
+// (effect index, description, raw data out): the effects image is not run, as IDirectSound_SetEffectData
+HLE_STDCALL(XAudioSetEffectData, 3) { return 0; }
 HLE_STDCALL(IDirectSound_EnableHeadphones, 2) { return 0; }
 HLE_STDCALL(IDirectSound_SetMixBinHeadroom, 3) { return 0; }
 HLE_STDCALL(IDirectSound_CommitDeferredSettings, 1) { return 0; }
@@ -699,12 +843,7 @@ HLE_STDCALL(IDirectSound_CreateSoundBuffer, 4) { return NewBuffer(a[1], a[2], R3
 
 // DirectSoundGetSampleTime(): the audio processor's global counter of 48 kHz samples (register 0xFE80200C), which
 // titles time things by (menu animations, for one). Counted from the first call.
-HLE_STDCALL(DirectSoundGetSampleTime, 0) {
-    constexpr uint64_t kSampleRate = 48000;
-    static const auto start = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
-    return uint32_t(uint64_t(us) * kSampleRate / 1000000);
-}
+HLE_STDCALL(DirectSoundGetSampleTime, 0) { return SampleTime(); }
 
 #define BUFFER(name, nargs)                                 \
     static uint32_t buf_##name(Voice& v, const Args& a);    \
@@ -828,6 +967,26 @@ BUFFER(SetFrequency, 2) {
     v.freq = a[1];
     return 0;
 }
+BUFFER(SetPitch, 2) {
+    v.freq = PitchToFreq(int32_t(a[1]));
+    return 0;
+}
+BUFFER(GetVoiceProperties, 2) {
+    VoiceProps(v, a[1]);
+    return 0;
+}
+// envelopes, the LFO, cones and Doppler are not modelled: (this, description) and (this, values..., apply)
+BUFFER(SetEG, 2) { return 0; }
+BUFFER(SetLFO, 2) { return 0; }
+BUFFER(SetConeAngles, 4) { return 0; }
+BUFFER(SetConeOutsideVolume, 3) { return 0; }
+BUFFER(SetDopplerFactor, 3) { return 0; }
+// (this, 3D voice data or null): sets or clears a flag of the console voice; the name is inferred (no .XTLID
+// entry), from that and from its user, XACT's 3D voices (Forza 0x3F2FF1 and the stream's 0x3F3057)
+BUFFER(Use3DVoiceData, 2) { return 0; }
+// (this, 3D voice data: flags, then the values they select): copied into the console voice's 3D block, which a host
+// voice does not have; XACT calls it after its own 3D calculation (Forza 0x3F2FD5, the stream's 0x3F3052)
+BUFFER(Set3DVoiceData, 2) { return 0; }
 BUFFER(SetFilter, 2) { return 0; }
 BUFFER(SetHeadroom, 2) {
     v.headroom = Db(-int32_t(a[1]));
@@ -886,12 +1045,16 @@ BUFFER(SetFormat, 2) {
 
 // streams, the object carries the XDK's own vtable
 
-HLE_STDCALL(DirectSoundCreateStream, 2) {
+static uint32_t NewStream(uint32_t desc, uint32_t out, uint32_t caller);
+HLE_STDCALL(DirectSoundCreateStream, 2) { return NewStream(a[0], a[1], R32(ctx.esp)); }
+// (this, description, stream out, unknown)
+HLE_STDCALL(IDirectSound_CreateSoundStream, 4) { return NewStream(a[1], a[2], R32(ctx.esp)); }
+
+static uint32_t NewStream(uint32_t desc, uint32_t out, uint32_t caller) {
     XDK_REQUIRE("dsound", XDK_KEY(CDirectSoundStream_Vtable), XDK_KEY(CDirectSoundStream_Vtable2),
                 XDK_DATA(DSound_StreamVtable), XDK_DATA(DSound_StreamVtable2));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Start();
-    uint32_t desc = a[0];
     uint32_t obj = mem::AllocSystem(0x80);
     std::memset(HostPtr(obj), 0, 0x80);
     W32(obj + XDK_CDirectSoundStream_Vtable, kStreamVtable);
@@ -907,8 +1070,8 @@ HLE_STDCALL(DirectSoundCreateStream, 2) {
     SetBins(v, R32(desc + 20));
     v.is3d = flags & 0x10;  // DSBCAPS_CTRL3D
     v.headroom = DefaultHeadroom(flags);
-    LogVoice("stream", v, flags, 0, R32(desc + 20), R32(ctx.esp));
-    W32(a[1], obj);
+    LogVoice("stream", v, flags, 0, R32(desc + 20), caller);
+    W32(out, obj);
     return 0;
 }
 
@@ -1012,8 +1175,26 @@ STREAM(SetFrequency, 2) {
     return 0;
 }
 STREAM(SetFilter, 2) { return 0; }
-// the library's own writes voice registers a host stream does not have; envelopes are not played
+// the library's own writes voice registers a host stream does not have; envelopes and the LFO are not played
 HLE_STDCALL(IDirectSoundStream_SetEG, 2) { return 0; }
+HLE_STDCALL(IDirectSoundStream_SetLFO, 2) { return 0; }
+HLE_STDCALL(IDirectSoundStream_Use3DVoiceData, 2) { return 0; }
+HLE_STDCALL(IDirectSoundStream_Set3DVoiceData, 2) { return 0; }
+HLE_STDCALL(IDirectSoundStream_SetOutputBuffer, 2) { return 0; }  // the voice keeps its own mix bins
+HLE_STDCALL(IDirectSoundStream_SetPitch, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Voice* v = Find(a[0]);
+    if (!v) return 0x80004005u;
+    v->freq = PitchToFreq(int32_t(a[1]));
+    return 0;
+}
+HLE_STDCALL(IDirectSoundStream_GetVoiceProperties, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Voice* v = Find(a[0]);
+    if (!v) return 0x80004005u;
+    VoiceProps(*v, a[1]);
+    return 0;
+}
 STREAM(SetHeadroom, 2) {
     v.headroom = Db(-int32_t(a[1]));
     return 0;
