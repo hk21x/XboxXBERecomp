@@ -70,6 +70,7 @@ struct View {
     DWORD type = 0;
     bool ffb = false, ok = false;
     int axes = 0, buttons = 0, povs = 0;
+    uint8_t axis_mask = 0;  // which of DIJOYSTATE2's eight axes the device has (Axis's order)
     DIJOYSTATE2 state{};
 };
 
@@ -212,6 +213,20 @@ bool IsXInput(IDirectInputDevice8W* dev) {
     std::wstring path = p.wszPath;
     for (wchar_t& c : path) c = wchar_t(std::towupper(c));
     return path.find(L"IG_") != std::wstring::npos;
+}
+
+// the axes a device has, by type: X Y Z Rx Ry Rz, then its sliders in order (DIJOYSTATE2's two)
+struct AxisScan {
+    uint8_t mask = 0;
+    int sliders = 0;
+};
+BOOL CALLBACK CollectAxis(const DIDEVICEOBJECTINSTANCEW* o, void* out) {
+    auto* scan = static_cast<AxisScan*>(out);
+    const GUID* kTypes[6] = {&GUID_XAxis, &GUID_YAxis, &GUID_ZAxis, &GUID_RxAxis, &GUID_RyAxis, &GUID_RzAxis};
+    for (int i = 0; i < 6; i++)
+        if (IsEqualGUID(o->guidType, *kTypes[i])) scan->mask |= uint8_t(1u << i);
+    if (IsEqualGUID(o->guidType, GUID_Slider) && scan->sliders < 2) scan->mask |= uint8_t(1u << (6 + scan->sliders++));
+    return DIENUM_CONTINUE;
 }
 
 BOOL CALLBACK Collect(const DIDEVICEINSTANCEW* d, void* out) {
@@ -374,12 +389,19 @@ void Scan() {
         d.view.buttons = int(caps.dwButtons);
         d.view.povs = int(caps.dwPOVs);
         d.view.ffb = (caps.dwFlags & DIDC_FORCEFEEDBACK) != 0;
+        AxisScan axes;
+        dev->EnumObjects(CollectAxis, &axes, DIDFT_AXIS);
+        d.view.axis_mask = axes.mask ? axes.mask : 0xFF;  // none listed: all eight looked at
         SetRange(dev);
         g.devs.push_back(d);
         SetMode(g.devs.back(), false);
-        LOGR("wheel: %s (USB %04X:%04X, %s), %lu axes, %lu buttons, %lu hats, force feedback %s", name.c_str(),
-             vidpid & 0xFFFF, vidpid >> 16, TypeName(inst.dwDevType), caps.dwAxes, caps.dwButtons, caps.dwPOVs,
-             d.view.ffb ? "offered" : "none");
+        std::string axis_names;
+        const char* kNames[8] = {"X", "Y", "Z", "Rx", "Ry", "Rz", "slider 1", "slider 2"};
+        for (int a = 0; a < 8; a++)
+            if (d.view.axis_mask >> a & 1) axis_names += std::string(axis_names.empty() ? "" : " ") + kNames[a];
+        LOGR("wheel: %s (USB %04X:%04X, %s), %lu axes (%s), %lu buttons, %lu hats, force feedback %s", name.c_str(),
+             vidpid & 0xFFFF, vidpid >> 16, TypeName(inst.dwDevType), caps.dwAxes, axis_names.c_str(), caps.dwButtons,
+             caps.dwPOVs, d.view.ffb ? "offered" : "none");
     }
 }
 
@@ -607,6 +629,7 @@ WheelInfo Wheel() {
         d.ffb = v.ffb;
         d.feedback = int(i) == s.ffb_dev;
         d.axes_count = v.axes;
+        d.axis_mask = v.axis_mask;
         d.buttons_count = v.buttons;
         d.povs_count = v.povs;
         if (v.ok) {

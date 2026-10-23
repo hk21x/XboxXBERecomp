@@ -52,7 +52,7 @@ Environment:
   (`REF_DRAWLOG=2` adds constant changes). With it: `REF_ZOWNER` which shader's depth stopped each failed pixel and
   by how much; `REF_VERTS_VS=handle` / `REF_VERTS_T0=texture` that shader's (or texture's) vertices; `REF_NODEPTH_VS`
   that shader without the depth test; `REF_NO_WBUFFER` W-buffered draws as z / w
-- `CAP=N` every Nth frame's draws listed in `cap/draws_<frame>.txt`
+- `CAP=N` every Nth frame's draws listed in `cap/draws_<frame>.txt` (each with its viewport, `vp=x,y,wxh`)
 - `AUDIT=N` every Nth frame's draws: each shader the D3D12 backend would generate into `cap/hlsl/`, each texture
   sampled into `cap/textures.txt` with how far each mip level is from its parent shrunk (`audit.cpp`)
 - `PROBES="x,y x,y"` log every colour the reference renderer writes at those pixels of linear `PROBE_WIDTH` (640) wide

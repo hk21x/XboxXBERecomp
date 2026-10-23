@@ -47,6 +47,7 @@ struct WheelDevice {  // one device, as the settings window shows it
     bool ffb = false;        // it offers force feedback
     bool feedback = false;   // the forces go to it (the steering's device)
     int axes_count = 0, buttons_count = 0, povs_count = 0;
+    uint8_t axis_mask = 0;   // the axes it has, a bit each in the order below (a pedal box may have Z, Rz and a slider)
     int32_t axes[8] = {};    // raw, -32768 to 32767: X Y Z Rx Ry Rz slider 1, slider 2
     std::vector<int> pressed;  // buttons held
     int pov = -1;            // its first hat in hundredths of a degree, -1 centred
