@@ -119,6 +119,7 @@ struct File : Object {
     bool listed = false;
     bool delete_on_close = false;
     int partition = 0;  // a hard disk partition opened whole: raw volume I/O, 1 to 5
+    bool cdrom = false;  // on the disc, as an image or a folder
     std::mutex io;  // threads sharing a handle: seek and transfer stay together
     File() : Object(ObjType::File) {}
     ~File() override {
@@ -295,6 +296,7 @@ struct Target {
     bool disc = false;                   // on the mounted disc image
     const Disc::Entry* entry = nullptr;  // there: the file or folder, null when missing
     int partition = 0;                   // the path is a whole hard disk partition, 1 to 5
+    bool cdrom = false;                  // on the disc, as an image or a folder
 };
 
 Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
@@ -333,11 +335,11 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
     for (auto& part : parts)
         if (part.find(':') != std::string::npos) return {};
     if (best->first == kCdRom)
-        if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts)};
+        if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts), 0, true};
     int partition = 0;
     if (parts.empty() && best->first.compare(0, kPartitionPrefix.size(), kPartitionPrefix) == 0)
         partition = best->first.back() - '0';
-    return {MatchCase(best->second, parts).string(), false, nullptr, partition};
+    return {MatchCase(best->second, parts).string(), false, nullptr, partition, best->first == kCdRom};
 }
 
 // the disc image is read only: nothing on it is created, replaced or written
@@ -490,6 +492,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     f->host = host;
     f->xbox = Normalize(name);
     f->fp = fp;
+    f->cdrom = t.cdrom;
     f->delete_on_close = options & 0x1000;  // FILE_DELETE_ON_CLOSE
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, info);
@@ -516,6 +519,7 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     f->xbox = Normalize(name);
     f->dir = fs::is_directory(host, ec);
     f->partition = t.partition;
+    f->cdrom = t.cdrom;
     if (!f->dir) {
         f->fp = std::fopen(host.c_str(), "r+b");
         if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
@@ -595,7 +599,10 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     }
     f->pos = pos + n;
     if (write && n < len) return Finish(*f, 0xC000007F, n, event, apc, apc_ctx, iosb);  // disk full
-    if (!write && len && !n) return Finish(*f, kEndOfFile, 0, event, apc, apc_ctx, iosb);
+    // a disc read from the end on completes with nothing read and no error: Forza reads ahead past the end of a file
+    // with overlapped reads and treats a failed wait for one as a damaged disc (0x284470)
+    if (!write && len && !n)
+        return Finish(*f, f->entry || f->cdrom ? kSuccess : kEndOfFile, 0, event, apc, apc_ctx, iosb);
     return Finish(*f, kSuccess, n, event, apc, apc_ctx, iosb);
 }
 
