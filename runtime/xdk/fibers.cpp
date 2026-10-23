@@ -70,7 +70,7 @@ uint32_t TlsBlock(const X86Context& ctx) {
     LOGI("fibers: fiber %08X starts at %08X (%08X)", f->record, start, R32(f->record));
     CallGuest(f->ctx, start, {R32(f->record)});
     LOGI("fibers: fiber %08X returned, its thread exits", f->record);
-    ExitThread(0);
+    kernel::ExitThread(0);
 }
 
 #ifdef _WIN32
