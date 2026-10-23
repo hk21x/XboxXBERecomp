@@ -42,8 +42,8 @@ struct Settings {
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
     // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,
     // named by the device (and its instance, telling two of the same apart), then an axis (0-7: X Y Z Rx Ry Rz,
-    // slider 1, slider 2) or a button (0-127). No device: the wheel found by itself (the first driving device, else the
-    // first with force feedback). A pedal reads 0 at rest and 1 at full, from those raw values (-32768 to 32767).
+    // slider 1, slider 2) or a button (0-127). No device: the wheel found by itself (the first driving device; other
+    // devices are bound by name). A pedal reads 0 at rest and 1 at full, from those raw values (-32768 to 32767).
     struct WheelBind {
         std::string device, guid;
         int32_t axis = -1, button = -1;
