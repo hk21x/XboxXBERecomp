@@ -6,6 +6,9 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #include "kernel/disc.h"
 #include "kernel/kernel.h"
@@ -67,6 +70,42 @@ fs::path MatchCase(const fs::path& dir, const std::vector<std::string>& parts) {
     return cur;
 }
 
+// FATX never clears a cluster: a file truncated by an overwriting open and extended again by a size set gets its old
+// bytes back, as the clusters it frees and takes again still hold them. Forza copies each cache file, then recreates it
+// at its size (CreateFile CREATE_ALWAYS, SetEndOfFile) and reads the copy. The old bytes are kept per host path until
+// the file is written or a handle to it closes.
+std::mutex g_stale_lock;
+std::unordered_map<std::string, std::vector<char>> g_stale;
+
+void KeepStale(const std::string& host) {
+    std::error_code ec;
+    uint64_t size = fs::file_size(host, ec);
+    if (ec || !size || size > (256u << 20)) return;
+    std::vector<char> bytes(size);
+    std::ifstream in(host, std::ios::binary);
+    if (!in.read(bytes.data(), std::streamsize(size))) return;
+    std::lock_guard<std::mutex> lock(g_stale_lock);
+    g_stale[host] = std::move(bytes);
+}
+
+void DropStale(const std::string& host) {
+    std::lock_guard<std::mutex> lock(g_stale_lock);
+    if (!g_stale.empty()) g_stale.erase(host);
+}
+
+// a file grown from old_size: its old bytes in that range, as FATX gives them back
+void RestoreStale(const std::string& host, FILE* fp, uint64_t old_size, uint64_t size) {
+    std::lock_guard<std::mutex> lock(g_stale_lock);
+    auto it = g_stale.find(host);
+    if (it == g_stale.end() || old_size >= std::min<uint64_t>(size, it->second.size())) return;
+    uint64_t end = std::min<uint64_t>(size, it->second.size());
+    std::fseek(fp, long(old_size), SEEK_SET);
+    std::fwrite(it->second.data() + old_size, 1, size_t(end - old_size), fp);
+    std::fflush(fp);
+    LOGI("files: %s extended to %llu bytes over its old clusters", fs::path(host).filename().string().c_str(),
+         (unsigned long long)size);
+}
+
 struct File : Object {
     fs::path host;
     std::string xbox;
@@ -83,7 +122,10 @@ struct File : Object {
     std::mutex io;  // threads sharing a handle: seek and transfer stay together
     File() : Object(ObjType::File) {}
     ~File() override {
-        if (fp) std::fclose(fp);
+        if (fp) {
+            std::fclose(fp);
+            DropStale(host.string());
+        }
         if (delete_on_close) {
             std::error_code ec;
             fs::remove(host, ec);
@@ -436,6 +478,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
         IoStatus(iosb, kObjectPathNotFound, 0);
         return kObjectPathNotFound;
     }
+    if (exists && (disposition == 0 || disposition == 4 || disposition == 5)) KeepStale(host);
     FILE* fp = std::fopen(host.c_str(), mode);
     if (!fp && std::string(mode) == "r+b") fp = std::fopen(host.c_str(), "rb");  // read only media
     if (!fp) {
@@ -539,6 +582,7 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     std::lock_guard<std::mutex> lock(f->io);
     uint64_t pos = Offset(*f, off);
     if (f->fp) Seek(f->fp, pos);
+    if (write && f->fp) DropStale(f->host.string());
     uint32_t n = 0;
     while (n < len) {
         uint32_t at = pages ? R32(pages + n / 0x1000 * 8) + n % 0x1000 : buf + n;
@@ -623,6 +667,7 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
                 std::fflush(f->fp);
                 uint64_t size = fs::file_size(f->host, ec);
                 if (cls == 20 || R64(in) < size) fs::resize_file(f->host, R64(in), ec);
+                if (!ec && R64(in) > size) RestoreStale(f->host.string(), f->fp, size, R64(in));
             }
             break;
         case 13:  // disposition
