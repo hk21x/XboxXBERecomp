@@ -144,10 +144,11 @@ private:
     // one draw's state, textures, transforms, declaration and first vertex
     void List(const State& s, uint32_t prim, uint32_t start, uint32_t count) {
         FILE* f = list_;
-        std::fprintf(f, "DRAW prim=%u n=%u vs=%X ps=%X rt=%08X zs=%08X tex0=%08X light=%u blend=%u %X %X cw=%X at=%u z=%u zf=%X\n", prim, count,
+        std::fprintf(f, "DRAW prim=%u n=%u vs=%X ps=%X rt=%08X zs=%08X tex0=%08X light=%u blend=%u %X %X cw=%X at=%u z=%u zf=%X vp=%u,%u,%ux%u\n", prim, count,
                      s.vs_handle, s.ps ? s.ps->handle : 0, s.rt.data, s.zs.data, s.textures[0], s.rs[kRsLighting], s.simple[kMBlendEnable >> 2],
                      s.simple[kMSrcBlend >> 2], s.simple[kMDestBlend >> 2], s.simple[kMColorWriteEnable >> 2],
-                     s.simple[kMAlphaTestEnable >> 2], s.rs[kRsZEnable], s.simple[kMZFunc >> 2]);
+                     s.simple[kMAlphaTestEnable >> 2], s.rs[kRsZEnable], s.simple[kMZFunc >> 2],
+                     s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h);
         const auto& t0 = s.tss[0];
         TextureDesc d;
         if (s.textures[0] && Describe(s.textures[0], d))
