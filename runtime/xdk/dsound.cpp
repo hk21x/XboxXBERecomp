@@ -237,15 +237,23 @@ void Levels(Voice& v, float g[2][2]) {
     const uint8_t* bin = v.nbins ? v.bin : kFront;
     uint32_t n = v.nbins ? v.nbins : 2, voices = (std::max<uint32_t>(v.channels, 1) - 1) / 2 + 1;
     uint32_t per = std::max<uint32_t>(n / voices, 2), step = v.channels == 1 ? 1 : 2;
+    // an audible speaker bin: the effect sends are left out (their effects are not modelled). With none, the sends stand
+    // in for what the effects would put out: PGR2's radio goes to FXSEND 14 alone, its speaker bins at -10000, and the
+    // DSP image plays it into the speakers. Heard dry, left and right kept.
     bool speakers = false;
-    for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3;
+    for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3 && (!v.nbins || v.bin_mb[bin[s]] > -10000);
+    const bool sends_stereo = !speakers && v.channels == 2;
     for (uint32_t c = 0; c < 2; c++) {
         g[c][0] = g[c][1] = 0;
         for (uint32_t s = c; c < v.channels && s < per && s < n; s += step) {
             uint32_t b = bin[s];
             if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
             float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f) * kMixBinGain;
-            // even bins are left, odd right, 2 is the centre
+            // even bins are left, odd right, 2 is the centre; effect sends standing in: each channel on its own side
+            if (sends_stereo) {
+                g[c][c] = std::max(g[c][c], x);
+                continue;
+            }
             if (!speakers || b == 2 || !(b & 1)) g[c][0] = std::max(g[c][0], x);
             if (!speakers || b == 2 || (b & 1)) g[c][1] = std::max(g[c][1], x);
         }
@@ -312,6 +320,21 @@ void Render(float* out, uint32_t frames) {
             }
         }
         LOGI("dsound: %u voices playing, loud:%s", n, top.c_str());
+        // XBE_DSOUND_LOG=2: every stream holding packets, whatever its level (a stream that plays nothing audible)
+        static const bool all = [] {
+            const char* e = std::getenv("XBE_DSOUND_LOG");
+            return e && *e == '2';
+        }();
+        for (auto& [obj, v] : g_voices) {
+            if (!all || !v.stream || v.packets.empty()) continue;
+            float g[2][2];
+            Levels(v, g);
+            std::string bins;
+            for (uint32_t b = 0; b < v.nbins; b++) bins += " " + std::to_string(v.bin[b]) + ":" + std::to_string(v.bin_mb[v.bin[b]]);
+            LOGI("dsound:   stream %08X tag %X %u ch %uHz freq %u vol %.3f head %.2f gain %.3f/%.3f %s%s%s packets %zu bins%s", obj,
+                 v.tag, v.channels, v.rate, v.freq, v.volume, v.headroom, g[0][0], g[0][1], v.paused ? "paused " : "",
+                 v.sync ? "sync " : "", v.active ? "active" : "idle", v.packets.size(), bins.c_str());
+        }
     }
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
