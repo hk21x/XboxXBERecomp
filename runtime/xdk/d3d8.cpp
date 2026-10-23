@@ -357,30 +357,46 @@ using namespace d3d;
 // device
 
 namespace {
+// a surface object the title made and put in D3DPRESENT_PARAMETERS (BufferSurfaces, DepthStencilSurface), else 0
+uint32_t GivenSurface(uint32_t at) {
+    uint32_t s = R32(at);
+    return s && mem::IsCommitted(s) && mem::IsCommitted(s + 23) && (R32(s) >> 16 & 7) == 5 ? s : 0;
+}
+
 // the swap chain and auto depth buffer a D3DPRESENT_PARAMETERS at pp asks for, made the device's targets. The same
-// parameters again keep the buffers, so surfaces a title still holds stay valid; true when they are new.
+// parameters again keep the buffers, so surfaces a title still holds stay valid; true when they are new. Frame
+// buffers the title made itself (BufferSurfaces, back buffer first, and DepthStencilSurface) are made over: their
+// objects become the buffers, in this size and format (a supersampled size is not kept: the renderer scales instead).
 bool MakeFrameBuffers(uint32_t pp) {
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
+    uint32_t given[3] = {GivenSurface(pp + 0x34), GivenSurface(pp + 0x38), GivenSurface(pp + 0x3C)};
+    uint32_t given_depth = GivenSurface(pp + 0x40);
+    if (given_depth && !auto_depth) depth_fmt = R32(given_depth + 12) >> 8 & 0xFF;
     if (!w) w = 640;
     if (!h) h = 480;
-    static uint32_t made[5];
-    uint32_t want[5] = {w, h, fmt, count, auto_depth ? depth_fmt : 0xFFFFFFFFu};
+    static uint32_t made[7];
+    uint32_t want[7] = {w, h, fmt, count, auto_depth || given_depth ? depth_fmt : 0xFFFFFFFFu, given[0], given_depth};
     bool fresh = !g_buffers[1] || std::memcmp(made, want, sizeof made);
     if (fresh) {
         uint32_t color_fmt = gpu::LinearColorFormat(fmt);
         g_buffer_count = std::min<uint32_t>(count + 1, 3);
-        // in the device (3948) the back buffer is slot 0 and the front slot 1, as its GetBackBuffer counts them
+        // in the device (3948) the back buffer is slot 0 and the front slot 1, as its GetBackBuffer counts them;
+        // BufferSurfaces count the same way
         constexpr uint32_t kSlot[3] = {1, 0, 2};
         for (uint32_t i = 0; i < g_buffer_count; i++)
             g_buffers[i] = NewSurface(w, h, color_fmt, 4,
-                                      XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0 : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
+                                      given[kSlot[i]]                              ? given[kSlot[i]]
+                                      : XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0
+                                                                                   : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
         g_copy_target = NewSurface(w, h, color_fmt, 4);
         g_depth = 0;
-        if (auto_depth) {
+        if (auto_depth || given_depth) {
             uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
             g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4,  // 0x30 LIN_D16, 0x31 LIN_F16
-                                 XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0 : kDevice + XDK_CDevice_AutoDepthSurface);
+                                 given_depth                                     ? given_depth
+                                 : XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0
+                                                                                 : kDevice + XDK_CDevice_AutoDepthSurface);
         }
         std::memcpy(made, want, sizeof made);
     }
