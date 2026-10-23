@@ -470,8 +470,11 @@ struct VertexProgram {
     }
 };
 
-float FogAmount(const State& s, float d) {
+// table mode none under a vertex program: oFog is the factor itself, as the GPU renderers take it (Forza's track
+// shaders blend to the fog colour by it in the final combiner and write 0 near the camera)
+float FogAmount(const State& s, float d, bool program = false) {
     if (!s.rs[kRsFogEnable]) return 1;
+    if (program && s.rs[kRsFogTableMode] == 0) return std::clamp(d, 0.0f, 1.0f);
     float start = AsFloat(s.rs[kRsFogStart]), end = AsFloat(s.rs[kRsFogEnd]), density = AsFloat(s.rs[kRsFogDensity]);
     switch (s.rs[kRsFogTableMode]) {
         case 1: return std::exp(-d * density);
@@ -1229,7 +1232,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             o.attr[kD1] = vp.out[4];
             o.attr[kB0] = vp.out[7];
             o.attr[kB1] = vp.out[8];
-            o.attr[kFog] = Splat(FogAmount(s, vp.out[5][0]));
+            o.attr[kFog] = Splat(FogAmount(s, vp.out[5][0], true));
             for (int t = 0; t < 4; t++) o.attr[kT0 + t] = vp.out[9 + t];
             if (sprites) point_size[vi] = vp.out[6][0];
         } else {
