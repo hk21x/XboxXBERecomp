@@ -336,8 +336,20 @@ void Render(float* out, uint32_t frames) {
                  v.sync ? "sync " : "", v.active ? "active" : "idle", v.packets.size(), bins.c_str());
         }
     }
+    // XBE_DSOUND_SOLO_TAG=format tag, XBE_DSOUND_SOLO=voice object (hex): only those voices mixed, to hear (or record with
+    // the harness's WAV) one sound alone
+    static const long solo_tag = [] {
+        const char* e = std::getenv("XBE_DSOUND_SOLO_TAG");
+        return e ? std::strtol(e, nullptr, 0) : -1L;
+    }();
+    static const uint32_t solo_obj = [] {
+        const char* e = std::getenv("XBE_DSOUND_SOLO");
+        return e ? uint32_t(std::strtoul(e, nullptr, 16)) : 0u;
+    }();
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
+        if (solo_tag >= 0 && long(v.tag) != solo_tag) continue;
+        if (solo_obj && obj != solo_obj) continue;
         float g[2][2];
         Levels(v, g);
         uint32_t base = v.data + v.play_start;
@@ -936,6 +948,7 @@ STREAM(AddRef, 1) { return uint32_t(++v.refs); }
 STREAM(SetFormat, 2) {
     FlushStream(v);
     ReadFormat(v, a[1]);
+    if (DsoundLog()) LOG_FIRST(64, "dsound: SetFormat %08X tag %X, %u ch, %u Hz", v.obj, v.tag, v.channels, v.rate);
     v.freq = 0;  // the XDK sets the pitch back to the new format's own rate
     v.block = -1;
     return 0;
