@@ -84,6 +84,14 @@ using namespace kernel;
 #define SYM_D3DDevice_SetVertexShaderInputDirect FFFFFE08
 #define HAS_D3DDevice_SetVertexShaderInputDirect 0
 #endif
+#ifndef SYM_D3DDevice_SetBackBufferScale
+#define SYM_D3DDevice_SetBackBufferScale FFFFFE0F
+#define HAS_D3DDevice_SetBackBufferScale 0
+#endif
+#ifndef SYM_D3DDevice_UpdateOverlay
+#define SYM_D3DDevice_UpdateOverlay FFFFFE0E
+#define HAS_D3DDevice_UpdateOverlay 0
+#endif
 #ifndef SYM_D3DDevice_SetDepthClipPlanes
 #define SYM_D3DDevice_SetDepthClipPlanes FFFFFE05
 #define HAS_D3DDevice_SetDepthClipPlanes 0
@@ -610,6 +618,17 @@ HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
+// (surface, source rect, destination rect, colour key enabled, colour key): the video overlay is not shown yet. The
+// library's own writes the overlay's GPU registers (PVIDEO, 0x8700 on) through the register base the host device
+// does not have (Forza: its movies)
+HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
+    static uint32_t calls = 0;
+    if (calls++ % 600 == 0)
+        LOGI("d3d: UpdateOverlay %u: surface %08X (format %08X, size %08X, data %08X) to %d,%d-%d,%d (not shown)", calls,
+             a[0], R32(a[0] + 0xC), R32(a[0] + 0x10), R32(a[0] + 4), a[2] ? int32_t(R32(a[2])) : -1,
+             a[2] ? int32_t(R32(a[2] + 4)) : -1, a[2] ? int32_t(R32(a[2] + 8)) : -1, a[2] ? int32_t(R32(a[2] + 12)) : -1);
+    return 0;
+}
 // the front buffer, read back at the guest size, is kept for the next instance after a quick reboot, which may
 // fade from it at its first frames
 HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
@@ -843,6 +862,18 @@ HLE_STDCALL(D3DDevice_SetScissors, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_state.scissor_count = std::min<uint32_t>(a[0], 8);
     for (uint32_t i = 0; i < g_state.scissor_count * 4; i++) g_state.scissors[i] = R32(a[2] + i * 4);
+    return 0;
+}
+
+// (x, y): the part of the back buffer the title draws into, kept where the library keeps it; the library's own then
+// rebuilds the viewport from render target fields the host device does not fill (Forza 0x3BCD40). Drawing ignores it
+HLE_STDCALL(D3DDevice_SetBackBufferScale, 2) {
+    float x = ArgF(a, 0), y = ArgF(a, 1);
+    if (x != 1.0f || y != 1.0f) LOG_FIRST(8, "d3d: SetBackBufferScale %.3f %.3f (drawn at full size)", x, y);
+    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &x, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &y, 4);
+    }
     return 0;
 }
 
