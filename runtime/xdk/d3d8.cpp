@@ -84,6 +84,10 @@ using namespace kernel;
 #define SYM_D3DDevice_SetVertexShaderInputDirect FFFFFE08
 #define HAS_D3DDevice_SetVertexShaderInputDirect 0
 #endif
+#ifndef SYM_D3DDevice_SelectVertexShaderDirect
+#define SYM_D3DDevice_SelectVertexShaderDirect FFFFFE10
+#define HAS_D3DDevice_SelectVertexShaderDirect 0
+#endif
 #ifndef SYM_D3DDevice_SetBackBufferScale
 #define SYM_D3DDevice_SetBackBufferScale FFFFFE0F
 #define HAS_D3DDevice_SetBackBufferScale 0
@@ -142,6 +146,11 @@ std::unique_ptr<gpu::Backend> g_backend;
 std::recursive_mutex g_lock;
 
 std::unordered_map<uint32_t, std::shared_ptr<gpu::VertexShader>> g_vs;
+// the GPU's vertex program memory: 136 slots of one instruction, loaded by pushed commands (0x1E9C the slot to load
+// from, 0x0B00 to 0x0B7C the instructions, as LoadVertexShaderProgram pushes them) or by LoadVertexShader
+constexpr uint32_t kProgramSlots = 136;
+uint32_t g_program[kProgramSlots * 4] = {};
+uint32_t g_program_load = 0;  // the next dword written
 std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
@@ -1298,14 +1307,62 @@ HLE_STDCALL(D3DDevice_SetVertexShaderConstant, 3) {
     return 0;
 }
 
+// (handle, slot): the shader's program into program memory at the slot
 HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
     WalkBeforeState();
-    LOG_FIRST(4, "d3d: LoadVertexShader %08X at %u is not supported", a[0], a[1]);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto it = g_vs.find(a[0]);
+    if (it == g_vs.end()) {
+        LOG_FIRST(4, "d3d: LoadVertexShader with unknown handle %08X", a[0]);
+        return 0;
+    }
+    const auto& prog = it->second->program;
+    for (uint32_t i = 0, at = std::min(a[1], kProgramSlots) * 4; i < prog.size() && at < kProgramSlots * 4; i++)
+        g_program[at++] = prog[i];
     return 0;
 }
+
+namespace {
+// the shader to draw with after a select: the declaration from the handle (or the inputs given), the program from
+// program memory at the slot up to the instruction marked last (bit 0 of its fourth dword)
+void SelectProgram(std::shared_ptr<gpu::VertexShader> vs, uint32_t handle, uint32_t slot) {
+    vs->hash = 0;
+    vs->program.clear();
+    vs->program_type = 0x2078;
+    for (uint32_t i = std::min(slot, kProgramSlots - 1); i < kProgramSlots; i++) {
+        vs->program.insert(vs->program.end(), &g_program[i * 4], &g_program[i * 4] + 4);
+        if (g_program[i * 4 + 3] & 1) break;
+    }
+    vs->handle = handle | 1;
+    g_state.vs = vs;
+    g_state.vs_handle = handle | 1;
+}
+}  // namespace
+
+// (handle, slot): the handle's declaration with the program loaded at the slot (Forza's UI loads its programs
+// with LoadVertexShaderProgram, pushed, and selects them through SelectVertexShaderDirect)
 HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
+    WalkBeforeState();  // the program loads pushed before it
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto vs = std::make_shared<gpu::VertexShader>();
+    if (auto it = g_vs.find(a[0]); it != g_vs.end()) *vs = *it->second;
+    SelectProgram(vs, a[0], a[1]);
+    return 0;
+}
+
+// (inputs, slot): 16 inputs of (stream, offset, type) as SetVertexShaderInputDirect takes them, the program at the
+// slot; the library's own copies the inputs into its own shader object and selects that (Forza 0x3BB080)
+HLE_STDCALL(D3DDevice_SelectVertexShaderDirect, 2) {
     WalkBeforeState();
-    LOG_FIRST(4, "d3d: SelectVertexShader %08X at %u is not supported", a[0], a[1]);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto vs = std::make_shared<gpu::VertexShader>();
+    uint32_t p = a[0];
+    if (p)
+        for (uint32_t r = 0; r < 16; r++) {
+            uint32_t type = R32(p + r * 16 + 8) & 0xFF;
+            if (type && type != 0x02) vs->inputs[r] = {int(R32(p + r * 16)), R32(p + r * 16 + 4), type};
+        }
+    SelectProgram(vs, p ? p : 0x10, a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
@@ -1724,6 +1781,14 @@ void Walk(uint32_t end) {
             std::memcpy(&f, &v, 4);
             ApplyVisibilityMethod(m, v);
             if (ApplyConstantMethod(m, v)) continue;
+            if (m == 0x1E9C) {  // program load slot
+                g_program_load = std::min(v, kProgramSlots) * 4;
+                continue;
+            }
+            if (m >= 0x0B00 && m < 0x0B80) {  // program instructions
+                if (g_program_load < kProgramSlots * 4) g_program[g_program_load++] = v;
+                continue;
+            }
             if (m == 0x17FC) {  // begin/end, 0 ends
                 if (v) {
                     g_im_prim = v;
