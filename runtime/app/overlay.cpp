@@ -216,7 +216,8 @@ void Detect(const input::WheelInfo& w) {
             continue;
         }
         int32_t need = g_detect.kind == WheelDetect::Steer ? 8000 : 20000;
-        for (int a = 0; a < d.axes_count && a < 8; a++) {
+        for (int a = 0; a < 8; a++) {
+            if (!(d.axis_mask >> a & 1)) continue;  // the axes the device has, wherever they are (Z, Rz, a slider ...)
             int32_t moved = d.axes[a] - was.axes[a];
             if (std::abs(moved) <= need) continue;
             Settings::WheelBind& b = *g_detect.bind;
@@ -342,8 +343,8 @@ void Wheel(Settings& s) {
     ImGui::SeparatorText("Raw input");
     for (const input::WheelDevice& d : w.devices) {
         if (!ImGui::TreeNode(d.guid.c_str(), "%s", d.name.c_str())) continue;
-        for (int a = 0; a < d.axes_count && a < 8; a++)
-            ImGui::ProgressBar((d.axes[a] + 32768) / 65535.0f, ImVec2(-1, 0),
+        for (int a = 0; a < 8; a++)
+            if (d.axis_mask >> a & 1) ImGui::ProgressBar((d.axes[a] + 32768) / 65535.0f, ImVec2(-1, 0),
                                (std::string(kAxisNames[a]) + " " + std::to_string(d.axes[a])).c_str());
         std::string held;
         for (int b : d.pressed) held += (held.empty() ? "" : " ") + std::to_string(b);
