@@ -1838,17 +1838,17 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     }
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format)) {
         // a depth buffer read as colour found nothing: what is there, for the log (once each)
+        // (only when a target is at its address: an ordinary texture has none)
         static std::unordered_set<uint32_t> told;
-        if (told.size() < 8 && told.insert(d.data).second) {
-            std::string at;
-            for (auto& [k, t] : targets_)
-                if (t.data == d.data || (k >> 1 & 0xFFFFFFFFu) == d.data)
-                    at += " [key " + std::to_string(k) + (t.depth ? " depth " : " colour ") + std::to_string(t.gw) + "x" +
-                          std::to_string(t.gh) + "]";
+        std::string at;
+        for (auto& [k, t] : targets_)
+            if (((t.data ^ d.data) & 0x0FFFFFFF) == 0 || ((uint32_t(k >> 1) ^ d.data) & 0x0FFFFFFF) == 0)  // physical or virtual
+                at += " [key " + std::to_string(k) + " data " + std::to_string(t.data) + (t.depth ? " depth " : " colour ") +
+                      std::to_string(t.gw) + "x" + std::to_string(t.gh) + "]";
+        if (!at.empty() && told.size() < 8 && told.insert(d.data).second)
             LOGR("d3d12: texture %08X (format %X, %ux%u) read as a depth buffer's bytes finds no target, key %llu;%s",
                  d.data, d.format, d.width, d.height, (unsigned long long)(SizedTargetKey(d.data, true, d.width, d.height) | alt),
-                 at.empty() ? " none at its address" : at.c_str());
-        }
+                 at.c_str());
     }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
