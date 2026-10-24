@@ -1037,6 +1037,19 @@ std::map<std::string, uint32_t> NameSymbols(const Image& img, SigFile& sf,
                                             std::vector<std::string>& report) {
     std::map<std::string, uint32_t> symbols;
     for (auto& k : sf.names) symbols[k] = sf.symbols.count(k) && found.count(k) ? found.at(k) : 0;
+    // a byte match the image's own .XTLID lists under another export id, never under this one, is another export's
+    // body (IDirectSoundBuffer_PlayEx and _StopEx are the same thunk to other callees)
+    for (auto& [k, va] : symbols) {
+        uint32_t want = va && sf.symbols.count(k) ? sf.symbols[k].xtlid : 0;
+        if (!want) continue;
+        bool other = false, same = false;
+        for (auto& [id, eva] : img.Exports())
+            if (eva == va) (id == want ? same : other) = true;
+        if (other && !same) {
+            report.push_back("  " + k + " not at " + Hex(va) + ": .XTLID lists it under another export id");
+            va = 0;
+        }
+    }
     for (auto& [k, va] : symbols)
         for (auto& [id, eva] : img.Exports())
             if (!va && id && sf.symbols.count(k) && sf.symbols[k].xtlid == id) {

@@ -650,7 +650,11 @@ bool D3D11Backend::TargetStale(uint32_t data) const {
 
 bool D3D11Backend::BindTargets(const State& s) {
     bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
-    Target* rt = EnsureTarget(s.rt, false);
+    // the colour target on the depth buffer's own memory (007: Everything or Nothing draws its character shadows
+    // into a D24S8 surface given as both, colour writes off): the console writes only depth there, and one
+    // resource cannot be bound as both here, so the depth target alone
+    bool one = depth && s.rt.header && s.zs.header && s.rt.data == s.zs.data;
+    Target* rt = one ? nullptr : EnsureTarget(s.rt, false);
     Target* ds = depth ? DepthTarget(s) : nullptr;
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;

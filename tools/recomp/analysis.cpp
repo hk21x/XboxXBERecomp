@@ -520,6 +520,7 @@ void Analysis::Run() {
     }
     std::sort(extra.begin(), extra.end());
     extra.erase(std::unique(extra.begin(), extra.end()), extra.end());
+    std::vector<uint32_t> refused;
     for (uint32_t v : extra) {
         if (functions.count(v)) continue;
         uint8_t cov = cover_[v - lo_];
@@ -532,8 +533,19 @@ void Analysis::Run() {
                 functions.insert(v);
                 imm++;
                 Adopt(calls, false);
+            } else {
+                refused.push_back(v);
             }
+        } else {
+            refused.push_back(v);
         }
+    }
+    // a callback whose code a guess (gap fill, pointer seeds) decoded differently stays out: an indirect call to it traps
+    // at run time. Listed so a game's config can name the real ones in [functions].
+    if (!refused.empty()) {
+        std::fprintf(stderr, "immediates: %zu code addresses not made functions (overlapping other decodes):", refused.size());
+        for (size_t i = 0; i < refused.size() && i < 200; i++) std::fprintf(stderr, " %X", refused[i]);
+        std::fprintf(stderr, "\n");
     }
     EhContinuations();
     // every direct call from decoded code names a function

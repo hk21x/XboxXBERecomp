@@ -60,6 +60,14 @@ using namespace kernel;
 #define SYM_D3DDevice_SetVertexShaderConstant FFFFFE0C
 #define HAS_D3DDevice_SetVertexShaderConstant 0
 #endif
+#ifndef SYM_D3DDevice_BeginPushBuffer
+#define SYM_D3DDevice_BeginPushBuffer FFFFFE11
+#define HAS_D3DDevice_BeginPushBuffer 0
+#endif
+#ifndef SYM_D3DDevice_EndPushBuffer
+#define SYM_D3DDevice_EndPushBuffer FFFFFE12
+#define HAS_D3DDevice_EndPushBuffer 0
+#endif
 #ifndef SYM_D3DDevice_RunPushBuffer
 #define SYM_D3DDevice_RunPushBuffer FFFFFE0D
 #define HAS_D3DDevice_RunPushBuffer 0
@@ -83,6 +91,18 @@ using namespace kernel;
 #ifndef SYM_D3DDevice_SetVertexShaderInputDirect
 #define SYM_D3DDevice_SetVertexShaderInputDirect FFFFFE08
 #define HAS_D3DDevice_SetVertexShaderInputDirect 0
+#endif
+#ifndef SYM_D3DDevice_SelectVertexShaderDirect
+#define SYM_D3DDevice_SelectVertexShaderDirect FFFFFE10
+#define HAS_D3DDevice_SelectVertexShaderDirect 0
+#endif
+#ifndef SYM_D3DDevice_SetBackBufferScale
+#define SYM_D3DDevice_SetBackBufferScale FFFFFE0F
+#define HAS_D3DDevice_SetBackBufferScale 0
+#endif
+#ifndef SYM_D3DDevice_UpdateOverlay
+#define SYM_D3DDevice_UpdateOverlay FFFFFE0E
+#define HAS_D3DDevice_UpdateOverlay 0
 #endif
 #ifndef SYM_D3DDevice_SetDepthClipPlanes
 #define SYM_D3DDevice_SetDepthClipPlanes FFFFFE05
@@ -134,6 +154,15 @@ std::unique_ptr<gpu::Backend> g_backend;
 std::recursive_mutex g_lock;
 
 std::unordered_map<uint32_t, std::shared_ptr<gpu::VertexShader>> g_vs;
+// the GPU's vertex program memory: 136 slots of one instruction, loaded by pushed commands (0x1E9C the slot to load
+// from, 0x0B00 to 0x0B7C the instructions, as LoadVertexShaderProgram pushes them) or by LoadVertexShader
+constexpr uint32_t kProgramSlots = 136;
+uint32_t g_program[kProgramSlots * 4] = {};
+uint32_t g_program_load = 0;  // the next dword written
+// the slot SelectVertexShader started the bound program at (-1: a created shader), and program memory written since:
+// the console runs program memory as it is when it draws, the title may load the program after selecting it
+int32_t g_program_slot = -1;
+bool g_program_written = false;
 std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
@@ -144,7 +173,8 @@ uint32_t g_depth = 0;
 uint32_t g_copy_target = 0;
 bool g_copy_open = false;
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
-uint32_t g_walk = 0;  // first scratch command not read yet
+uint32_t g_walk = 0;        // first pushed command not read yet
+uint32_t g_walk_limit = 0;  // end of the buffer it is in: the scratch buffer, or a push buffer being recorded
 bool g_report_asked = false;  // a visibility report asked for since the last flush
 
 uint32_t Dev(uint32_t off) { return R32(kDevice + off); }
@@ -196,6 +226,7 @@ uint32_t ScratchPush(uint32_t bytes = 0) {
     SetDev(kDevPush, g_scratch_push);
     SetDev(kDevThreshold, g_scratch_push + g_scratch_size - 0x1000);
     g_walk = g_scratch_push;
+    g_walk_limit = g_scratch_push + g_scratch_size;
     return g_scratch_push;
 }
 
@@ -340,30 +371,46 @@ using namespace d3d;
 // device
 
 namespace {
+// a surface object the title made and put in D3DPRESENT_PARAMETERS (BufferSurfaces, DepthStencilSurface), else 0
+uint32_t GivenSurface(uint32_t at) {
+    uint32_t s = R32(at);
+    return s && mem::IsCommitted(s) && mem::IsCommitted(s + 23) && (R32(s) >> 16 & 7) == 5 ? s : 0;
+}
+
 // the swap chain and auto depth buffer a D3DPRESENT_PARAMETERS at pp asks for, made the device's targets. The same
-// parameters again keep the buffers, so surfaces a title still holds stay valid; true when they are new.
+// parameters again keep the buffers, so surfaces a title still holds stay valid; true when they are new. Frame
+// buffers the title made itself (BufferSurfaces, back buffer first, and DepthStencilSurface) are made over: their
+// objects become the buffers, in this size and format (a supersampled size is not kept: the renderer scales instead).
 bool MakeFrameBuffers(uint32_t pp) {
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
+    uint32_t given[3] = {GivenSurface(pp + 0x34), GivenSurface(pp + 0x38), GivenSurface(pp + 0x3C)};
+    uint32_t given_depth = GivenSurface(pp + 0x40);
+    if (given_depth && !auto_depth) depth_fmt = R32(given_depth + 12) >> 8 & 0xFF;
     if (!w) w = 640;
     if (!h) h = 480;
-    static uint32_t made[5];
-    uint32_t want[5] = {w, h, fmt, count, auto_depth ? depth_fmt : 0xFFFFFFFFu};
+    static uint32_t made[7];
+    uint32_t want[7] = {w, h, fmt, count, auto_depth || given_depth ? depth_fmt : 0xFFFFFFFFu, given[0], given_depth};
     bool fresh = !g_buffers[1] || std::memcmp(made, want, sizeof made);
     if (fresh) {
         uint32_t color_fmt = gpu::LinearColorFormat(fmt);
         g_buffer_count = std::min<uint32_t>(count + 1, 3);
-        // in the device (3948) the back buffer is slot 0 and the front slot 1, as its GetBackBuffer counts them
+        // in the device (3948) the back buffer is slot 0 and the front slot 1, as its GetBackBuffer counts them;
+        // BufferSurfaces count the same way
         constexpr uint32_t kSlot[3] = {1, 0, 2};
         for (uint32_t i = 0; i < g_buffer_count; i++)
             g_buffers[i] = NewSurface(w, h, color_fmt, 4,
-                                      XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0 : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
+                                      given[kSlot[i]]                              ? given[kSlot[i]]
+                                      : XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0
+                                                                                   : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
         g_copy_target = NewSurface(w, h, color_fmt, 4);
         g_depth = 0;
-        if (auto_depth) {
+        if (auto_depth || given_depth) {
             uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
             g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4,  // 0x30 LIN_D16, 0x31 LIN_F16
-                                 XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0 : kDevice + XDK_CDevice_AutoDepthSurface);
+                                 given_depth                                     ? given_depth
+                                 : XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0
+                                                                                 : kDevice + XDK_CDevice_AutoDepthSurface);
         }
         std::memcpy(made, want, sizeof made);
     }
@@ -610,6 +657,17 @@ HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
+// (surface, source rect, destination rect, colour key enabled, colour key): the video overlay is not shown yet. The
+// library's own writes the overlay's GPU registers (PVIDEO, 0x8700 on) through the register base the host device
+// does not have (Forza: its movies)
+HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
+    static uint32_t calls = 0;
+    if (calls++ % 600 == 0)
+        LOGI("d3d: UpdateOverlay %u: surface %08X (format %08X, size %08X, data %08X) to %d,%d-%d,%d (not shown)", calls,
+             a[0], R32(a[0] + 0xC), R32(a[0] + 0x10), R32(a[0] + 4), a[2] ? int32_t(R32(a[2])) : -1,
+             a[2] ? int32_t(R32(a[2] + 4)) : -1, a[2] ? int32_t(R32(a[2] + 8)) : -1, a[2] ? int32_t(R32(a[2] + 12)) : -1);
+    return 0;
+}
 // the front buffer, read back at the guest size, is kept for the next instance after a quick reboot, which may
 // fade from it at its first frames
 HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
@@ -726,7 +784,7 @@ uint32_t PresentVblanks() {
 // (the target becomes the front, texture 0 the back buffer, as the library sets them); FINISH shows the frame and
 // gives the back buffer and depth back as the target. 0 is COPY | FINISH. The count moves on once a frame.
 namespace {
-uint32_t SwapFrame(uint32_t swap_flags) {
+uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
     constexpr uint32_t kCopy = 1, kBypassCopy = 2, kFinish = 4;
     uint32_t flags = swap_flags ? swap_flags : kCopy | kFinish;
     if (!(flags & kFinish)) {
@@ -739,7 +797,16 @@ uint32_t SwapFrame(uint32_t swap_flags) {
         SetDev(kDevDepth, 0);
         g_state.rt = SurfaceOf(g_copy_target);
         g_state.zs = SurfaceOf(0);
-        for (uint32_t i = 0; i < 4; i++) g_state.textures[i] = i ? 0 : g_buffers[1];
+        // in the device's slots too, with their references: the title may read them back (Forza 0x1DB3C0 takes
+        // texture 0 with GetTexture2 and releases it)
+        for (uint32_t i = 0; i < 4; i++) {
+            uint32_t tex = i ? 0 : g_buffers[1], old = Dev(kDevTextures + i * 4);
+            g_state.textures[i] = tex;
+            if (tex == old) continue;
+            AddRef(ctx, tex);
+            SetDev(kDevTextures + i * 4, tex);
+            Release(ctx, old);
+        }
         W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
         uint32_t w, h;
         gpu::SurfaceSize(g_state.rt, w, h);
@@ -801,10 +868,10 @@ uint32_t SwapFrame(uint32_t swap_flags) {
 }
 }  // namespace
 
-HLE_STDCALL(D3DDevice_Swap, 1) { return SwapFrame(a[0]); }
+HLE_STDCALL(D3DDevice_Swap, 1) { return SwapFrame(ctx, a[0]); }
 // 3948: Present(source rect, dest rect, window, dirty region) is the swap, the rects unused on the console
 HLE_STDCALL(D3DDevice_Present, 4) {
-    SwapFrame(0);
+    SwapFrame(ctx, 0);
     return 0;
 }
 
@@ -843,6 +910,18 @@ HLE_STDCALL(D3DDevice_SetScissors, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_state.scissor_count = std::min<uint32_t>(a[0], 8);
     for (uint32_t i = 0; i < g_state.scissor_count * 4; i++) g_state.scissors[i] = R32(a[2] + i * 4);
+    return 0;
+}
+
+// (x, y): the part of the back buffer the title draws into, kept where the library keeps it; the library's own then
+// rebuilds the viewport from render target fields the host device does not fill (Forza 0x3BCD40). Drawing ignores it
+HLE_STDCALL(D3DDevice_SetBackBufferScale, 2) {
+    float x = ArgF(a, 0), y = ArgF(a, 1);
+    if (x != 1.0f || y != 1.0f) LOG_FIRST(8, "d3d: SetBackBufferScale %.3f %.3f (drawn at full size)", x, y);
+    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &x, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &y, 4);
+    }
     return 0;
 }
 
@@ -1188,6 +1267,7 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
+    g_program_slot = -1;
     if (h & 1) {
         auto it = g_vs.find(h);
         if (it != g_vs.end()) {
@@ -1267,14 +1347,84 @@ HLE_STDCALL(D3DDevice_SetVertexShaderConstant, 3) {
     return 0;
 }
 
+// (handle, slot): the shader's program into program memory at the slot
 HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
     WalkBeforeState();
-    LOG_FIRST(4, "d3d: LoadVertexShader %08X at %u is not supported", a[0], a[1]);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto it = g_vs.find(a[0]);
+    if (it == g_vs.end()) {
+        LOG_FIRST(4, "d3d: LoadVertexShader with unknown handle %08X", a[0]);
+        return 0;
+    }
+    const auto& prog = it->second->program;
+    for (uint32_t i = 0, at = std::min(a[1], kProgramSlots) * 4; i < prog.size() && at < kProgramSlots * 4; i++)
+        g_program[at++] = prog[i];
     return 0;
 }
+
+namespace {
+// the shader to draw with after a select: the declaration from the handle (or the inputs given), the program from
+// program memory at the slot up to the instruction marked last (bit 0 of its fourth dword)
+void SelectProgram(std::shared_ptr<gpu::VertexShader> vs, uint32_t handle, uint32_t slot) {
+    vs->hash = 0;
+    vs->program.clear();
+    vs->program_type = 0x2078;
+    for (uint32_t i = std::min(slot, kProgramSlots - 1); i < kProgramSlots; i++) {
+        vs->program.insert(vs->program.end(), &g_program[i * 4], &g_program[i * 4] + 4);
+        if (g_program[i * 4 + 3] & 1) break;
+    }
+    vs->handle = handle | 1;
+    // the renderers (and EndPrimitive) tell shaders apart by pointer, and titles select hundreds of times a frame
+    // (007: Everything or Nothing): one object per declaration and program, or every select is a new shader
+    static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+    uint64_t key = gpu::Hash(vs->program.data(), vs->program.size() * 4,
+                             gpu::Hash(vs->inputs.data(), sizeof(vs->inputs), vs->handle));
+    key = gpu::Hash(vs->stream_stride.data(), sizeof(vs->stream_stride), gpu::Hash(vs->decl.data(), vs->decl.size() * 4, key));
+    auto& kept = made[key];
+    if (!kept || std::memcmp(kept->inputs.data(), vs->inputs.data(), sizeof(vs->inputs)) || kept->program != vs->program ||
+        kept->decl != vs->decl || kept->stream_stride != vs->stream_stride || kept->constants != vs->constants)
+        kept = vs;
+    g_state.vs = kept;
+    g_state.vs_handle = handle | 1;
+    g_program_slot = int32_t(std::min(slot, kProgramSlots - 1));
+    g_program_written = false;
+}
+}  // namespace
+
+// the selected program again from program memory, once pushed instructions changed it (007: Everything or Nothing
+// selects slot 0 and then loads the frame's next program there); the render thread tells shaders apart by
+// pointer: SelectProgram keeps one object per declaration and program
+void RefreshSelectedProgram() {
+    if (!g_program_written) return;
+    g_program_written = false;
+    if (g_program_slot < 0 || !g_state.vs) return;
+    SelectProgram(std::make_shared<gpu::VertexShader>(*g_state.vs), g_state.vs_handle & ~1u, uint32_t(g_program_slot));
+}
+
+// (handle, slot): the handle's declaration with the program loaded at the slot (Forza's UI loads its programs
+// with LoadVertexShaderProgram, pushed, and selects them through SelectVertexShaderDirect)
 HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
+    WalkBeforeState();  // the program loads pushed before it
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto vs = std::make_shared<gpu::VertexShader>();
+    if (auto it = g_vs.find(a[0]); it != g_vs.end()) *vs = *it->second;
+    SelectProgram(vs, a[0], a[1]);
+    return 0;
+}
+
+// (inputs, slot): 16 inputs of (stream, offset, type) as SetVertexShaderInputDirect takes them, the program at the
+// slot; the library's own copies the inputs into its own shader object and selects that (Forza 0x3BB080)
+HLE_STDCALL(D3DDevice_SelectVertexShaderDirect, 2) {
     WalkBeforeState();
-    LOG_FIRST(4, "d3d: SelectVertexShader %08X at %u is not supported", a[0], a[1]);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto vs = std::make_shared<gpu::VertexShader>();
+    uint32_t p = a[0];
+    if (p)
+        for (uint32_t r = 0; r < 16; r++) {
+            uint32_t type = R32(p + r * 16 + 8) & 0xFF;
+            if (type && type != 0x02) vs->inputs[r] = {int(R32(p + r * 16)), R32(p + r * 16 + 4), type};
+        }
+    SelectProgram(vs, p ? p : 0x10, a[1]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
@@ -1474,10 +1624,59 @@ void FrameLogNote(const char* text) {
 
 // drawing
 
+// Push buffers recorded to run later. The host draws at the API, so a push buffer the title records holds only the
+// commands it pushed itself; the draws made while it recorded are kept here, each with the state it had and where
+// in the buffer it came, and drawn again when the buffer runs (RunPushBuffer), between its commands. A buffer the
+// title records and runs in the same frame, twice (a whole frame recorded, as 007: Everything or Nothing does), is
+// drawn as it records and not kept.
+namespace {
+struct PbDraw {
+    uint32_t offset = 0;  // in the buffer's data
+    gpu::State state;     // the vertex constants are the replay's, which the buffer's commands (and fixups) load
+    uint32_t prim = 0, start = 0, count = 0;
+    uint32_t indices = 0;     // guest address, 0 for none
+    std::vector<uint8_t> up;  // DrawUp's vertices
+    uint32_t up_stride = 0;
+};
+struct PbRecording {
+    std::vector<std::unique_ptr<PbDraw>> draws;
+    uint32_t ended = ~0u;      // the present it was recorded in
+    uint32_t same_frame = 0;   // times it ran in the frame it was recorded in
+    bool immediate = false;    // drawn as it records
+    bool overflow = false;
+};
+constexpr size_t kPbMaxDraws = 4096;
+std::unordered_map<uint32_t, PbRecording> g_pb;
+uint32_t g_pb_recording = 0, g_pb_data = 0;  // the buffer being recorded and its data
+bool g_pb_keep = false;                      // its draws are kept, not drawn
+
+// true when the draw is kept for the buffer being recorded instead of drawn now
+bool KeepDraw(uint32_t prim, uint32_t start, uint32_t count, uint32_t indices, const void* up = nullptr,
+              uint32_t up_stride = 0) {
+    if (!g_pb_keep) return false;
+    PbRecording& r = g_pb[g_pb_recording];
+    if (r.draws.size() >= kPbMaxDraws) {
+        r.overflow = true;
+        return true;
+    }
+    auto d = std::make_unique<PbDraw>();
+    d->offset = Dev(kDevPush) - g_pb_data;
+    d->state = g_state;
+    d->prim = prim, d->start = start, d->count = count, d->indices = indices;
+    if (up) {
+        d->up.assign(static_cast<const uint8_t*>(up), static_cast<const uint8_t*>(up) + count * up_stride);
+        d->up_stride = up_stride;
+    }
+    r.draws.push_back(std::move(d));
+    return true;
+}
+}  // namespace
+
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
+    if (KeepDraw(a[0], a[1], a[2], 0)) return 0;
     FrameLogDraw(a[0], a[1], a[2], nullptr);
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
     return 0;
@@ -1487,6 +1686,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     SyncDeferred();
+    if (KeepDraw(a[0], 0, a[1], a[2])) return 0;
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     FrameLogDraw(a[0], 0, a[1], indices);
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
@@ -1524,6 +1724,7 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
 void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
+    if (KeepDraw(prim, 0, count, 0, vertices, stride)) return;
     auto stream = g_state.streams[0];
     bool input = g_state.input_active;  // vertices from memory are read by the shader's declaration
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
@@ -1550,6 +1751,36 @@ namespace {
 uint32_t g_im_prim = 0, g_im_mask = 0;  // open primitive, slots it wrote
 float g_im_attr[64];                    // 16 slots of x y z w
 std::vector<float> g_im_vertices;       // every slot per vertex
+std::vector<uint16_t> g_im_indices;     // array elements (0x1800, 0x1808): drawn from the bound vertex data
+// triangles of pushed indexed strips, fans and lists in a row, drawn as one list: a model built as a push buffer is
+// hundreds of short strips with no state between them (007: Everything or Nothing's characters, over half its draws)
+std::vector<uint16_t> g_im_batch;
+
+void FlushPushedTriangles() {
+    if (g_im_batch.empty()) return;
+    if (g_backend) {
+        auto idx = reinterpret_cast<const uint8_t*>(g_im_batch.data());
+        uint32_t count = uint32_t(g_im_batch.size());
+        FrameLogDraw(5, 0, count, idx);
+        g_backend->Draw(g_state, 5, 0, count, idx);
+    }
+    g_im_batch.clear();
+}
+
+// a strip (6), fan (7) or list (5) of indices as list triangles with the console's winding; degenerate ones dropped
+void BatchPushedTriangles(uint32_t prim, const std::vector<uint16_t>& in) {
+    auto add = [](uint16_t a, uint16_t b, uint16_t c) {
+        if (a == b || b == c || a == c) return;
+        g_im_batch.insert(g_im_batch.end(), {a, b, c});
+    };
+    size_t n = in.size();
+    if (prim == 5)
+        for (size_t i = 0; i + 2 < n; i += 3) add(in[i], in[i + 1], in[i + 2]);
+    else if (prim == 6)
+        for (size_t i = 0; i + 2 < n; i++) i & 1 ? add(in[i + 1], in[i], in[i + 2]) : add(in[i], in[i + 1], in[i + 2]);
+    else
+        for (size_t i = 1; i + 1 < n; i++) add(in[0], in[i], in[i + 1]);
+}
 
 // visibility tests: depth passing pixels are counted while enabled, a report gets the count since the clear,
 // at a physical address in the first 16 MB
@@ -1680,7 +1911,7 @@ void EndPrimitive() {
 // reads the commands pushed since the last call: vertex data between a begin and an end is drawn, visibility tests
 // are run, vertex shader constants are loaded, the rest is skipped
 void Walk(uint32_t end) {
-    if (!g_walk || end < g_walk || end > g_scratch_push + g_scratch_size) return;
+    if (!g_walk || end < g_walk || end > g_walk_limit) return;
     for (uint32_t p = g_walk; p + 4 <= end;) {
         // count in bits 18 to 28, bit 30 keeps the method for every value
         uint32_t head = R32(p), method = head & 0x1FFC, n = (head >> 18) & 0x7FF;
@@ -1688,18 +1919,65 @@ void Walk(uint32_t end) {
         if ((head & 0xA0030003) || n * 4 > end - p) break;  // anything but a method header
         for (uint32_t i = 0; i < n; i++, p += 4) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4, v = R32(p);
+            if (!g_im_batch.empty() && m != 0x17FC && m != 0x1800 && m != 0x1808) FlushPushedTriangles();  // state first
             float f, *a = g_im_attr;
             bool last = true;  // the slot's last component
             std::memcpy(&f, &v, 4);
             ApplyVisibilityMethod(m, v);
             if (ApplyConstantMethod(m, v)) continue;
+            if (m == 0x1E9C) {  // program load slot
+                g_program_load = std::min(v, kProgramSlots) * 4;
+                continue;
+            }
+            if (m >= 0x0B00 && m < 0x0B80) {  // program instructions
+                if (g_program_load < kProgramSlots * 4) g_program[g_program_load++] = v;
+                g_program_written = true;
+                continue;
+            }
+            if (m == 0x1800 || m == 0x1808) {  // array elements: two 16 bit indices, or one 32 bit
+                if (!g_im_prim) continue;
+                if (m == 0x1808) {
+                    if (v > 0xFFFF) LOG_FIRST(4, "d3d: pushed array element %u is past 16 bits", v);
+                    g_im_indices.push_back(uint16_t(v));
+                } else {
+                    g_im_indices.push_back(uint16_t(v));
+                    g_im_indices.push_back(uint16_t(v >> 16));
+                }
+                continue;
+            }
+            if (m == 0x1810) {  // draw arrays: first vertex, count - 1 in the top byte
+                if (g_im_prim && g_backend) {
+                    SyncDeferred();
+                    FrameLogDraw(g_im_prim, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
+                    g_backend->Draw(g_state, g_im_prim, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
+                }
+                continue;
+            }
             if (m == 0x17FC) {  // begin/end, 0 ends
                 if (v) {
                     g_im_prim = v;
                     g_im_mask = 0;
                     g_im_vertices.clear();
+                    g_im_indices.clear();
                 } else {
+                    uint32_t prim = g_im_prim;
+                    RefreshSelectedProgram();
                     EndPrimitive();
+                    if (prim && !g_im_indices.empty() && g_backend) {
+                        if (g_pb_keep) {
+                            LOG_FIRST(4, "d3d: pushed indexed primitive while a push buffer records, not kept");
+                        } else if (prim >= 5 && prim <= 7) {
+                            SyncDeferred();
+                            BatchPushedTriangles(prim, g_im_indices);
+                        } else {
+                            SyncDeferred();
+                            auto idx = reinterpret_cast<const uint8_t*>(g_im_indices.data());
+                            uint32_t count = uint32_t(g_im_indices.size());
+                            FrameLogDraw(prim, 0, count, idx);
+                            g_backend->Draw(g_state, prim, 0, count, idx);
+                        }
+                    }
+                    g_im_indices.clear();
                 }
                 continue;
             } else if (m >= 0x1880 && m < 0x1900) {  // 2 floats, z = 0 and w = 1
@@ -1731,6 +2009,8 @@ void Walk(uint32_t end) {
         }
         EndConstantGroup(method, n);
     }
+    FlushPushedTriangles();
+    RefreshSelectedProgram();
     g_walk = end;
 }
 }  // namespace
@@ -1743,13 +2023,107 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
     return 0;
 }
 
-// RunPushBuffer(push buffer, fixup) runs recorded hardware commands; not replayed yet: each one is logged once (its
-// size, Common and first commands) so what they hold can be read
+// BeginPushBuffer(push buffer) records what follows into the title's buffer: the library's own code points the
+// device's push at it, and Walk reads the commands there as the title writes them, in order with the calls the host
+// draws at once (007: Everything or Nothing pushes its vertex programs and constants while it records a frame).
+// EndPushBuffer: the rest of the buffer read, the push back where it was.
+#if HAS_D3DDevice_BeginPushBuffer && HAS_D3DDevice_EndPushBuffer
+X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_BeginPushBuffer));
+X86_FUNC(GUEST(D3DDevice_BeginPushBuffer)) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t pb = R32(ctx.esp + 4);
+    Walk(Dev(kDevPush));
+    GUEST_ORIG(D3DDevice_BeginPushBuffer)(ctx, base);
+    g_walk = Dev(kDevPush);
+    g_walk_limit = R32(pb + 4) + R32(pb + 0x10);  // Data, AllocationSize
+    PbRecording& r = g_pb[pb];
+    g_pb_recording = pb;
+    g_pb_data = R32(pb + 4);
+    g_pb_keep = !r.immediate;
+    r.draws.clear();
+    r.overflow = false;
+}
+X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_EndPushBuffer));
+X86_FUNC(GUEST(D3DDevice_EndPushBuffer)) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    GUEST_ORIG(D3DDevice_EndPushBuffer)(ctx, base);
+    g_walk = Dev(kDevPush);
+    g_walk_limit = g_scratch_push + g_scratch_size;
+    if (g_pb_recording) g_pb[g_pb_recording].ended = g_presents;
+    g_pb_recording = 0;
+    g_pb_keep = false;
+}
+#endif
+
+// RunPushBuffer(push buffer, fixup): a buffer whose draws were kept (above) is drawn: the fixup's batch is copied
+// into it (records of byte count, offset in the data, then the commands, as D3DPushBuffer_SetVertexShaderConstant
+// writes them while a fixup is begun), then its commands are read in order with the kept draws, each drawn with its
+// own state and the vertex constants the commands left. Any other is logged once (its size, Common and first
+// commands) and not run.
+namespace {
+void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
+    uint32_t data = R32(pb + 4), size = R32(pb + 12);  // Data, Size
+    if (fixup) {
+        uint32_t p = R32(fixup + 4) + R32(fixup + 12), end = R32(fixup + 4) + R32(fixup + 16);  // Data + Run, + Next
+        while (p + 8 <= end) {
+            uint32_t bytes = R32(p), at = R32(p + 4);
+            if (!bytes || bytes == 0xFFFFFFFFu || p + 8 + bytes > end) break;
+            if (at + bytes <= size) std::memcpy(HostPtr(data + at), HostPtr(p + 8), bytes);
+            p += 8 + bytes;
+        }
+    }
+    uint32_t walk = g_walk, limit = g_walk_limit;
+    g_walk = data;
+    g_walk_limit = data + size;
+    for (auto& d : r.draws) {
+        Walk(data + d->offset);
+        gpu::State& s = d->state;
+        s.vsc = g_state.vsc;
+        if (KeepDraw(d->prim, d->start, d->count, d->indices, d->up.empty() ? nullptr : d->up.data(), d->up_stride))
+            continue;  // run while another buffer records: kept for that one
+        if (!g_backend) continue;
+        if (!d->up.empty()) {
+            s.streams[0] = {UpVertices(d->up.data(), uint32_t(d->up.size())), d->up_stride};
+            s.input_active = false;
+            g_backend->Draw(s, d->prim, 0, d->count, nullptr);
+        } else {
+            g_backend->Draw(s, d->prim, d->start, d->count,
+                            d->indices ? static_cast<const uint8_t*>(HostPtr(d->indices)) : nullptr);
+        }
+    }
+    Walk(data + size);
+    g_walk = walk;
+    g_walk_limit = limit;
+}
+}  // namespace
+
 HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
-    static std::unordered_set<uint32_t> seen;
     uint32_t pb = a[0];
+    if (auto it = g_pb.find(pb); it != g_pb.end()) {
+        PbRecording& r = it->second;
+        if (r.immediate) return 0;  // drawn as it recorded
+        if (r.ended == g_presents && ++r.same_frame >= 2) {
+            r.immediate = true;
+            LOGI("d3d: push buffer %08X is recorded and run in the same frame, drawn as it records from now on", pb);
+        }
+        if (r.overflow) LOG_FIRST(8, "d3d: push buffer %08X kept only its first %zu draws", pb, kPbMaxDraws);
+        LOG_FIRST(16, "d3d: RunPushBuffer %08X replays %zu draws (fixup %08X)", pb, r.draws.size(), a[1]);
+        ReplayPushBuffer(pb, a[1], r);
+        return 0;
+    }
+    // one the title made itself (built offline and loaded): its commands, fixed up, are all there is
+    if (pb && mem::IsCommitted(pb) && mem::IsCommitted(pb + 15) && R32(pb + 4) && mem::IsCommitted(R32(pb + 4)) &&
+        mem::IsCommitted(R32(pb + 4) + std::max<uint32_t>(R32(pb + 12), 1) - 1)) {
+        static PbRecording none;
+        LOG_FIRST(8, "d3d: RunPushBuffer %08X: a buffer not recorded here, %u bytes (fixup %08X), its commands read", pb,
+                  R32(pb + 12), a[1]);
+        ReplayPushBuffer(pb, a[1], none);
+        return 0;
+    }
+    static std::unordered_set<uint32_t> seen;
     if (pb && mem::IsCommitted(pb) && mem::IsCommitted(pb + 15) && seen.size() < 64 && seen.insert(pb).second) {
         uint32_t data = R32(pb + 4), size = R32(pb + 12);
         // the first commands, only from memory that is there (the title may give a physical or unfinished address)

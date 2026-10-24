@@ -27,6 +27,23 @@ std::atomic<uint32_t> g_next_id{0x10};
 constexpr uint32_t kKpcrSize = 0x400;
 constexpr uint32_t kEthreadSize = 0x200;
 
+// the title's one KPROCESS, every thread's ApcState.Process: XSetProcessQuantumLength (Forza) writes ThreadQuantum
+// through it. ReadyListHead 0, ThreadListHead 8, StackCount 0x10, ThreadQuantum 0x14 (milliseconds times 3, the
+// kernel's 20 ms by default), BasePriority 0x18 (8, normal)
+uint32_t Process() {
+    static const uint32_t p = [] {
+        uint32_t k = mem::AllocSystem(0x20, 16);
+        for (uint32_t list : {0u, 8u}) {
+            W32(k + list, k + list);  // empty lists point at themselves
+            W32(k + list + 4, k + list);
+        }
+        W32(k + 0x14, 60);
+        G<uint8_t>(k + 0x18) = 8;
+        return k;
+    }();
+    return p;
+}
+
 void SetupGuestBlocks(Thread& t, uint32_t stack_size, uint32_t tls_size) {
     stack_size = std::max<uint32_t>(stack_size, 0x10000);
     tls_size = (tls_size + 3) & ~3u;
@@ -51,6 +68,7 @@ void SetupGuestBlocks(Thread& t, uint32_t stack_size, uint32_t tls_size) {
     W32(e + 0x1C, t.stack_top);                 // KTHREAD.StackBase
     W32(e + 0x20, t.stack_top - stack_size);    // KTHREAD.StackLimit
     W32(e + 0x28, t.tls);                       // KTHREAD.TlsData
+    W32(e + 0x44, Process());                   // KTHREAD.ApcState.Process
     W32(e + 0x12C, t.id);                       // ETHREAD.UniqueThread
 }
 

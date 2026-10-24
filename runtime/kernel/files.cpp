@@ -6,6 +6,9 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #include "kernel/disc.h"
 #include "kernel/kernel.h"
@@ -67,6 +70,42 @@ fs::path MatchCase(const fs::path& dir, const std::vector<std::string>& parts) {
     return cur;
 }
 
+// FATX never clears a cluster: a file truncated by an overwriting open and extended again by a size set gets its old
+// bytes back, as the clusters it frees and takes again still hold them. Forza copies each cache file, then recreates it
+// at its size (CreateFile CREATE_ALWAYS, SetEndOfFile) and reads the copy. The old bytes are kept per host path until
+// the file is written or a handle to it closes.
+std::mutex g_stale_lock;
+std::unordered_map<std::string, std::vector<char>> g_stale;
+
+void KeepStale(const std::string& host) {
+    std::error_code ec;
+    uint64_t size = fs::file_size(host, ec);
+    if (ec || !size || size > (256u << 20)) return;
+    std::vector<char> bytes(size);
+    std::ifstream in(host, std::ios::binary);
+    if (!in.read(bytes.data(), std::streamsize(size))) return;
+    std::lock_guard<std::mutex> lock(g_stale_lock);
+    g_stale[host] = std::move(bytes);
+}
+
+void DropStale(const std::string& host) {
+    std::lock_guard<std::mutex> lock(g_stale_lock);
+    if (!g_stale.empty()) g_stale.erase(host);
+}
+
+// a file grown from old_size: its old bytes in that range, as FATX gives them back
+void RestoreStale(const std::string& host, FILE* fp, uint64_t old_size, uint64_t size) {
+    std::lock_guard<std::mutex> lock(g_stale_lock);
+    auto it = g_stale.find(host);
+    if (it == g_stale.end() || old_size >= std::min<uint64_t>(size, it->second.size())) return;
+    uint64_t end = std::min<uint64_t>(size, it->second.size());
+    std::fseek(fp, long(old_size), SEEK_SET);
+    std::fwrite(it->second.data() + old_size, 1, size_t(end - old_size), fp);
+    std::fflush(fp);
+    LOGI("files: %s extended to %llu bytes over its old clusters", fs::path(host).filename().string().c_str(),
+         (unsigned long long)size);
+}
+
 struct File : Object {
     fs::path host;
     std::string xbox;
@@ -80,10 +119,14 @@ struct File : Object {
     bool listed = false;
     bool delete_on_close = false;
     int partition = 0;  // a hard disk partition opened whole: raw volume I/O, 1 to 5
+    bool cdrom = false;  // on the disc, as an image or a folder
     std::mutex io;  // threads sharing a handle: seek and transfer stay together
     File() : Object(ObjType::File) {}
     ~File() override {
-        if (fp) std::fclose(fp);
+        if (fp) {
+            std::fclose(fp);
+            DropStale(host.string());
+        }
         if (delete_on_close) {
             std::error_code ec;
             fs::remove(host, ec);
@@ -253,6 +296,7 @@ struct Target {
     bool disc = false;                   // on the mounted disc image
     const Disc::Entry* entry = nullptr;  // there: the file or folder, null when missing
     int partition = 0;                   // the path is a whole hard disk partition, 1 to 5
+    bool cdrom = false;                  // on the disc, as an image or a folder
 };
 
 Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
@@ -291,11 +335,11 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
     for (auto& part : parts)
         if (part.find(':') != std::string::npos) return {};
     if (best->first == kCdRom)
-        if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts)};
+        if (const Disc* disc = MountedDisc()) return {{}, true, disc->Find(parts), 0, true};
     int partition = 0;
     if (parts.empty() && best->first.compare(0, kPartitionPrefix.size(), kPartitionPrefix) == 0)
         partition = best->first.back() - '0';
-    return {MatchCase(best->second, parts).string(), false, nullptr, partition};
+    return {MatchCase(best->second, parts).string(), false, nullptr, partition, best->first == kCdRom};
 }
 
 // the disc image is read only: nothing on it is created, replaced or written
@@ -436,6 +480,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
         IoStatus(iosb, kObjectPathNotFound, 0);
         return kObjectPathNotFound;
     }
+    if (exists && (disposition == 0 || disposition == 4 || disposition == 5)) KeepStale(host);
     FILE* fp = std::fopen(host.c_str(), mode);
     if (!fp && std::string(mode) == "r+b") fp = std::fopen(host.c_str(), "rb");  // read only media
     if (!fp) {
@@ -447,6 +492,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     f->host = host;
     f->xbox = Normalize(name);
     f->fp = fp;
+    f->cdrom = t.cdrom;
     f->delete_on_close = options & 0x1000;  // FILE_DELETE_ON_CLOSE
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, info);
@@ -473,6 +519,7 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     f->xbox = Normalize(name);
     f->dir = fs::is_directory(host, ec);
     f->partition = t.partition;
+    f->cdrom = t.cdrom;
     if (!f->dir) {
         f->fp = std::fopen(host.c_str(), "r+b");
         if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
@@ -539,6 +586,7 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     std::lock_guard<std::mutex> lock(f->io);
     uint64_t pos = Offset(*f, off);
     if (f->fp) Seek(f->fp, pos);
+    if (write && f->fp) DropStale(f->host.string());
     uint32_t n = 0;
     while (n < len) {
         uint32_t at = pages ? R32(pages + n / 0x1000 * 8) + n % 0x1000 : buf + n;
@@ -554,7 +602,10 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
         LOGI("files: %s read short at %llu: %u of %u bytes (to %08X)", f->xbox.c_str(), (unsigned long long)pos, n,
              len, buf);
     if (write && n < len) return Finish(*f, 0xC000007F, n, event, apc, apc_ctx, iosb);  // disk full
-    if (!write && len && !n) return Finish(*f, kEndOfFile, 0, event, apc, apc_ctx, iosb);
+    // a disc read from the end on completes with nothing read and no error: Forza reads ahead past the end of a file
+    // with overlapped reads and treats a failed wait for one as a damaged disc (0x284470)
+    if (!write && len && !n)
+        return Finish(*f, f->entry || f->cdrom ? kSuccess : kEndOfFile, 0, event, apc, apc_ctx, iosb);
     return Finish(*f, kSuccess, n, event, apc, apc_ctx, iosb);
 }
 
@@ -626,6 +677,7 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
                 std::fflush(f->fp);
                 uint64_t size = fs::file_size(f->host, ec);
                 if (cls == 20 || R64(in) < size) fs::resize_file(f->host, R64(in), ec);
+                if (!ec && R64(in) > size) RestoreStale(f->host.string(), f->fp, size, R64(in));
             }
             break;
         case 13:  // disposition
@@ -652,24 +704,28 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
     return kSuccess;
 }
 
-// volume information of class cls into out; the bytes written in *written
-static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* written) {
+// volume information of class cls into out; the bytes written in *written. The disc is a DVD: 2048 byte sectors,
+// one to an allocation unit, none free (XGetDiskSectorSize("D:\\") reads its sector size, and a title may choose how
+// it reads its data by it)
+static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* written, bool disc) {
     std::memset(HostPtr(out), 0, len);
     *written = 0;
+    uint64_t units = disc ? 0x3A0000 : 0x100000, free = disc ? 0 : 0x80000;  // the disc: 7.25 GiB, a dual layer DVD
+    uint32_t sectors_per_unit = disc ? 1 : 32, sector = disc ? 2048 : 512;
     switch (cls) {
         case 3:  // FileFsSizeInformation: 16 GiB total, 8 GiB free in 16 KiB units
-            W64(out, 0x100000);
-            W64(out + 8, 0x80000);
-            W32(out + 0x10, 32);
-            W32(out + 0x14, 512);
+            W64(out, units);
+            W64(out + 8, free);
+            W32(out + 0x10, sectors_per_unit);
+            W32(out + 0x14, sector);
             *written = 0x18;
             return kSuccess;
         case 7:  // FileFsFullSizeInformation
-            W64(out, 0x100000);
-            W64(out + 8, 0x80000);
-            W64(out + 0x10, 0x80000);
-            W32(out + 0x18, 32);
-            W32(out + 0x1C, 512);
+            W64(out, units);
+            W64(out + 8, free);
+            W64(out + 0x10, free);
+            W32(out + 0x18, sectors_per_unit);
+            W32(out + 0x1C, sector);
             *written = 0x20;
             return kSuccess;
         case 1:  // FileFsVolumeInformation
@@ -691,7 +747,8 @@ static uint32_t QueryVolume(uint32_t out, uint32_t len, uint32_t cls, uint32_t* 
 
 KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
     uint32_t iosb = a[1], out = a[2], len = a[3], cls = a[4], n;
-    uint32_t status = QueryVolume(out, len, cls, &n);
+    auto f = FileFromHandle(a[0]);
+    uint32_t status = QueryVolume(out, len, cls, &n, f && f->cdrom);
     if (status == kSuccess) IoStatus(iosb, kSuccess, n);
     return status;
 }
@@ -728,7 +785,7 @@ KERNEL_EXPORT(76, IoQueryVolumeInformation, 5) {
     }
     if (!o || o->type != ObjType::File) return kInvalidHandle;
     uint32_t n;
-    uint32_t status = QueryVolume(a[3], a[2], a[1], &n);
+    uint32_t status = QueryVolume(a[3], a[2], a[1], &n, std::static_pointer_cast<File>(o)->cdrom);
     if (a[4]) W32(a[4], n);
     return status;
 }
