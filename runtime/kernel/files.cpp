@@ -550,6 +550,9 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
         if (done < chunk) break;
     }
     f->pos = pos + n;
+    if (!write && n < len && FilesLogAll())  // the end of a file reached: copies do it at every file's end
+        LOGI("files: %s read short at %llu: %u of %u bytes (to %08X)", f->xbox.c_str(), (unsigned long long)pos, n,
+             len, buf);
     if (write && n < len) return Finish(*f, 0xC000007F, n, event, apc, apc_ctx, iosb);  // disk full
     if (!write && len && !n) return Finish(*f, kEndOfFile, 0, event, apc, apc_ctx, iosb);
     return Finish(*f, kSuccess, n, event, apc, apc_ctx, iosb);

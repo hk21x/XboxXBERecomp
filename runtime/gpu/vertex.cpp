@@ -353,6 +353,27 @@ bool UseIndexList(Assembled& out) {
 constexpr uint64_t kDenseSpanPerVertex = 4;
 constexpr uint64_t kDenseSpanSlack = 1024;
 
+// every byte the draw's vertices can read, from the lowest index's vertex to the highest's, in committed guest memory:
+// a mesh read as garbage (PGR2's DLC cities, objects in a newer layout) has a stream stride like 0xFFFFFFFC, which puts
+// its vertices gigabytes outside the guest's 4 GB, and copying them (the GPU renderers copy the range whole) faulted on
+// Windows inside memcpy
+bool VerticesReadable(const State& s, const Inputs& inputs, const DrawRange& d, uint64_t& bad_from, uint64_t& bad_to) {
+    using namespace kernel;
+    for (int k = 0; k < inputs.nregs; k++) {
+        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
+        const auto& st = s.streams[size_t(in.stream)];
+        uint64_t stride = StrideOf(s, inputs.layout, in);
+        uint64_t from = uint64_t(mem::VirtualFromPhysical(R32(st.vb + kResData))) + in.offset + d.first_vertex * stride;
+        uint64_t to = from + (d.span ? d.span - 1 : 0) * stride + HostFormat(in.type).bytes;
+        bad_from = from;
+        bad_to = to;
+        if (to > 0x100000000ull) return false;
+        for (uint64_t p = from & ~0xFFFull; p < to; p += 0x1000)
+            if (!mem::IsCommitted(uint32_t(p))) return false;
+    }
+    return true;
+}
+
 bool AssembleRaw(const State& s, const Inputs& inputs, const DrawRange& d, Assembled& out) {
     bool dense = uint64_t(d.span) <= uint64_t(d.count) * kDenseSpanPerVertex + kDenseSpanSlack;
     int slot[16];
@@ -491,6 +512,13 @@ bool Assemble(const State& state, uint32_t prim, uint32_t start, uint32_t count,
     int nregs = CollectRegs(s, *layout, regs, out);
     if (!nregs) return false;
     Inputs inputs = {*layout, regs, nregs};
+    uint64_t bad_from = 0, bad_to = 0;
+    if (!VerticesReadable(s, inputs, d, bad_from, bad_to)) {
+        LOG_FIRST(8, "gpu: a draw reads vertices outside the guest's memory (vertices %u to %u, %u drawn, bytes %llX to "
+                  "%llX): left out", d.first_vertex, d.first_vertex + d.span - 1, d.count,
+                  (unsigned long long)bad_from, (unsigned long long)bad_to);
+        return false;
+    }
 
     // the guest's own vertices when the input assembler can read every element of them
     bool raw = g_raw_vertices && RawReadable(s, inputs);
