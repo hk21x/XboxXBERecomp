@@ -159,6 +159,10 @@ std::unordered_map<uint32_t, std::shared_ptr<gpu::VertexShader>> g_vs;
 constexpr uint32_t kProgramSlots = 136;
 uint32_t g_program[kProgramSlots * 4] = {};
 uint32_t g_program_load = 0;  // the next dword written
+// the slot SelectVertexShader started the bound program at (-1: a created shader), and program memory written since:
+// the console runs program memory as it is when it draws, the title may load the program after selecting it
+int32_t g_program_slot = -1;
+bool g_program_written = false;
 std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
@@ -1263,6 +1267,7 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
+    g_program_slot = -1;
     if (h & 1) {
         auto it = g_vs.find(h);
         if (it != g_vs.end()) {
@@ -1371,8 +1376,27 @@ void SelectProgram(std::shared_ptr<gpu::VertexShader> vs, uint32_t handle, uint3
     vs->handle = handle | 1;
     g_state.vs = vs;
     g_state.vs_handle = handle | 1;
+    g_program_slot = int32_t(std::min(slot, kProgramSlots - 1));
+    g_program_written = false;
 }
 }  // namespace
+
+// the selected program again from program memory, once pushed instructions changed it (007: Everything or Nothing
+// selects slot 0 and then loads the frame's next program there); the render thread tells shaders apart by
+// pointer, so one object per declaration and program is kept
+void RefreshSelectedProgram() {
+    if (!g_program_written) return;
+    g_program_written = false;
+    if (g_program_slot < 0 || !g_state.vs) return;
+    auto vs = std::make_shared<gpu::VertexShader>(*g_state.vs);
+    SelectProgram(vs, g_state.vs_handle & ~1u, uint32_t(g_program_slot));
+    static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+    uint64_t key = gpu::Hash(vs->program.data(), vs->program.size() * 4,
+                             gpu::Hash(vs->inputs.data(), sizeof(vs->inputs), vs->handle));
+    auto& kept = made[key];
+    if (!kept) kept = vs;
+    g_state.vs = kept;
+}
 
 // (handle, slot): the handle's declaration with the program loaded at the slot (Forza's UI loads its programs
 // with LoadVertexShaderProgram, pushed, and selects them through SelectVertexShaderDirect)
@@ -1904,6 +1928,7 @@ void Walk(uint32_t end) {
             }
             if (m >= 0x0B00 && m < 0x0B80) {  // program instructions
                 if (g_program_load < kProgramSlots * 4) g_program[g_program_load++] = v;
+                g_program_written = true;
                 continue;
             }
             if (m == 0x1800 || m == 0x1808) {  // array elements: two 16 bit indices, or one 32 bit
@@ -1933,6 +1958,7 @@ void Walk(uint32_t end) {
                     g_im_indices.clear();
                 } else {
                     uint32_t prim = g_im_prim;
+                    RefreshSelectedProgram();
                     EndPrimitive();
                     if (prim && !g_im_indices.empty() && g_backend) {
                         if (g_pb_keep) {
@@ -1981,6 +2007,7 @@ void Walk(uint32_t end) {
         EndConstantGroup(method, n);
     }
     FlushPushedTriangles();
+    RefreshSelectedProgram();
     g_walk = end;
 }
 }  // namespace
