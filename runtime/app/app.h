@@ -165,6 +165,9 @@ struct GameInfo {
     bool bink_frame_hold = true;
     // the shape the title lays out its 2D for (HUD, menus): shown wider, that 2D is squeezed into it (gpu::HudSqueeze)
     float hud_aspect = 16.0f / 9.0f;
+    // that 2D also where drawn by a vertex program that only moves its position input to the screen (gpu::
+    // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form)
+    bool squeeze_screen_programs = false;
 };
 extern const GameInfo kGame;
 

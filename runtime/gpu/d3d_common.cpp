@@ -689,7 +689,7 @@ void DepthRead(uint32_t format, TexInfo& info) {
 
 void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, uint32_t gh, uint32_t w, float aspect,
                  float stretch, float squeeze) {
-    if (!a.pretransformed || aspect <= app::kGame.hud_aspect + 1e-3f) return;
+    if (!(a.pretransformed || ScreenDraw(s)) || aspect <= app::kGame.hud_aspect + 1e-3f) return;
     static std::mutex lock;
     static std::unordered_set<uint64_t> seen;  // each target with each outcome, once
     static int said = 0;
@@ -702,9 +702,17 @@ void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, u
          stretch, s.rs[kRsZEnable], SimpleState(s, kMZFunc), text[why]);
 }
 
+// a draw by a program that only moves its position to the screen, for a title asking (GameInfo::
+// squeeze_screen_programs); the answer kept with the shader
+bool ScreenDraw(const State& s) {
+    if (!app::kGame.squeeze_screen_programs || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
+    if (s.vs->screen < 0) s.vs->screen = ScreenProgram(s.vs->program) ? 1 : 0;
+    return s.vs->screen == 1;
+}
+
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
     const float wide = app::kGame.hud_aspect;
-    if (!a.pretransformed || aspect <= wide + 1e-3f || stretch <= 1) return 1;
+    if (!(a.pretransformed || ScreenDraw(s)) || aspect <= wide + 1e-3f || stretch <= 1) return 1;
     return wide / aspect;
 }
 

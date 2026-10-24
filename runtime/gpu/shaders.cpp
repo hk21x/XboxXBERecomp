@@ -1,4 +1,5 @@
 #include "gpu/shaders.h"
+#include "app/app.h"
 #include "gpu/vertex.h"
 
 #include <algorithm>
@@ -634,6 +635,35 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
     return k;
 }
 
+bool ScreenProgram(const std::vector<uint32_t>& prog) {
+    bool any = false;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
+        if (mac || ilu) {
+            uint32_t r = k.f(3, 20, 4), ir = mac ? 1 : r;
+            bool use_ilu = k.f(3, 2, 1) == 1;
+            bool out = k.f(3, 12, 4) && k.f(3, 11, 1) && (k.f(3, 3, 8) & 0xF) == 0;  // an output write to oPos
+            bool by_mac = mac && mac != 13 && ((k.f(3, 24, 4) && r == 12) || (out && !use_ilu));
+            bool by_ilu = ilu && ((k.f(3, 16, 4) && ir == 12) || (out && use_ilu));
+            // an ILU mov (1) of C, as the pass-through program writes w
+            if (by_ilu && (ilu != 1 || k.f(3, 28, 2) == 1 || (k.f(3, 28, 2) == 2 && k.f(1, 9, 4) != 0))) return false;
+            any |= by_ilu;
+            if (by_mac) {
+                if (mac > 4) return false;  // mov mul add mad
+                // operands read: A always, B for mul and mad, C for add and mad
+                bool used[3] = {true, mac == 2 || mac == 4, mac == 3 || mac == 4};
+                uint32_t mux[3] = {k.f(2, 26, 2), k.f(2, 11, 2), k.f(3, 28, 2)};
+                for (int i = 0; i < 3; i++)
+                    if (used[i] && (mux[i] == 1 || (mux[i] == 2 && k.f(1, 9, 4) != 0))) return false;
+                any = true;
+            }
+        }
+        if (k.f(3, 0, 1)) break;  // last instruction
+    }
+    return any;
+}
+
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode) {
     std::string s = Common();
     s += kVsHelpers;
@@ -672,6 +702,10 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         }
         if (k.f(3, 0, 1)) break;  // last instruction
     }
+    // ultrawide: 2D squeezed as pretransformed draws are (FixedVertexHlsl), at the near plane by its w (4 or less)
+    if (app::kGame.squeeze_screen_programs && ScreenProgram(prog))
+        s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5 && (hud.z == 0 || oPos.w <= 4))\n"
+             "        oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
     s += kVsEpilogue;
     return s;
 }

@@ -1208,7 +1208,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     // the renderers' HudSqueeze and vertex shader do
     float squeeze = 1;
     const bool depth_tested = s.rs[kRsZEnable] && s.simple[kMZFunc >> 2] != 0x207;
-    if (as.pretransformed && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
+    // a program only moving its position to the screen likewise, for a title asking (GameInfo::squeeze_screen_programs)
+    const bool screen = program && app::kGame.squeeze_screen_programs && ScreenProgram(s.vs->program);
+    if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
     for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
@@ -1225,6 +1227,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (program) {
             vp.Run(s.vs->program);
             o.pos = vp.out[0];
+            if (screen && o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f && (!depth_tested || o.pos[3] <= 4.0f))
+                o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
             o.pos[3] = MagClamp(o.pos[3]);
             o.attr[kD0] = vp.out[3];
             o.attr[kD1] = vp.out[4];
