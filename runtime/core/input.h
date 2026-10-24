@@ -27,6 +27,10 @@ int ControlByName(const char* name);  // -1 when unknown
 void Init();  // window thread, before boot
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
+// raw mouse movement, from the window thread (WM_INPUT): read into controller 1's right stick (Settings::mouse_look)
+void MouseMoved(int dx, int dy);
+// the mouse plays the right stick now: mouse look on, the game window in front, the settings window shut
+bool MouseLooking();
 void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)

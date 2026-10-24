@@ -123,7 +123,49 @@ void ApplyNow() {
     }
 }
 
+// mouse look (Settings::mouse_look): the cursor hidden and held in the window while the mouse plays the right stick
+void HoldCursor(HWND hwnd) {
+    static bool held = false;
+    bool want = input::MouseLooking();
+    if (want) {
+        RECT r;
+        GetClientRect(hwnd, &r);
+        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&r), 2);
+        ClipCursor(&r);
+    } else if (held) {
+        ClipCursor(nullptr);
+    }
+    held = want;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // mouse look: raw movement, the cursor kept hidden in the window
+    if (msg == WM_INPUT && kGame.mouse_look) {
+        RAWINPUT ri;
+        UINT size = sizeof(ri);
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) != UINT(-1) &&
+            ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) && input::MouseLooking())
+            input::MouseMoved(ri.data.mouse.lLastX, ri.data.mouse.lLastY);
+        HoldCursor(hwnd);
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    if (msg == WM_SETCURSOR && kGame.mouse_look && LOWORD(lp) == HTCLIENT) {
+        HoldCursor(hwnd);
+        if (input::MouseLooking()) {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+    }
+    // a key binding the settings window waits for takes the next mouse button too
+    if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN) {
+        uint16_t vk = msg == WM_LBUTTONDOWN   ? VK_LBUTTON
+                      : msg == WM_RBUTTONDOWN ? VK_RBUTTON
+                      : msg == WM_MBUTTONDOWN ? VK_MBUTTON
+                      : GET_XBUTTON_WPARAM(wp) == XBUTTON1 ? VK_XBUTTON1
+                                                           : VK_XBUTTON2;
+        std::lock_guard lock(UiLock());
+        if (OverlayKey(vk)) return 0;
+    }
     // the settings window: F1 opens and closes it, and a key binding it waits for takes the next key
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
         std::lock_guard lock(UiLock());
@@ -289,6 +331,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     RegisterClassExW(&wc);
     app::g_hwnd = CreateWindowExW(0, wc.lpszClassName, app::kGame.title, WS_POPUP, 0, 0, 1280, 720,
                                   nullptr, nullptr, inst, nullptr);
+    // mouse look: the mouse's raw movement (WM_INPUT), not the cursor's, which stops at the screen's edge
+    if (app::kGame.mouse_look) {
+        RAWINPUTDEVICE rid{0x01, 0x02, 0, app::g_hwnd};  // generic desktop, mouse
+        if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) LOGW("input: raw mouse input not registered (%lu)", GetLastError());
+    }
     // behind a splash the window stays hidden until the game's first frame; handed over, it is set up hidden
     if (handover) {
         app::ApplyNow();

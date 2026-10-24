@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -137,7 +138,49 @@ int16_t Stick(float neg, float pos) {
 }
 std::atomic<uint32_t> g_held[4];  // HeldControls, per port
 std::atomic<uint16_t> g_rumble[2];  // controller 1's motors as the game last set them, for the wheel
+
+// mouse look: the counts moved since the last poll, read as a rate into a stick deflection. kFullRate counts a second
+// at 100% sensitivity is full deflection; a deflection begins past kDeadZone (a game's own stick dead zone would
+// swallow slow moves) and follows the rate over about a frame (kSmooth seconds), so polls closer than a frame still
+// read it
+std::atomic<int> g_mouse_dx{0}, g_mouse_dy{0};
+constexpr float kFullRate = 2400.0f, kDeadZone = 0.2f, kSmooth = 1.0f / 60;
+
+void MouseStick(const app::Settings& s, int16_t& rx, int16_t& ry) {
+    static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    static float sx = 0, sy = 0;
+    auto now = std::chrono::steady_clock::now();
+    float dt = std::clamp(std::chrono::duration<float>(now - last).count(), 0.001f, 0.1f);
+    last = now;
+    float k = s.mouse_sensitivity / 100.0f / kFullRate / dt;
+    auto deflect = [](float v) {
+        if (v == 0) return 0.0f;
+        float a = std::min(std::fabs(v), 1.0f);
+        return std::copysign(kDeadZone + (1 - kDeadZone) * a, v);
+    };
+    float tx = deflect(g_mouse_dx.exchange(0) * k), ty = deflect(-g_mouse_dy.exchange(0) * k);
+    if (s.mouse_invert_y) ty = -ty;
+    float f = std::min(1.0f, dt / kSmooth);
+    sx += (tx - sx) * f;
+    sy += (ty - sy) * f;
+    if (std::fabs(sx) < 0.01f) sx = 0;
+    if (std::fabs(sy) < 0.01f) sy = 0;
+    rx = int16_t(std::clamp(rx + sx * 32767.0f, -32767.0f, 32767.0f));
+    ry = int16_t(std::clamp(ry + sy * 32767.0f, -32767.0f, 32767.0f));
+}
 }  // namespace
+
+void MouseMoved(int dx, int dy) {
+    g_mouse_dx += dx;
+    g_mouse_dy += dy;
+}
+
+bool MouseLooking() {
+    const app::Settings& s = app::Get();
+    HWND hwnd = static_cast<HWND>(app::Window());
+    return app::kGame.mouse_look && s.mouse_look && s.keyboard && hwnd && GetForegroundWindow() == hwnd &&
+           !app::OverlayOpen();
+}
 
 const char* ControlName(int c) { return c >= 0 && c < kControls ? kNames[c] : ""; }
 const char* ControlLabel(int c) { return c >= 0 && c < kControls ? kLabels[c] : ""; }
@@ -216,6 +259,12 @@ Pad Poll(int port) {
     p.ly = Stick(out[kLSDown], out[kLSUp]);
     p.rx = Stick(out[kRSLeft], out[kRSRight]);
     p.ry = Stick(out[kRSDown], out[kRSUp]);
+    if (port == 0 && MouseLooking()) {
+        MouseStick(s, p.rx, p.ry);
+    } else if (port == 0) {  // nothing kept from before (the settings window, another window in front)
+        g_mouse_dx = 0;
+        g_mouse_dy = 0;
+    }
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
 }

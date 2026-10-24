@@ -61,7 +61,8 @@ constexpr KeyName kKeyNames[] = {
     {VK_OEM_PERIOD, "period"}, {VK_OEM_2, "slash"}, {VK_OEM_1, "semicolon"}, {VK_OEM_7, "quote"},
     {VK_OEM_4, "left_bracket"}, {VK_OEM_6, "right_bracket"}, {VK_OEM_MINUS, "minus"}, {VK_OEM_PLUS, "equals"},
     {VK_F5, "f5"}, {VK_F6, "f6"}, {VK_F7, "f7"}, {VK_F8, "f8"}, {VK_F9, "f9"}, {VK_F10, "f10"}, {VK_F11, "f11"},
-    {VK_F12, "f12"}};
+    {VK_F12, "f12"}, {VK_LBUTTON, "mouse_left"}, {VK_RBUTTON, "mouse_right"}, {VK_MBUTTON, "mouse_middle"},
+    {VK_XBUTTON1, "mouse4"}, {VK_XBUTTON2, "mouse5"}};
 
 }  // namespace
 
@@ -81,8 +82,10 @@ uint16_t KeyFromName(const std::string& name) {
     return 0;
 }
 
-// arrows steer and move through menus (the left stick does both), W and S accelerate and brake, Enter or Space is A
+// arrows steer and move through menus (the left stick does both), W and S accelerate and brake, Enter or Space is A;
+// a title's own (GameInfo::default_keys) instead
 std::array<uint16_t, 2> DefaultKeys(int c) {
+    if (kGame.default_keys) return kGame.default_keys(c);
     switch (c) {
         case input::kUp: return {VK_NUMPAD8, 0};
         case input::kDown: return {VK_NUMPAD2, 0};
@@ -203,6 +206,9 @@ void Load() {
     for (uint32_t i = 0; i < kAspectCount; i++)
         if (aspect == kAspects[i]) s.aspect = i;
     s.keyboard = t["keyboard"].value_or(s.keyboard);
+    s.mouse_look = t["mouse_look"].value_or(s.mouse_look);
+    s.mouse_sensitivity = std::clamp<uint32_t>(t["mouse_sensitivity"].value_or(s.mouse_sensitivity), 10, 1000);
+    s.mouse_invert_y = t["mouse_invert_y"].value_or(s.mouse_invert_y);
     s.monitor = t["monitor"].value_or(s.monitor);
     s.pause_unfocused = t["pause_unfocused"].value_or(s.pause_unfocused);
     s.show_fps = t["show_fps"].value_or(s.show_fps);
@@ -319,6 +325,11 @@ toml::table Table() {
     if (!wheel_buttons.empty()) t.insert("wheel_buttons", wheel_buttons);
     if (!wheel_gears.empty()) t.insert("wheel_gears", wheel_gears);
     if (!keys.empty()) t.insert("keys", keys);
+    if (kGame.mouse_look) {
+        t.insert("mouse_look", s.mouse_look);
+        t.insert("mouse_sensitivity", int64_t(s.mouse_sensitivity));
+        t.insert("mouse_invert_y", s.mouse_invert_y);
+    }
     if (!pad.empty()) t.insert("gamepad", pad);
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);

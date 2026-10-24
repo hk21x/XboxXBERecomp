@@ -367,7 +367,18 @@ void Controls(Settings& s) {
         for (int c = 0; c < input::kControls; c++) s.pad_map[c] = uint8_t(c);
         Save();
     }
-    ImGui::TextDisabled("Click a key box, then press the key (Escape clears it). Each input takes up to two keys.");
+    if (kGame.mouse_look) {
+        if (ImGui::Checkbox("Mouse moves the right stick", &s.mouse_look)) Save();
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Invert mouse up and down", &s.mouse_invert_y)) Save();
+        int sens = int(s.mouse_sensitivity);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+        if (ImGui::SliderInt("Mouse sensitivity (%)", &sens, 10, 1000)) {
+            s.mouse_sensitivity = uint32_t(sens);
+            Save();
+        }
+    }
+    ImGui::TextDisabled("Click a key box, then press the key or mouse button (Escape clears it). Each input takes up to two keys.");
     ImGui::TextDisabled("On a controller, Back + Start opens this window and Start closes it.");
     if (!ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg)) return;
     // the names and keys at their full width, the controller input takes what is left

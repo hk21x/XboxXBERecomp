@@ -35,6 +35,11 @@ struct Settings {
     std::vector<uint8_t> pad_map;    // empty: each input drives itself
     std::vector<std::array<uint16_t, 2>> keys;  // empty: the default keys
     bool keyboard = true;
+    // the mouse moves controller 1's right stick, for a title that offers it (GameInfo::mouse_look): the cursor is
+    // held in the window while the game has it
+    bool mouse_look = true;
+    uint32_t mouse_sensitivity = 100;  // percent
+    bool mouse_invert_y = false;
     uint32_t monitor = 0;            // 0 the primary display, n the nth display Windows lists
     bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
     bool show_fps = false;           // frames a second in a corner
@@ -174,6 +179,10 @@ struct GameInfo {
     // a file the title asks to open (its Xbox path, as named) is reported missing when this says so: a title that
     // passes over a missing movie skips it (EoN's logos, by a setting)
     bool (*hide_file)(const std::string& xbox_path) = nullptr;
+    // the mouse can play controller 1's right stick (Settings::mouse_look): a shooter's camera and aim
+    bool mouse_look = false;
+    // the keys each input::Control starts with (two Windows virtual keys, 0 none), else the SDK's (DefaultKeys)
+    std::array<uint16_t, 2> (*default_keys)(int c) = nullptr;
 };
 extern const GameInfo kGame;
 
