@@ -1725,6 +1725,35 @@ uint32_t g_im_prim = 0, g_im_mask = 0;  // open primitive, slots it wrote
 float g_im_attr[64];                    // 16 slots of x y z w
 std::vector<float> g_im_vertices;       // every slot per vertex
 std::vector<uint16_t> g_im_indices;     // array elements (0x1800, 0x1808): drawn from the bound vertex data
+// triangles of pushed indexed strips, fans and lists in a row, drawn as one list: a model built as a push buffer is
+// hundreds of short strips with no state between them (007: Everything or Nothing's characters, over half its draws)
+std::vector<uint16_t> g_im_batch;
+
+void FlushPushedTriangles() {
+    if (g_im_batch.empty()) return;
+    if (g_backend) {
+        auto idx = reinterpret_cast<const uint8_t*>(g_im_batch.data());
+        uint32_t count = uint32_t(g_im_batch.size());
+        FrameLogDraw(5, 0, count, idx);
+        g_backend->Draw(g_state, 5, 0, count, idx);
+    }
+    g_im_batch.clear();
+}
+
+// a strip (6), fan (7) or list (5) of indices as list triangles with the console's winding; degenerate ones dropped
+void BatchPushedTriangles(uint32_t prim, const std::vector<uint16_t>& in) {
+    auto add = [](uint16_t a, uint16_t b, uint16_t c) {
+        if (a == b || b == c || a == c) return;
+        g_im_batch.insert(g_im_batch.end(), {a, b, c});
+    };
+    size_t n = in.size();
+    if (prim == 5)
+        for (size_t i = 0; i + 2 < n; i += 3) add(in[i], in[i + 1], in[i + 2]);
+    else if (prim == 6)
+        for (size_t i = 0; i + 2 < n; i++) i & 1 ? add(in[i + 1], in[i], in[i + 2]) : add(in[i], in[i + 1], in[i + 2]);
+    else
+        for (size_t i = 1; i + 1 < n; i++) add(in[0], in[i], in[i + 1]);
+}
 
 // visibility tests: depth passing pixels are counted while enabled, a report gets the count since the clear,
 // at a physical address in the first 16 MB
@@ -1863,6 +1892,7 @@ void Walk(uint32_t end) {
         if ((head & 0xA0030003) || n * 4 > end - p) break;  // anything but a method header
         for (uint32_t i = 0; i < n; i++, p += 4) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4, v = R32(p);
+            if (!g_im_batch.empty() && m != 0x17FC && m != 0x1800 && m != 0x1808) FlushPushedTriangles();  // state first
             float f, *a = g_im_attr;
             bool last = true;  // the slot's last component
             std::memcpy(&f, &v, 4);
@@ -1907,6 +1937,9 @@ void Walk(uint32_t end) {
                     if (prim && !g_im_indices.empty() && g_backend) {
                         if (g_pb_keep) {
                             LOG_FIRST(4, "d3d: pushed indexed primitive while a push buffer records, not kept");
+                        } else if (prim >= 5 && prim <= 7) {
+                            SyncDeferred();
+                            BatchPushedTriangles(prim, g_im_indices);
                         } else {
                             SyncDeferred();
                             auto idx = reinterpret_cast<const uint8_t*>(g_im_indices.data());
@@ -1947,6 +1980,7 @@ void Walk(uint32_t end) {
         }
         EndConstantGroup(method, n);
     }
+    FlushPushedTriangles();
     g_walk = end;
 }
 }  // namespace
