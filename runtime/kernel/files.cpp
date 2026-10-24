@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "app/app.h"
 #include "kernel/disc.h"
 #include "kernel/kernel.h"
 #include "kernel/exports.h"
@@ -392,6 +393,13 @@ bool ReadGameFile(const std::string& xbox_path, std::vector<uint8_t>& out) {
     return true;
 }
 
+// a file the title hides (GameInfo::hide_file): opened, it is missing
+static bool Hidden(const std::string& name) {
+    if (!app::kGame.hide_file || !app::kGame.hide_file(name)) return false;
+    FILE_LOG(200, "hidden %s", name.c_str());
+    return true;
+}
+
 // exports
 
 KERNEL_EXPORT(190, NtCreateFile, 9) {
@@ -399,6 +407,10 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     (void)access;
     uint32_t root;
     std::string name = ObjectName(attrs, &root);
+    if (disposition == 1 && Hidden(name)) {
+        IoStatus(iosb, kObjectNameNotFound, 5);
+        return kObjectNameNotFound;
+    }
     Target t = Resolve(name, root);
     if (t.disc) return OpenOnDisc(t.entry, name, handle_out, iosb, disposition, options);
     const std::string& host = t.host;
@@ -505,6 +517,10 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     uint32_t handle_out = a[0], attrs = a[2], iosb = a[3], options = a[5];
     uint32_t root;
     std::string name = ObjectName(attrs, &root);
+    if (Hidden(name)) {
+        IoStatus(iosb, kObjectNameNotFound, 5);
+        return kObjectNameNotFound;
+    }
     Target t = Resolve(name, root);
     if (t.disc) return OpenOnDisc(t.entry, name, handle_out, iosb, 1, options);
     const std::string& host = t.host;
@@ -843,6 +859,7 @@ KERNEL_EXPORT(207, NtQueryDirectoryFile, 10) {
 
 KERNEL_EXPORT(210, NtQueryFullAttributesFile, 2) {
     std::string name = ReadAnsiString(R32(a[0] + 4));
+    if (Hidden(name)) return kObjectNameNotFound;
     Target t = Resolve(name, R32(a[0]));
     std::error_code ec;
     if (t.disc ? !t.entry : t.host.empty() || !fs::exists(t.host, ec)) {

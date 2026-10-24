@@ -171,6 +171,9 @@ struct GameInfo {
     // a PAL release (the certificate's game regions without North America) runs on a PAL console with PAL 60 Hz on:
     // a title naming its files by the video standard finds the disc's (EoN's movies are _pal and _palw only)
     bool pal_console = false;
+    // a file the title asks to open (its Xbox path, as named) is reported missing when this says so: a title that
+    // passes over a missing movie skips it (EoN's logos, by a setting)
+    bool (*hide_file)(const std::string& xbox_path) = nullptr;
 };
 extern const GameInfo kGame;
 
