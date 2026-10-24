@@ -305,8 +305,11 @@ uint32_t g_made_samples[2] = {1, 1};
 // State::aa_x, aa_y: D3DRS_MULTISAMPLEMODE (on the back buffer) or _RENDERTARGETMODE (on another target) asking for
 // more samples than the target was made with: D3DMULTISAMPLEMODE_1X 0, _2X 1 (the made buffer's way, else across),
 // _4X 2 (2 by 2). Fewer, as a supersampled buffer drawn 1X, keep 1: the renderer makes the buffer its drawn size.
+// Any of the frame buffers counts as the back buffer: they take turns at it (EoN's second mission draws its frames
+// into its two buffers in turn, through both surface objects; only the back buffer's drew particles in place).
 void UpdateSampleScale() {
-    bool back = g_state.rt.header && g_state.rt.header == g_buffers[1];
+    bool back = false;
+    for (uint32_t i = 0; i < g_buffer_count; i++) back |= g_state.rt.header && g_state.rt.header == g_buffers[i];
     uint32_t made_x = back ? g_made_samples[0] : 1, made_y = back ? g_made_samples[1] : 1;
     uint32_t mode = g_state.rs[back ? gpu::kRsMultiSampleMode : gpu::kRsMultiSampleRenderTargetMode];
     uint32_t x = 1, y = 1;
@@ -322,7 +325,7 @@ void UpdateSampleScale() {
             uint32_t w, h;
             gpu::SurfaceSize(g_state.rt, w, h);
             LOGR("d3d: MultiSampleMode %u with target %08X (%ux%u, data %08X)%s: drawn %ux%u to a pixel", asked,
-                 g_state.rt.header, w, h, g_state.rt.data, back ? ", the back buffer" : ", not the back buffer",
+                 g_state.rt.header, w, h, g_state.rt.data, back ? ", a frame buffer" : ", not a frame buffer",
                  g_state.aa_x, g_state.aa_y);
         }
     }
