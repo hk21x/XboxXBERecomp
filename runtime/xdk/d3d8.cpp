@@ -1374,7 +1374,17 @@ void SelectProgram(std::shared_ptr<gpu::VertexShader> vs, uint32_t handle, uint3
         if (g_program[i * 4 + 3] & 1) break;
     }
     vs->handle = handle | 1;
-    g_state.vs = vs;
+    // the renderers (and EndPrimitive) tell shaders apart by pointer, and titles select hundreds of times a frame
+    // (007: Everything or Nothing): one object per declaration and program, or every select is a new shader
+    static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+    uint64_t key = gpu::Hash(vs->program.data(), vs->program.size() * 4,
+                             gpu::Hash(vs->inputs.data(), sizeof(vs->inputs), vs->handle));
+    key = gpu::Hash(vs->stream_stride.data(), sizeof(vs->stream_stride), gpu::Hash(vs->decl.data(), vs->decl.size() * 4, key));
+    auto& kept = made[key];
+    if (!kept || std::memcmp(kept->inputs.data(), vs->inputs.data(), sizeof(vs->inputs)) || kept->program != vs->program ||
+        kept->decl != vs->decl || kept->stream_stride != vs->stream_stride || kept->constants != vs->constants)
+        kept = vs;
+    g_state.vs = kept;
     g_state.vs_handle = handle | 1;
     g_program_slot = int32_t(std::min(slot, kProgramSlots - 1));
     g_program_written = false;
@@ -1383,19 +1393,12 @@ void SelectProgram(std::shared_ptr<gpu::VertexShader> vs, uint32_t handle, uint3
 
 // the selected program again from program memory, once pushed instructions changed it (007: Everything or Nothing
 // selects slot 0 and then loads the frame's next program there); the render thread tells shaders apart by
-// pointer, so one object per declaration and program is kept
+// pointer: SelectProgram keeps one object per declaration and program
 void RefreshSelectedProgram() {
     if (!g_program_written) return;
     g_program_written = false;
     if (g_program_slot < 0 || !g_state.vs) return;
-    auto vs = std::make_shared<gpu::VertexShader>(*g_state.vs);
-    SelectProgram(vs, g_state.vs_handle & ~1u, uint32_t(g_program_slot));
-    static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
-    uint64_t key = gpu::Hash(vs->program.data(), vs->program.size() * 4,
-                             gpu::Hash(vs->inputs.data(), sizeof(vs->inputs), vs->handle));
-    auto& kept = made[key];
-    if (!kept) kept = vs;
-    g_state.vs = kept;
+    SelectProgram(std::make_shared<gpu::VertexShader>(*g_state.vs), g_state.vs_handle & ~1u, uint32_t(g_program_slot));
 }
 
 // (handle, slot): the handle's declaration with the program loaded at the slot (Forza's UI loads its programs
