@@ -464,11 +464,12 @@ const char* kPsSbyte = R"(
 // unorm to byte b, less lo under 128 or hi from 128, over d
 float3 sbyte(float3 u, float lo, float hi, float d) { float3 b = u * 255; return (b - (b >= 128 ? hi : lo)) / d; }
 )";
-const char* kPsTail = R"(// a D24S8 word's bytes read as colour: depth's top byte in alpha, the stencil byte (0 here) lowest
-float4 depthbytes(float d, int abgr) {
+const char* kPsTail = R"(// a D24S8 word's bytes read as colour, the stencil byte (0 here) lowest: order 0 A8R8G8B8 (depth's top byte in
+// alpha), 1 A8B8G8R8, 2 B8G8R8A8 (the top byte in blue, the stencil byte in alpha)
+float4 depthbytes(float d, int order) {
     uint v = uint(saturate(d) * 16777215.0 + 0.5);
     float hi = float(v >> 16) / 255.0, mid = float((v >> 8) & 255) / 255.0, lo = float(v & 255) / 255.0;
-    return abgr ? float4(0, lo, mid, hi) : float4(mid, lo, 0, hi);
+    return order == 1 ? float4(0, lo, mid, hi) : order == 2 ? float4(lo, mid, hi, 0) : float4(mid, lo, 0, hi);
 }
 float4 spreadtap(Texture2D t, SamplerState s, float2 uv, float4 w, float m) {
     float4 c = 0;
@@ -845,7 +846,7 @@ std::string PixelHlsl(const PixelKey& k) {
             uint32_t m = (k.tex_modes >> (i * 5)) & 0x1F;
             bool fetch = m && m != 4 && m != 5 && m != 0xA && m != 0x11;
             if (fetch && (k.tex[i].flags & kTexDepthBytes))
-                body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, (k.tex[i].flags & kTexDepthAbgr) ? 1 : 0);
+                body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, DepthBytesArg(k.tex[i].flags));
             if (fetch && (k.tex[i].flags & kTexOpaque)) body += F("t%d.a = 1;\n", i);
         }
         for (int i = 0; i < 4; i++) {
@@ -901,7 +902,7 @@ std::string PixelHlsl(const PixelKey& k) {
             else if (t.kind) body += F("float4 t%d = tex%d.Sample(smp%d, tc%d.xyz);\n", i, i, i, i);
             else body += F("float4 t%d = float4(1,1,1,1);\n", i);
             body += Hooks().Fetched(t, i);
-            if (t.flags & kTexDepthBytes) body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, (t.flags & kTexDepthAbgr) ? 1 : 0);
+            if (t.flags & kTexDepthBytes) body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, DepthBytesArg(t.flags));
             if (t.flags & kTexOpaque) body += F("t%d.a = 1;\n", i);
             if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
             const char* dst = f[8] == 5 ? "tmp" : "cur";

@@ -662,7 +662,8 @@ bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZ
 
 void DepthRead(uint32_t format, TexInfo& info) {
     if (!Format(format).depth && DepthBytesOrder(format)) {
-        info.flags |= kTexDepthBytes | (DepthBytesOrder(format) == 2 ? kTexDepthAbgr : 0);
+        int order = DepthBytesOrder(format);
+        info.flags |= kTexDepthBytes | (order == 2 ? kTexDepthAbgr : 0) | (order == 3 ? kTexDepthBgra : 0);
         LOG_FIRST(4, "gpu: a depth buffer read as colour format %X: its bytes, depth's top byte in alpha", format);
         return;
     }
