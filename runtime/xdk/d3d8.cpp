@@ -60,6 +60,14 @@ using namespace kernel;
 #define SYM_D3DDevice_SetVertexShaderConstant FFFFFE0C
 #define HAS_D3DDevice_SetVertexShaderConstant 0
 #endif
+#ifndef SYM_D3DDevice_BeginPushBuffer
+#define SYM_D3DDevice_BeginPushBuffer FFFFFE11
+#define HAS_D3DDevice_BeginPushBuffer 0
+#endif
+#ifndef SYM_D3DDevice_EndPushBuffer
+#define SYM_D3DDevice_EndPushBuffer FFFFFE12
+#define HAS_D3DDevice_EndPushBuffer 0
+#endif
 #ifndef SYM_D3DDevice_RunPushBuffer
 #define SYM_D3DDevice_RunPushBuffer FFFFFE0D
 #define HAS_D3DDevice_RunPushBuffer 0
@@ -161,7 +169,8 @@ uint32_t g_depth = 0;
 uint32_t g_copy_target = 0;
 bool g_copy_open = false;
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
-uint32_t g_walk = 0;  // first scratch command not read yet
+uint32_t g_walk = 0;        // first pushed command not read yet
+uint32_t g_walk_limit = 0;  // end of the buffer it is in: the scratch buffer, or a push buffer being recorded
 bool g_report_asked = false;  // a visibility report asked for since the last flush
 
 uint32_t Dev(uint32_t off) { return R32(kDevice + off); }
@@ -213,6 +222,7 @@ uint32_t ScratchPush(uint32_t bytes = 0) {
     SetDev(kDevPush, g_scratch_push);
     SetDev(kDevThreshold, g_scratch_push + g_scratch_size - 0x1000);
     g_walk = g_scratch_push;
+    g_walk_limit = g_scratch_push + g_scratch_size;
     return g_scratch_push;
 }
 
@@ -1793,7 +1803,7 @@ void EndPrimitive() {
 // reads the commands pushed since the last call: vertex data between a begin and an end is drawn, visibility tests
 // are run, vertex shader constants are loaded, the rest is skipped
 void Walk(uint32_t end) {
-    if (!g_walk || end < g_walk || end > g_scratch_push + g_scratch_size) return;
+    if (!g_walk || end < g_walk || end > g_walk_limit) return;
     for (uint32_t p = g_walk; p + 4 <= end;) {
         // count in bits 18 to 28, bit 30 keeps the method for every value
         uint32_t head = R32(p), method = head & 0x1FFC, n = (head >> 18) & 0x7FF;
@@ -1863,6 +1873,30 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
     DrawUp(a[0], a[1], HostPtr(a[2]), a[3]);
     return 0;
 }
+
+// BeginPushBuffer(push buffer) records what follows into the title's buffer: the library's own code points the
+// device's push at it, and Walk reads the commands there as the title writes them, in order with the calls the host
+// draws at once (007: Everything or Nothing pushes its vertex programs and constants while it records a frame).
+// EndPushBuffer: the rest of the buffer read, the push back where it was.
+#if HAS_D3DDevice_BeginPushBuffer && HAS_D3DDevice_EndPushBuffer
+X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_BeginPushBuffer));
+X86_FUNC(GUEST(D3DDevice_BeginPushBuffer)) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t pb = R32(ctx.esp + 4);
+    Walk(Dev(kDevPush));
+    GUEST_ORIG(D3DDevice_BeginPushBuffer)(ctx, base);
+    g_walk = Dev(kDevPush);
+    g_walk_limit = R32(pb + 4) + R32(pb + 0x10);  // Data, AllocationSize
+}
+X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_EndPushBuffer));
+X86_FUNC(GUEST(D3DDevice_EndPushBuffer)) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    GUEST_ORIG(D3DDevice_EndPushBuffer)(ctx, base);
+    g_walk = Dev(kDevPush);
+    g_walk_limit = g_scratch_push + g_scratch_size;
+}
+#endif
 
 // RunPushBuffer(push buffer, fixup) runs recorded hardware commands; not replayed yet: each one is logged once (its
 // size, Common and first commands) so what they hold can be read
