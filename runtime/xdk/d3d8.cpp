@@ -1519,7 +1519,19 @@ uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h = 1469598103934665603ull) {
 }
 FILE* g_framelog = nullptr;  // open while frames are being logged
 uint32_t g_framelog_first = 0;
+// a texture whose data is physical address 0: a header the title filled from something the host left empty. Its
+// address and fields, once each
+void WarnEmptyTextures() {
+    for (int i = 0; i < 4; i++)
+        if (uint32_t t = g_state.textures[i]; t && (R32(t + 4) & 0x0FFFFFFF) == 0) {
+            static std::unordered_set<uint32_t> told;
+            if (told.size() < 16 && told.insert(t).second)
+                LOGW("d3d: stage %d texture %08X points at physical address 0 (common %08X, format %08X, size %08X, frame %u)",
+                     i, t, R32(t), R32(t + 12), R32(t + 16), uint32_t(g_presents));
+        }
+}
 void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    WarnEmptyTextures();
     static const long frames = [] {
         const char* e = std::getenv("XBE_FRAMELOG");
         return e && *e ? std::atol(e) : 0L;
@@ -1724,6 +1736,7 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
 void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
+    WarnEmptyTextures();
     if (KeepDraw(prim, 0, count, 0, vertices, stride)) return;
     auto stream = g_state.streams[0];
     bool input = g_state.input_active;  // vertices from memory are read by the shader's declaration
