@@ -660,6 +660,16 @@ UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 // depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
 bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
 
+// the depth buffer is one of the draw's textures and the draw leaves it alone (no test that fails, no depth or
+// stencil writes): the console reads it while it is bound, which D3D12 and D3D11 do not allow, so it is not bound
+// (007: Everything or Nothing's weapon carousel reads its depth buffer as B8G8R8A8 colour so)
+bool DepthOnlySampled(const State& s) {
+    if (!s.zs.header || DepthTested(s) || SimpleState(s, kMZWriteEnable) || s.rs[kRsStencilEnable]) return false;
+    for (uint32_t t : s.textures)
+        if (t && (kernel::R32(t + 4) & 0x0FFFFFFF) == (s.zs.data & 0x0FFFFFFF)) return true;
+    return false;
+}
+
 void DepthRead(uint32_t format, TexInfo& info) {
     if (!Format(format).depth && DepthBytesOrder(format)) {
         int order = DepthBytesOrder(format);

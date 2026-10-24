@@ -649,7 +649,7 @@ bool D3D11Backend::TargetStale(uint32_t data) const {
 }
 
 bool D3D11Backend::BindTargets(const State& s) {
-    bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
+    bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
     // the colour target on the depth buffer's own memory: one resource cannot be bound as both here, so what the
     // console writes there alone. 007: Everything or Nothing draws its character shadows into a D24S8 surface given
     // as both with colour writes off (the depth target), and copies the frame into a colour surface on the same

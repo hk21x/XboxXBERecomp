@@ -1035,7 +1035,7 @@ Target* D3D12Backend::DepthTarget(const State& s) {
 
 bool D3D12Backend::BindTargets(const State& s) {
     // the same surfaces as the last lookup this frame, no target made or dropped since: the same targets
-    bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
+    bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
     bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
     bool colour = SimpleState(s, kMColorWriteEnable) != 0;
     uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
