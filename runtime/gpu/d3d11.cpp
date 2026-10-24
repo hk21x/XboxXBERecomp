@@ -1516,7 +1516,7 @@ void D3D11Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     // points: host pixels per console pixel
     if (k.topo == uint32_t(Topology::Points)) {
         const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
-        c.surf[3] = t && t->gh ? float(t->h) / float(t->gh) : 1.0f;
+        c.surf[3] = t && t->gh ? float(t->h) * s.aa_y / float(t->gh) : 1.0f;
     }
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
@@ -1562,7 +1562,7 @@ void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw) {
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
     float W = float(b->w), H = float(b->h);
     D3D11_VIEWPORT vp{0, 0, W, H, 0, 1};
-    float sx = W / gw, sy = b->gh ? H / b->gh : sx;  // across and down differ for a stretched target
+    float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(s.viewport.x * sx);
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
@@ -1727,6 +1727,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // constants
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
+    size = DrawnExtent(s, size);
     DrawConstants c{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     float stretch = bound_rt_ ? XStretch(aspect_, guest_h_, bound_rt_->gw, bound_rt_->gh) : 0;
@@ -1734,7 +1735,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     c.hud[2] = DepthTested(s) ? 1.0f : 0.0f;
     if (bound_rt_)
         NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_, stretch, c.hud[0]);
-    c.hud[1] = (bound_rt_ ? bound_rt_->gw : guest_w_) * 0.5f;
+    c.hud[1] = (bound_rt_ ? bound_rt_->gw : guest_w_) * 0.5f / s.aa_x;
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
     SetViewportScissor(s, size.w);

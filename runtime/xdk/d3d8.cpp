@@ -299,9 +299,27 @@ void UpdateViewportConstants() {
     }
 }
 
+// the back buffer's samples across and down, from the D3DPRESENT_PARAMETERS MultiSampleType (0x2021, 2 across)
+uint32_t g_made_samples[2] = {1, 1};
+
+// State::aa_x, aa_y: D3DRS_MULTISAMPLEMODE (on the back buffer) or _RENDERTARGETMODE (on another target) asking for
+// more samples than the target was made with: D3DMULTISAMPLEMODE_1X 0, _2X 1 (the made buffer's way, else across),
+// _4X 2 (2 by 2). Fewer, as a supersampled buffer drawn 1X, keep 1: the renderer makes the buffer its drawn size.
+void UpdateSampleScale() {
+    bool back = g_state.rt.header && g_state.rt.header == g_buffers[1];
+    uint32_t made_x = back ? g_made_samples[0] : 1, made_y = back ? g_made_samples[1] : 1;
+    uint32_t mode = g_state.rs[back ? gpu::kRsMultiSampleMode : gpu::kRsMultiSampleRenderTargetMode];
+    uint32_t x = 1, y = 1;
+    if (mode == 2) x = y = 2;
+    else if (mode == 1) (made_y == 2 && made_x == 1 ? y : x) = 2;
+    g_state.aa_x = std::max<uint32_t>(x / made_x, 1);
+    g_state.aa_y = std::max<uint32_t>(y / made_y, 1);
+}
+
 void SetComplex(uint32_t rs, uint32_t v) {
     g_state.rs[rs] = v;
     if (uint32_t t = xdk::states::kNumbering.rs[rs]; t != xdk::states::kNone) W32(kRenderState + t * 4, v);
+    if (rs == gpu::kRsMultiSampleMode || rs == gpu::kRsMultiSampleRenderTargetMode) UpdateSampleScale();
 }
 
 // a texture stage state as the library stores it, in the title's numbering
@@ -389,7 +407,9 @@ uint32_t GivenSurface(uint32_t at) {
 // objects become the buffers, in this size and format (a supersampled size is not kept: the renderer scales instead).
 bool MakeFrameBuffers(uint32_t pp) {
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
-    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
+    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), samples = R32(pp + 0x10);
+    g_made_samples[0] = std::max<uint32_t>(samples >> 4 & 0xF, 1);
+    g_made_samples[1] = std::max<uint32_t>(samples & 0xF, 1);
     uint32_t given[3] = {GivenSurface(pp + 0x34), GivenSurface(pp + 0x38), GivenSurface(pp + 0x3C)};
     uint32_t given_depth = GivenSurface(pp + 0x40);
     if (given_depth && !auto_depth) depth_fmt = R32(given_depth + 12) >> 8 & 0xFF;
@@ -441,6 +461,7 @@ bool MakeFrameBuffers(uint32_t pp) {
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
     g_state.rt = SurfaceOf(g_buffers[1]);
     g_state.zs = SurfaceOf(g_depth);
+    UpdateSampleScale();
     return fresh;
 }
 }  // namespace
@@ -711,6 +732,7 @@ void SetTargets(X86Context& ctx, uint32_t rt, uint32_t zs) {
     Release(ctx, old_zs);
     g_state.rt = SurfaceOf(rt);
     g_state.zs = SurfaceOf(zs);
+    UpdateSampleScale();
 }
 
 HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
@@ -805,6 +827,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         SetDev(kDevDepth, 0);
         g_state.rt = SurfaceOf(g_copy_target);
         g_state.zs = SurfaceOf(0);
+        UpdateSampleScale();
         // in the device's slots too, with their references: the title may read them back (Forza 0x1DB3C0 takes
         // texture 0 with GetTexture2 and releases it)
         for (uint32_t i = 0; i < 4; i++) {
@@ -872,6 +895,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         SetDev(kDevSwapCount, Dev(kDevSwapCount) + 1);
     }
     g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
+    UpdateSampleScale();
     return Dev(kDevSwapCount);
 }
 }  // namespace

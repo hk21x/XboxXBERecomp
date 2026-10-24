@@ -1264,6 +1264,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         for (int a : {kD0, kD1, kB0, kB1})
             for (int j = 0; j < 4; j++) o.attr[a][j] = Sat(o.attr[a][j]);
         if (!s.rs[kRsSpecularEnable]) o.attr[kD1] = o.attr[kB1] = V(0, 0, 0, 1);
+        // drawn in pixels of aa_x by aa_y target pixels (State::aa_x)
+        o.pos[0] *= float(s.aa_x);
+        o.pos[1] *= float(s.aa_y);
     }
 
     // point sprites: each point a square of its size in console pixels, clamped to D3DRS_POINTSIZE_MIN and _MAX, every
@@ -1281,7 +1284,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             for (uint32_t i = 0; i < as.vertex_count; i++) points.push_back(i);
         for (uint32_t pi = 0; pi < points.size(); pi++) {
             uint32_t vi = points[pi];
-            float size = std::clamp(point_size[vi] > 0 ? point_size[vi] : fixed, smin, smax) * 0.5f;
+            float size = std::clamp(point_size[vi] > 0 ? point_size[vi] : fixed, smin, smax) * 0.5f * float(s.aa_x);
             uint32_t first = uint32_t(quads.size());
             for (int c = 0; c < 4; c++) {
                 Shaded q = verts[vi];
@@ -1364,6 +1367,10 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         right = std::min(right, int(s.scissors[2]));
         bottom = std::min(bottom, int(s.scissors[3]));
     }
+    left *= int(s.aa_x);
+    right *= int(s.aa_x);
+    top *= int(s.aa_y);
+    bottom *= int(s.aa_y);
     left = std::max(left, 0);
     top = std::max(top, 0);
     right = std::min(right, int(gw));

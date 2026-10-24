@@ -118,6 +118,9 @@ struct GuestExtent {
     uint32_t h;
 };
 
+// the size in the pixels draws address (State::aa_x, aa_y)
+inline GuestExtent DrawnExtent(const State& s, GuestExtent size) { return {size.w / s.aa_x, size.h / s.aa_y}; }
+
 // how each stage reads its texture, for the texel constants
 struct StageReads {
     bool rt[4] = {};            // a render target

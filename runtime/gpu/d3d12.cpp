@@ -1962,7 +1962,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     }
     FillSurfaceConstants(s, size, c);
     // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
-    if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale();
+    if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale() * s.aa_y;
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
     if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);
@@ -2115,7 +2115,7 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
     DrawStateCache& c = ds_cache_;
     if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) cl_->RSSetViewports(1, &vp);
-    float sx = W / gw, sy = b->gh ? H / b->gh : sx;  // across and down differ for a stretched target
+    float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(s.viewport.x * sx);
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
@@ -2344,6 +2344,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     auto perf_consts = PerfNow();
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
+    size = DrawnExtent(s, size);
     DrawConstants c{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
@@ -2352,7 +2353,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_,
                     XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);
     c.hud[1] = guest_w_ * 0.5f;
-    if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f;
+    if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f / s.aa_x;
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
 
