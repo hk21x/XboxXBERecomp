@@ -156,6 +156,10 @@ struct GameInfo {
     std::vector<const char*> same_code = {};
     // a steering wheel's force feedback: what the player's car is doing, each poll of controller 1 (input.h)
     void (*wheel)(input::WheelFeel& feel) = nullptr;
+    // the level (0 to 1) of voices heard only through the effect sends, which the mixer plays into the speakers in
+    // place of the DSP image's effects: a title whose image applies a volume there (PGR2's radio, at the music
+    // volume) reports it here, read on the audio thread at each mix; none is full level
+    float (*send_level)() = nullptr;
     // movies step one frame per game frame and the host holds a frame BinkWait says is early (xdk/bink.cpp); off for a
     // title whose movie loop waits on BinkWait itself
     bool bink_frame_hold = true;

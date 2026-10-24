@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/app.h"
 #include "audio/audio.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
@@ -325,16 +326,17 @@ void Levels(Voice& v, float g[2][2]) {
     uint32_t per = std::max<uint32_t>(n / voices, 2), step = v.channels == 1 ? 1 : 2;
     // an audible speaker bin: the effect sends are left out (their effects are not modelled). With none, the sends stand
     // in for what the effects would put out: PGR2's radio goes to FXSEND 14 alone, its speaker bins at -10000, and the
-    // DSP image plays it into the speakers. Heard dry, left and right kept.
+    // DSP image plays it into the speakers. Heard dry, left and right kept, at the title's send_level (app.h).
     bool speakers = false;
     for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3 && (!v.nbins || v.bin_mb[bin[s]] > -10000);
     const bool sends_stereo = !speakers && v.channels == 2;
+    const float send_level = !speakers && app::kGame.send_level ? std::clamp(app::kGame.send_level(), 0.0f, 1.0f) : 1.0f;
     for (uint32_t c = 0; c < 2; c++) {
         g[c][0] = g[c][1] = 0;
         for (uint32_t s = c; c < v.channels && s < per && s < n; s += step) {
             uint32_t b = bin[s];
             if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
-            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f) * kMixBinGain;
+            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f) * kMixBinGain * send_level;
             // even bins are left, odd right, 2 is the centre; effect sends standing in: each channel on its own side
             if (sends_stereo) {
                 g[c][c] = std::max(g[c][c], x);
