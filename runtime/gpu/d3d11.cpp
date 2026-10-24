@@ -650,12 +650,14 @@ bool D3D11Backend::TargetStale(uint32_t data) const {
 
 bool D3D11Backend::BindTargets(const State& s) {
     bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
-    // the colour target on the depth buffer's own memory (007: Everything or Nothing draws its character shadows
-    // into a D24S8 surface given as both, colour writes off): the console writes only depth there, and one
-    // resource cannot be bound as both here, so the depth target alone
-    bool one = depth && s.rt.header && s.zs.header && s.rt.data == s.zs.data;
-    Target* rt = one ? nullptr : EnsureTarget(s.rt, false);
-    Target* ds = depth ? DepthTarget(s) : nullptr;
+    // the colour target on the depth buffer's own memory: one resource cannot be bound as both here, so what the
+    // console writes there alone. 007: Everything or Nothing draws its character shadows into a D24S8 surface given
+    // as both with colour writes off (the depth target), and copies the frame into a colour surface on the same
+    // memory for its weapon carousel, depth always passing and not written (the colour target)
+    bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
+    bool colour = SimpleState(s, kMColorWriteEnable) != 0;
+    Target* rt = shared && depth && !colour ? nullptr : EnsureTarget(s.rt, false);
+    Target* ds = depth && !(shared && colour) ? DepthTarget(s) : nullptr;
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
     if (rt && LatchCpuWrite(*rt)) {

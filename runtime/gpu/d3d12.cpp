@@ -1036,7 +1036,9 @@ Target* D3D12Backend::DepthTarget(const State& s) {
 bool D3D12Backend::BindTargets(const State& s) {
     // the same surfaces as the last lookup this frame, no target made or dropped since: the same targets
     bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
-    uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth),
+    bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
+    bool colour = SimpleState(s, kMColorWriteEnable) != 0;
+    uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
                          s.rt.header ? kernel::R32(s.rt.header + 12) : 0, s.rt.header ? kernel::R32(s.rt.header + 16) : 0,
                          s.zs.header ? kernel::R32(s.zs.header + 12) : 0, s.zs.header ? kernel::R32(s.zs.header + 16) : 0};
     uint64_t key = Hash(words, sizeof(words));
@@ -1047,12 +1049,12 @@ bool D3D12Backend::BindTargets(const State& s) {
         rt = target_memo_.rt;
         ds = target_memo_.ds;
     } else {
-        // the colour target on the depth buffer's own memory (007: Everything or Nothing draws its character shadows
-        // into a D24S8 surface given as both, colour writes off): the console writes only depth there, and one
-        // resource cannot be bound as both here, so the depth target alone
-        bool one = depth && s.rt.header && s.zs.header && s.rt.data == s.zs.data;
-        rt = one ? nullptr : EnsureTarget(s.rt, false);
-        ds = depth ? DepthTarget(s) : nullptr;
+        // the colour target on the depth buffer's own memory: one resource cannot be bound as both here, so what the
+        // console writes there alone. 007: Everything or Nothing draws its character shadows into a D24S8 surface
+        // given as both with colour writes off (the depth target), and copies the frame into a colour surface on
+        // the same memory for its weapon carousel, depth always passing and not written (the colour target)
+        rt = shared && depth && !colour ? nullptr : EnsureTarget(s.rt, false);
+        ds = depth && !(shared && colour) ? DepthTarget(s) : nullptr;
         if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
         // made now or not: what targets_gen_ is after the lookups
         target_memo_ = {key, presents_ << 24 ^ targets_gen_, rt, ds};
