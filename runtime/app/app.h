@@ -168,6 +168,9 @@ struct GameInfo {
     // that 2D also where drawn by a vertex program that only moves its position input to the screen (gpu::
     // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form)
     bool squeeze_screen_programs = false;
+    // a PAL release (the certificate's game regions without North America) runs on a PAL console with PAL 60 Hz on:
+    // a title naming its files by the video standard finds the disc's (EoN's movies are _pal and _palw only)
+    bool pal_console = false;
 };
 extern const GameInfo kGame;
 

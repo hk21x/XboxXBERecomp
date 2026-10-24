@@ -1240,8 +1240,25 @@ KERNEL_EXPORT(29, ExSaveNonVolatileSetting, 4) {
 
 // settings and hardware
 
-// widescreen (a 4:3 output plays the console's 4:3), 480p
-static uint32_t VideoFlags() { return (app::Widescreen() ? 0x00010000 : 0) | 0x00080000; }
+// a PAL console with PAL 60 Hz on, for a PAL release whose title asks (GameInfo::pal_console): the certificate's game
+// regions (+0xA0) have rest of the world (4) and not North America (1)
+static bool PalConsole() {
+    static const bool pal = [] {
+        if (!app::kGame.pal_console) return false;
+        uint32_t cert = R32(0x10118), regions = mem::IsCommitted(cert + 0xA0) ? R32(cert + 0xA0) : 0;
+        bool v = (regions & 4) && !(regions & 1);
+        LOGR("kernel: game regions %X: %s console", regions, v ? "a PAL (60 Hz)" : "an NTSC");
+        return v;
+    }();
+    return pal;
+}
+
+// widescreen (a 4:3 output plays the console's 4:3), 480p; PAL 60 Hz on a PAL console
+static uint32_t VideoFlags() {
+    return (app::Widescreen() ? 0x00010000 : 0) | 0x00080000 | (PalConsole() ? 0x00400000 : 0);
+}
+// XC_FACTORY_AV_REGION: NTSC-M (standard 1 in bits 8 to 15), or PAL-I (3)
+static uint32_t AvRegion() { return PalConsole() ? 0x00800300 : 0x00400100; }
 
 KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
     uint32_t index = a[0], type_out = a[1], value = a[2], len = a[3], result_len = a[4];
@@ -1250,8 +1267,8 @@ KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
         case 7: v = 1; break;                      // XC_LANGUAGE english
         case 8: v = VideoFlags(); break;          // XC_VIDEO_FLAGS
         case 9: v = 0x00010001; break;             // XC_AUDIO_FLAGS stereo
-        case 0x103: v = 0x00400100; break;         // XC_FACTORY_AV_REGION NTSC-M
-        case 0x104: v = 1; break;                  // XC_FACTORY_GAME_REGION north america
+        case 0x103: v = AvRegion(); break;         // XC_FACTORY_AV_REGION
+        case 0x104: v = PalConsole() ? 4 : 1; break;  // XC_FACTORY_GAME_REGION rest of the world, north america
         case 0x12: v = 1; break;                   // XC_DVD_REGION
         default: break;
     }
@@ -1263,8 +1280,8 @@ KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
             W32(value + 0xE8, 1);                     // language
             W32(value + 0xEC, VideoFlags());          // video flags
             W32(value + 0xF0, 0x00010001);            // audio flags
-            W32(value + 0x58, 0x00400100);            // factory video standard
-            W32(value + 0x2C, 1);                     // factory game region
+            W32(value + 0x58, AvRegion());            // factory video standard
+            W32(value + 0x2C, PalConsole() ? 4 : 1);  // factory game region
         }
         if (result_len) W32(result_len, 0x100);
         return kSuccess;
@@ -1283,9 +1300,9 @@ KERNEL_EXPORT(4, AvSetSavedDataAddress, 1) {
 }
 KERNEL_EXPORT(3, AvSetDisplayMode, 6) { return 0; }
 KERNEL_EXPORT(2, AvSendTVEncoderOption, 4) {
-    // AV_QUERY_AV_CAPABILITIES: component (HDTV) pack, NTSC-M, 60 Hz and the user video flags, which D3D filters its
+    // AV_QUERY_AV_CAPABILITIES: component (HDTV) pack, NTSC-M or PAL-I, and the user video flags, which D3D filters its
     // mode list by; titles read the same flags through XGetVideoFlags and ask for a matching mode
-    if (a[3]) W32(a[3], a[1] == 6 ? 0x00400104 | VideoFlags() : 0);
+    if (a[3]) W32(a[3], a[1] == 6 ? (AvRegion() | 4) | VideoFlags() : 0);
     return 0;
 }
 KERNEL_EXPORT(46, HalReadWritePCISpace, 6) {
