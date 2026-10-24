@@ -1597,10 +1597,59 @@ void FrameLogNote(const char* text) {
 
 // drawing
 
+// Push buffers recorded to run later. The host draws at the API, so a push buffer the title records holds only the
+// commands it pushed itself; the draws made while it recorded are kept here, each with the state it had and where
+// in the buffer it came, and drawn again when the buffer runs (RunPushBuffer), between its commands. A buffer the
+// title records and runs in the same frame, twice (a whole frame recorded, as 007: Everything or Nothing does), is
+// drawn as it records and not kept.
+namespace {
+struct PbDraw {
+    uint32_t offset = 0;  // in the buffer's data
+    gpu::State state;     // the vertex constants are the replay's, which the buffer's commands (and fixups) load
+    uint32_t prim = 0, start = 0, count = 0;
+    uint32_t indices = 0;     // guest address, 0 for none
+    std::vector<uint8_t> up;  // DrawUp's vertices
+    uint32_t up_stride = 0;
+};
+struct PbRecording {
+    std::vector<std::unique_ptr<PbDraw>> draws;
+    uint32_t ended = ~0u;      // the present it was recorded in
+    uint32_t same_frame = 0;   // times it ran in the frame it was recorded in
+    bool immediate = false;    // drawn as it records
+    bool overflow = false;
+};
+constexpr size_t kPbMaxDraws = 4096;
+std::unordered_map<uint32_t, PbRecording> g_pb;
+uint32_t g_pb_recording = 0, g_pb_data = 0;  // the buffer being recorded and its data
+bool g_pb_keep = false;                      // its draws are kept, not drawn
+
+// true when the draw is kept for the buffer being recorded instead of drawn now
+bool KeepDraw(uint32_t prim, uint32_t start, uint32_t count, uint32_t indices, const void* up = nullptr,
+              uint32_t up_stride = 0) {
+    if (!g_pb_keep) return false;
+    PbRecording& r = g_pb[g_pb_recording];
+    if (r.draws.size() >= kPbMaxDraws) {
+        r.overflow = true;
+        return true;
+    }
+    auto d = std::make_unique<PbDraw>();
+    d->offset = Dev(kDevPush) - g_pb_data;
+    d->state = g_state;
+    d->prim = prim, d->start = start, d->count = count, d->indices = indices;
+    if (up) {
+        d->up.assign(static_cast<const uint8_t*>(up), static_cast<const uint8_t*>(up) + count * up_stride);
+        d->up_stride = up_stride;
+    }
+    r.draws.push_back(std::move(d));
+    return true;
+}
+}  // namespace
+
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
+    if (KeepDraw(a[0], a[1], a[2], 0)) return 0;
     FrameLogDraw(a[0], a[1], a[2], nullptr);
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
     return 0;
@@ -1610,6 +1659,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     SyncDeferred();
+    if (KeepDraw(a[0], 0, a[1], a[2])) return 0;
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     FrameLogDraw(a[0], 0, a[1], indices);
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
@@ -1647,6 +1697,7 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
 void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
+    if (KeepDraw(prim, 0, count, 0, vertices, stride)) return;
     auto stream = g_state.streams[0];
     bool input = g_state.input_active;  // vertices from memory are read by the shader's declaration
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
@@ -1673,6 +1724,7 @@ namespace {
 uint32_t g_im_prim = 0, g_im_mask = 0;  // open primitive, slots it wrote
 float g_im_attr[64];                    // 16 slots of x y z w
 std::vector<float> g_im_vertices;       // every slot per vertex
+std::vector<uint16_t> g_im_indices;     // array elements (0x1800, 0x1808): drawn from the bound vertex data
 
 // visibility tests: depth passing pixels are counted while enabled, a report gets the count since the clear,
 // at a physical address in the first 16 MB
@@ -1824,13 +1876,46 @@ void Walk(uint32_t end) {
                 if (g_program_load < kProgramSlots * 4) g_program[g_program_load++] = v;
                 continue;
             }
+            if (m == 0x1800 || m == 0x1808) {  // array elements: two 16 bit indices, or one 32 bit
+                if (!g_im_prim) continue;
+                if (m == 0x1808) {
+                    if (v > 0xFFFF) LOG_FIRST(4, "d3d: pushed array element %u is past 16 bits", v);
+                    g_im_indices.push_back(uint16_t(v));
+                } else {
+                    g_im_indices.push_back(uint16_t(v));
+                    g_im_indices.push_back(uint16_t(v >> 16));
+                }
+                continue;
+            }
+            if (m == 0x1810) {  // draw arrays: first vertex, count - 1 in the top byte
+                if (g_im_prim && g_backend) {
+                    SyncDeferred();
+                    FrameLogDraw(g_im_prim, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
+                    g_backend->Draw(g_state, g_im_prim, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
+                }
+                continue;
+            }
             if (m == 0x17FC) {  // begin/end, 0 ends
                 if (v) {
                     g_im_prim = v;
                     g_im_mask = 0;
                     g_im_vertices.clear();
+                    g_im_indices.clear();
                 } else {
+                    uint32_t prim = g_im_prim;
                     EndPrimitive();
+                    if (prim && !g_im_indices.empty() && g_backend) {
+                        if (g_pb_keep) {
+                            LOG_FIRST(4, "d3d: pushed indexed primitive while a push buffer records, not kept");
+                        } else {
+                            SyncDeferred();
+                            auto idx = reinterpret_cast<const uint8_t*>(g_im_indices.data());
+                            uint32_t count = uint32_t(g_im_indices.size());
+                            FrameLogDraw(prim, 0, count, idx);
+                            g_backend->Draw(g_state, prim, 0, count, idx);
+                        }
+                    }
+                    g_im_indices.clear();
                 }
                 continue;
             } else if (m >= 0x1880 && m < 0x1900) {  // 2 floats, z = 0 and w = 1
@@ -1887,6 +1972,12 @@ X86_FUNC(GUEST(D3DDevice_BeginPushBuffer)) {
     GUEST_ORIG(D3DDevice_BeginPushBuffer)(ctx, base);
     g_walk = Dev(kDevPush);
     g_walk_limit = R32(pb + 4) + R32(pb + 0x10);  // Data, AllocationSize
+    PbRecording& r = g_pb[pb];
+    g_pb_recording = pb;
+    g_pb_data = R32(pb + 4);
+    g_pb_keep = !r.immediate;
+    r.draws.clear();
+    r.overflow = false;
 }
 X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_EndPushBuffer));
 X86_FUNC(GUEST(D3DDevice_EndPushBuffer)) {
@@ -1895,16 +1986,80 @@ X86_FUNC(GUEST(D3DDevice_EndPushBuffer)) {
     GUEST_ORIG(D3DDevice_EndPushBuffer)(ctx, base);
     g_walk = Dev(kDevPush);
     g_walk_limit = g_scratch_push + g_scratch_size;
+    if (g_pb_recording) g_pb[g_pb_recording].ended = g_presents;
+    g_pb_recording = 0;
+    g_pb_keep = false;
 }
 #endif
 
-// RunPushBuffer(push buffer, fixup) runs recorded hardware commands; not replayed yet: each one is logged once (its
-// size, Common and first commands) so what they hold can be read
+// RunPushBuffer(push buffer, fixup): a buffer whose draws were kept (above) is drawn: the fixup's batch is copied
+// into it (records of byte count, offset in the data, then the commands, as D3DPushBuffer_SetVertexShaderConstant
+// writes them while a fixup is begun), then its commands are read in order with the kept draws, each drawn with its
+// own state and the vertex constants the commands left. Any other is logged once (its size, Common and first
+// commands) and not run.
+namespace {
+void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
+    uint32_t data = R32(pb + 4), size = R32(pb + 12);  // Data, Size
+    if (fixup) {
+        uint32_t p = R32(fixup + 4) + R32(fixup + 12), end = R32(fixup + 4) + R32(fixup + 16);  // Data + Run, + Next
+        while (p + 8 <= end) {
+            uint32_t bytes = R32(p), at = R32(p + 4);
+            if (!bytes || bytes == 0xFFFFFFFFu || p + 8 + bytes > end) break;
+            if (at + bytes <= size) std::memcpy(HostPtr(data + at), HostPtr(p + 8), bytes);
+            p += 8 + bytes;
+        }
+    }
+    uint32_t walk = g_walk, limit = g_walk_limit;
+    g_walk = data;
+    g_walk_limit = data + size;
+    for (auto& d : r.draws) {
+        Walk(data + d->offset);
+        gpu::State& s = d->state;
+        s.vsc = g_state.vsc;
+        if (KeepDraw(d->prim, d->start, d->count, d->indices, d->up.empty() ? nullptr : d->up.data(), d->up_stride))
+            continue;  // run while another buffer records: kept for that one
+        if (!g_backend) continue;
+        if (!d->up.empty()) {
+            s.streams[0] = {UpVertices(d->up.data(), uint32_t(d->up.size())), d->up_stride};
+            s.input_active = false;
+            g_backend->Draw(s, d->prim, 0, d->count, nullptr);
+        } else {
+            g_backend->Draw(s, d->prim, d->start, d->count,
+                            d->indices ? static_cast<const uint8_t*>(HostPtr(d->indices)) : nullptr);
+        }
+    }
+    Walk(data + size);
+    g_walk = walk;
+    g_walk_limit = limit;
+}
+}  // namespace
+
 HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
-    static std::unordered_set<uint32_t> seen;
     uint32_t pb = a[0];
+    if (auto it = g_pb.find(pb); it != g_pb.end()) {
+        PbRecording& r = it->second;
+        if (r.immediate) return 0;  // drawn as it recorded
+        if (r.ended == g_presents && ++r.same_frame >= 2) {
+            r.immediate = true;
+            LOGI("d3d: push buffer %08X is recorded and run in the same frame, drawn as it records from now on", pb);
+        }
+        if (r.overflow) LOG_FIRST(8, "d3d: push buffer %08X kept only its first %zu draws", pb, kPbMaxDraws);
+        LOG_FIRST(16, "d3d: RunPushBuffer %08X replays %zu draws (fixup %08X)", pb, r.draws.size(), a[1]);
+        ReplayPushBuffer(pb, a[1], r);
+        return 0;
+    }
+    // one the title made itself (built offline and loaded): its commands, fixed up, are all there is
+    if (pb && mem::IsCommitted(pb) && mem::IsCommitted(pb + 15) && R32(pb + 4) && mem::IsCommitted(R32(pb + 4)) &&
+        mem::IsCommitted(R32(pb + 4) + std::max<uint32_t>(R32(pb + 12), 1) - 1)) {
+        static PbRecording none;
+        LOG_FIRST(8, "d3d: RunPushBuffer %08X: a buffer not recorded here, %u bytes (fixup %08X), its commands read", pb,
+                  R32(pb + 12), a[1]);
+        ReplayPushBuffer(pb, a[1], none);
+        return 0;
+    }
+    static std::unordered_set<uint32_t> seen;
     if (pb && mem::IsCommitted(pb) && mem::IsCommitted(pb + 15) && seen.size() < 64 && seen.insert(pb).second) {
         uint32_t data = R32(pb + 4), size = R32(pb + 12);
         // the first commands, only from memory that is there (the title may give a physical or unfinished address)
