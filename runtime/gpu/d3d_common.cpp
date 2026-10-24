@@ -664,7 +664,14 @@ bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZ
 // stencil writes): the console reads it while it is bound, which D3D12 and D3D11 do not allow, so it is not bound
 // (007: Everything or Nothing's weapon carousel reads its depth buffer as B8G8R8A8 colour so)
 bool DepthOnlySampled(const State& s) {
-    if (!s.zs.header || DepthTested(s) || SimpleState(s, kMZWriteEnable) || s.rs[kRsStencilEnable]) return false;
+    // XBE_BIND_SAMPLED_DEPTH=1 binds it all the same, to compare
+    static const bool off = [] {
+        const char* e = std::getenv("XBE_BIND_SAMPLED_DEPTH");
+        bool v = e && *e == '1';
+        if (v) LOGR("gpu: XBE_BIND_SAMPLED_DEPTH=1, a sampled depth buffer stays bound");
+        return v;
+    }();
+    if (off || !s.zs.header || DepthTested(s) || SimpleState(s, kMZWriteEnable) || s.rs[kRsStencilEnable]) return false;
     for (uint32_t t : s.textures)
         if (t && (kernel::R32(t + 4) & 0x0FFFFFFF) == (s.zs.data & 0x0FFFFFFF)) return true;
     return false;
