@@ -241,13 +241,19 @@ gpu::Surface SurfaceOf(uint32_t header) {
     return s;
 }
 
-// hdr: where the surface object goes, 0 for a new one
-uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0) {
+// hdr: where the surface object goes, 0 for a new one; keep: a title's own surface there keeps its memory when it
+// holds this one (the title may find that memory again another way: 007: Everything or Nothing's GetTile)
+uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0, bool keep = false) {
     uint32_t pitch = (w * bpp + 63) & ~63u;
-    uint32_t data = mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000);
+    uint32_t phys = 0;
+    if (keep && hdr && R32(hdr + 4) && R32(hdr + 16)) {
+        uint32_t size = R32(hdr + 16), had = ((size >> 24) + 1) * 64 * (((size >> 12) & 0xFFF) + 1);
+        if (had >= pitch * h) phys = R32(hdr + 4) & 0x0FFFFFFF;
+    }
+    if (!phys) phys = mem::PhysicalFromVirtual(mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000));
     if (!hdr) hdr = mem::AllocSystem(24);
     W32(hdr + 0, 0x000D0001);  // surface, one reference, one internal reference held by the device
-    W32(hdr + 4, mem::PhysicalFromVirtual(data));
+    W32(hdr + 4, phys);
     W32(hdr + 8, 0);
     W32(hdr + 12, 0x00010021 | (fmt << 8));  // dma A, 2D, one level
     W32(hdr + 16, (w - 1) | (h - 1) << 12 | (pitch / 64 - 1) << 24);
@@ -402,7 +408,8 @@ bool MakeFrameBuffers(uint32_t pp) {
             g_buffers[i] = NewSurface(w, h, color_fmt, 4,
                                       given[kSlot[i]]                              ? given[kSlot[i]]
                                       : XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0
-                                                                                   : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
+                                                                                   : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24,
+                                      given[kSlot[i]] != 0);
         g_copy_target = NewSurface(w, h, color_fmt, 4);
         g_depth = 0;
         if (auto_depth || given_depth) {
@@ -410,7 +417,8 @@ bool MakeFrameBuffers(uint32_t pp) {
             g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4,  // 0x30 LIN_D16, 0x31 LIN_F16
                                  given_depth                                     ? given_depth
                                  : XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0
-                                                                                 : kDevice + XDK_CDevice_AutoDepthSurface);
+                                                                                 : kDevice + XDK_CDevice_AutoDepthSurface,
+                                 given_depth != 0);
         }
         std::memcpy(made, want, sizeof made);
     }
@@ -2198,7 +2206,14 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
 }
 
 // frame buffer compression tiles are the console's memory controller's business
-HLE_STDCALL(D3DDevice_SetTile, 2) { return 0; }
+// (index, tile): there is no tiled memory here, but the record is kept where the library keeps it: titles read it
+// back with GetTile (007: Everything or Nothing finds its depth buffer's memory so, for its weapon carousel)
+HLE_STDCALL(D3DDevice_SetTile, 2) {
+    constexpr uint32_t kTileBytes = 24, kTiles = 8;
+    if (XDK_CDevice_Tiles != xdk::kUnknown && a[0] < kTiles)
+        for (uint32_t i = 0; i < kTileBytes; i += 4) W32(kDevice + XDK_CDevice_Tiles + a[0] * kTileBytes + i, a[1] ? R32(a[1] + i) : 0);
+    return 0;
+}
 
 // the library's Begin pushes the start of the primitive, here it is opened
 HLE_STDCALL(D3DDevice_Begin, 1) {
