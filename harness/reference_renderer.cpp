@@ -1120,6 +1120,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                 std::fprintf(g_drawlog, " zfail %u miss %u/%u/%u/%u/%u/%u", st.zfail, st.zmiss[0], st.zmiss[1], st.zmiss[2],
                              st.zmiss[3], st.zmiss[4], st.zmiss[5]);
             if (st.x1 >= 0) std::fprintf(g_drawlog, " box %d,%d-%d,%d", st.x0, st.y0, st.x1, st.y1);
+            if (s.aa_x != 1 || s.aa_y != 1) std::fprintf(g_drawlog, " aa %ux%u", s.aa_x, s.aa_y);
             std::fprintf(g_drawlog, " %s", what.c_str());
             TextureDesc zd;
             if (s.zs.header && DescribeSurface(s.zs, zd)) std::fprintf(g_drawlog, " zsfmt %X", zd.format);
