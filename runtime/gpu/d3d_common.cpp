@@ -419,13 +419,15 @@ void FillCombinerConstants(const State& s, DrawConstants& c) {
 constexpr float kGlowBoxTexels = 3.0f;  // console texels across the box each wide tap averages
 
 void FillTexelConstants(int i, const TextureDesc& d, const StageReads& stages, DrawConstants& c) {
-    c.texsize[i][0] = float(d.width);
-    c.texsize[i][1] = float(d.height);
+    // a smaller texture read from a bigger target's top left: its texel coordinates over the target's size
+    uint32_t w = stages.size[i][0] ? stages.size[i][0] : d.width, h = stages.size[i][1] ? stages.size[i][1] : d.height;
+    c.texsize[i][0] = float(w);
+    c.texsize[i][1] = float(h);
     // the console samples pixels at integer positions, D3D12 half a pixel on: targets are read half a texel back
     if (!stages.rt[i]) return;
     float k = stages.k[i];
-    c.texsize[i][2] = -0.5f / (float(d.width) * k);
-    c.texsize[i][3] = -0.5f / (float(d.height) * k);
+    c.texsize[i][2] = -0.5f / (float(w) * k);
+    c.texsize[i][3] = -0.5f / (float(h) * k);
     // a 3 console texel box per tap keeps the console chain's glow width and brightness
     if (stages.wide[i] > 0) {
         float n = std::ceil(kGlowBoxTexels * stages.wide[i] * 0.5f);

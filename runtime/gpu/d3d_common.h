@@ -123,6 +123,7 @@ struct StageReads {
     bool rt[4] = {};            // a render target
     float k[4] = {1, 1, 1, 1};  // Extension::Sample's k
     float wide[4] = {};         // host texels per console texel of a target read into a smaller one, 0 otherwise
+    uint32_t size[4][2] = {};   // the bound target's console size when the texture is a smaller one on its memory
 };
 
 // D3D12_SAMPLER_DESC and D3D11_SAMPLER_DESC are the same layout

@@ -1398,6 +1398,17 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height));
+    // a smaller depth texture on a depth buffer's memory, and no target of its size: the buffer's top left (007:
+    // Everything or Nothing draws its character shadows into the corner of a 640x480 depth surface and reads them
+    // through 128x128 and 256x256 headers; guest memory, which the GPU never wrote, gave a hatched patch instead)
+    if (tit == targets_.end() && fi.depth && d.linear) {
+        auto big = targets_.find(TargetMapKey(d.data, true));
+        if (big != targets_.end() && big->second.gw >= d.width && big->second.gh >= d.height) {
+            tit = big;
+            stages.reads.size[stage][0] = big->second.gw;
+            stages.reads.size[stage][1] = big->second.gh;
+        }
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed)
         return BindTargetTexture(s, stage, d, tit->second, stages);
     return BindGuestTexture(s, stage, d, fi, stages);

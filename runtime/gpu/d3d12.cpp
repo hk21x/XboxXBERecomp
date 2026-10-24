@@ -215,6 +215,7 @@ struct DrawTextures {
     bool rt[4] = {};            // stage samples a render target
     float k[4] = {1, 1, 1, 1};  // Extension::Sample's k
     float wide[4] = {};         // host texels per console texel of a target read into a smaller one, 0 otherwise
+    uint32_t size[4][2] = {};   // the bound target's console size when the texture is a smaller one on its memory
 };
 class D3D12Backend final : public Backend, public Context {
 public:
@@ -1822,6 +1823,17 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height) | alt);
+    // a smaller depth texture on a depth buffer's memory, and no target of its size: the buffer's top left (007:
+    // Everything or Nothing draws its character shadows into the corner of a 640x480 depth surface and reads them
+    // through 128x128 and 256x256 headers; guest memory, which the GPU never wrote, gave a hatched patch instead)
+    if (tit == targets_.end() && fi.depth && d.linear) {
+        auto big = targets_.find(TargetMapKey(d.data, true) | alt);
+        if (big != targets_.end() && big->second.gw >= d.width && big->second.gh >= d.height) {
+            tit = big;
+            stages.size[stage][0] = big->second.gw;
+            stages.size[stage][1] = big->second.gh;
+        }
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
@@ -1901,6 +1913,8 @@ StageReads Reads(const DrawTextures& stages) {
         r.rt[i] = stages.rt[i];
         r.k[i] = stages.k[i];
         r.wide[i] = stages.wide[i];
+        r.size[i][0] = stages.size[i][0];
+        r.size[i][1] = stages.size[i][1];
     }
     return r;
 }
