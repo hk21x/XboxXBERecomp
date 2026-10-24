@@ -314,6 +314,18 @@ void UpdateSampleScale() {
     else if (mode == 1) (made_y == 2 && made_x == 1 ? y : x) = 2;
     g_state.aa_x = std::max<uint32_t>(x / made_x, 1);
     g_state.aa_y = std::max<uint32_t>(y / made_y, 1);
+    // each target the back buffer's mode is asked on, once: applied (the back buffer) or not (another target)
+    uint32_t asked = g_state.rs[gpu::kRsMultiSampleMode];
+    if (asked && g_state.rt.header) {
+        static std::unordered_set<uint32_t> told;
+        if (told.size() < 16 && told.insert(g_state.rt.header).second) {
+            uint32_t w, h;
+            gpu::SurfaceSize(g_state.rt, w, h);
+            LOGR("d3d: MultiSampleMode %u with target %08X (%ux%u, data %08X)%s: drawn %ux%u to a pixel", asked,
+                 g_state.rt.header, w, h, g_state.rt.data, back ? ", the back buffer" : ", not the back buffer",
+                 g_state.aa_x, g_state.aa_y);
+        }
+    }
 }
 
 void SetComplex(uint32_t rs, uint32_t v) {
