@@ -716,18 +716,22 @@ void SharpWorker() {
         r->sharpened = true;
         r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
         if (auto had = FindReplacement(job.d.data); had && !had->sharpened) continue;  // the title's own stays
-        // XBE_SHARPEN_DUMP=folder: each picture as a TGA, sharp_<texture>.tga
+        // XBE_SHARPEN_DUMP=folder: each picture as a TGA, the game's (orig_<texture>.tga) and enlarged (sharp_)
         if (const char* dir = std::getenv("XBE_SHARPEN_DUMP")) {
-            std::string path = std::string(dir) + "/sharp_" + std::to_string(job.d.data) + ".tga";
-            if (FILE* f = std::fopen(path.c_str(), "wb")) {
-                uint8_t head[18] = {0, 0, 2};
-                head[12] = uint8_t(r->width), head[13] = uint8_t(r->width >> 8);
-                head[14] = uint8_t(r->height), head[15] = uint8_t(r->height >> 8);
-                head[16] = 32, head[17] = 0x28;  // top row first, 8 bits of alpha
-                std::fwrite(head, 1, sizeof head, f);
-                std::fwrite(r->bgra.data(), 4, r->bgra.size(), f);
-                std::fclose(f);
-            }
+            auto tga = [&](const char* name, uint32_t w, uint32_t h, const std::vector<uint32_t>& px) {
+                std::string path = std::string(dir) + "/" + name + std::to_string(job.d.data) + ".tga";
+                if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                    uint8_t head[18] = {0, 0, 2};
+                    head[12] = uint8_t(w), head[13] = uint8_t(w >> 8);
+                    head[14] = uint8_t(h), head[15] = uint8_t(h >> 8);
+                    head[16] = 32, head[17] = 0x28;  // top row first, 8 bits of alpha
+                    std::fwrite(head, 1, sizeof head, f);
+                    std::fwrite(px.data(), 4, px.size(), f);
+                    std::fclose(f);
+                }
+            };
+            tga("orig_", job.d.width, job.d.height, px);
+            tga("sharp_", r->width, r->height, r->bgra);
         }
         RegisterReplacement(std::move(r));
         static std::atomic<int> told{0};
