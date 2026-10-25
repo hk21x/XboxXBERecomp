@@ -2418,6 +2418,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
     c.hud[2] = DepthTested(s) ? 1.0f : 0.0f;
+    c.hud[3] = pk.wbuf ? 1.0f : 0.0f;
     if (bound_rt_)
         NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_,
                     XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);

@@ -527,6 +527,29 @@ bool OverlayKey(uint16_t vk) {
     return true;
 }
 
+// Quit game, at the top right of the settings window, asks first: the window closes as with its own close button
+// (Alt+F4 does the same)
+static void QuitButton() {
+    const char* label = "Quit game";
+    ImGuiStyle& st = ImGui::GetStyle();
+    float w = ImGui::CalcTextSize(label).x + st.FramePadding.x * 2;
+    ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - w);
+    if (ImGui::Button(label)) ImGui::OpenPopup("Quit?");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Quit the game? Progress since the game last saved is lost.");
+        if (ImGui::Button("Quit")) {
+            LOGR("quit from the settings window");
+            Quit();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::SetItemDefaultFocus();
+        ImGui::EndPopup();
+    }
+}
+
 void DrawOverlay() {
     if (!g_open) return;
     Settings& s = Get();
@@ -539,8 +562,7 @@ void DrawOverlay() {
                              ImGuiCond_Appearing);
     bool open = true;
     if (ImGui::Begin("Settings (F1)", &open, ImGuiWindowFlags_NoCollapse)) {
-        // the tabs scroll above a footer that stays: the quit button
-        ImGui::BeginChild("tabs_area", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 2.2f));
+        QuitButton();
         if (ImGui::BeginTabBar("tabs")) {
             if (ImGui::BeginTabItem("Display")) {
                 Display(s);
@@ -571,18 +593,6 @@ void DrawOverlay() {
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
-        }
-        ImGui::EndChild();
-        // leaving the game, asked twice so a stray press does not do it
-        ImGui::Separator();
-        static bool asked = false;
-        if (!asked) {
-            if (ImGui::Button("Quit game")) asked = true;
-        } else {
-            ImGui::TextUnformatted("Quit the game? Progress since the last save is lost.");
-            if (ImGui::Button("Quit")) Quit();
-            ImGui::SameLine();
-            if (ImGui::Button("Keep playing")) asked = false;
         }
     }
     ImGui::End();

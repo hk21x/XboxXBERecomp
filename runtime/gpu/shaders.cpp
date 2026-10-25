@@ -235,6 +235,9 @@ const char* kVsEpilogue = R"(
     q.x = p.x * 2 / surf.x - 1;
     q.y = 1 - p.y * 2 / surf.y;
     q.z = p.z * surf.z;
+    // W-buffered (hud.w): the pixel shader writes the depth from w and the console clips nothing past the far plane,
+    // so z stays within w here: PGR2's sky dome and far hills lie past it and were clipped away (Nurburgring)
+    if (hud.w != 0) q.z = min(q.z, 1.0);
     q.xyz *= p.w;
     q.w = p.w;
     o.pos = q;
@@ -857,6 +860,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     float2 sp = (float2(cp.x, -cp.y) / cp.w + 1) * 0.5 * surf.xy;
     if (surf.w == 0 && abs(sp.x - (surf.x - 0.5)) < 1e-3) cp.x = cp.w;
     if (surf.w == 0 && abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;
+    if (hud.w != 0) cp.z = min(cp.z, cp.w);  // W-buffered: nothing clipped past the far plane (the programs' epilogue)
     o.pos = cp;
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
