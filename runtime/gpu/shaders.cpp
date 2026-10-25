@@ -73,7 +73,7 @@ std::string Common() { return kCommonHead + Hooks().Constants() + kCommonTail; }
 // vertex programs
 
 const char* kVsHelpers = R"(
-// ultrawide: in a 2D draw spanning the frame (hud.y positive: gpu::SpansFrameWidth) a vertex on or past its left or
+// ultrawide: in a 2D draw spanning the frame (hud.y positive: gpu::DrawSpan) a vertex on or past its left or
 // right edge stays there while the rest is squeezed to the centre (hud.y the centre, either sign); any other draw is
 // squeezed whole (EoN's driving radar: big rotating tiles reaching past the left edge only)
 bool KeptAtEdge(float x, float centre) { return centre > 0 && (x <= 0.5 || x >= centre * 2 - 0.5); }

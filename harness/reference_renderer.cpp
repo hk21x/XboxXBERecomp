@@ -1302,6 +1302,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         for (uint32_t vi = 0; vi < as.vertex_count; vi++)
             if (squeezable[vi]) lo = std::min(lo, verts[vi].pos[0] / ax), hi = std::max(hi, verts[vi].pos[0] / ax);
         bool spans = lo <= 0.5f && hi >= w - 0.5f;
+        // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
+        const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
+        if (!spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
         for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
             float x = verts[vi].pos[0] / ax;
             if (squeezable[vi] && !(spans && AtFrameEdge(x, w))) verts[vi].pos[0] = (w * 0.5f + (x - w * 0.5f) * squeeze) * ax;

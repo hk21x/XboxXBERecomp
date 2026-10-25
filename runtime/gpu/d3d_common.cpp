@@ -728,22 +728,22 @@ bool ScreenDraw(const State& s) {
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
 }
 
-bool SpansFrameWidth(const State& s, const Assembled& a, float width) {
+Span DrawSpan(const State& s, const Assembled& a, float width) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
     const VertexBuffer& b = a.buffers[e.buffer];
     const bool converted = !a.vertices.empty();
     uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
-    if (!(a.regs & 1) || !count) return true;
+    if (!(a.regs & 1) || !count) return kSpanFrame;
     if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
                                   e.format != DXGI_FORMAT_R32G32_FLOAT)))
-        return true;
+        return kSpanFrame;
     // the screen x: pretransformed and pass-through programs give it, a matrix program's 2D matrix (OrthoConstants) gives
     // clip x, over the viewport
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
-    if (program && s.vs->screen != 1 && k < 0) return true;
+    if (program && s.vs->screen != 1 && k < 0) return kSpanFrame;
     float lo = 1e30f, hi = -1e30f;
     count = std::min<uint32_t>(count, 4096);
     for (uint32_t i = 0; i < count; i++) {
@@ -763,7 +763,10 @@ bool SpansFrameWidth(const State& s, const Assembled& a, float width) {
         lo = std::min(lo, x);
         hi = std::max(hi, x);
     }
-    return lo <= 0.5f && hi >= width - 0.5f;
+    if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
+    const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
+    if (right - left < width - 1 && lo <= left + 0.5f && hi >= right - 0.5f) return kSpanViewport;
+    return kSpanNone;
 }
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
