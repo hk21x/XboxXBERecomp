@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -35,6 +36,12 @@ bool MouseLooking();
 // stick deflections (2400 counts a second at 100% sensitivity is 1), up positive, the settings' sensitivity and invert
 // applied; false and nothing taken while the mouse is not looking
 bool TakeMouse(float& x, float& y);
+// what controller 1 was last played with: true for the keyboard and mouse (a bound key or mouse button pressed, the
+// mouse moved while it looks; the keyboard alone when no controller is plugged in), false for a controller or wheel
+// (a button pressed, a stick pushed half way); a title's button pictures may follow it
+bool UsingKeyboard();
+// the keys controller 1's control c is bound to: the settings', else the defaults (0 none; mouse buttons VK_LBUTTON ..)
+std::array<uint16_t, 2> ControlKeys(int c);
 void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)

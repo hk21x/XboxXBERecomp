@@ -14,6 +14,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -144,6 +145,9 @@ std::atomic<uint16_t> g_rumble[2];  // controller 1's motors as the game last se
 // swallow slow moves) and follows the rate over about a frame (kSmooth seconds), so polls closer than a frame still
 // read it
 std::atomic<int> g_mouse_dx{0}, g_mouse_dy{0};
+std::atomic<bool> g_keyboard{false};    // UsingKeyboard
+std::atomic<int> g_mouse_travel{0};     // counts moved since a controller was last used
+constexpr int kMouseTravel = 16;        // that many and the mouse is in use
 constexpr float kFullRate = 2400.0f, kDeadZone = 0.2f, kSmooth = 1.0f / 60;
 
 void MouseStick(const app::Settings& s, int16_t& rx, int16_t& ry) {
@@ -173,6 +177,14 @@ void MouseStick(const app::Settings& s, int16_t& rx, int16_t& ry) {
 void MouseMoved(int dx, int dy) {
     g_mouse_dx += dx;
     g_mouse_dy += dy;
+    if ((g_mouse_travel += std::abs(dx) + std::abs(dy)) > kMouseTravel) g_keyboard = true;
+}
+
+bool UsingKeyboard() { return g_keyboard; }
+
+std::array<uint16_t, 2> ControlKeys(int c) {
+    const app::Settings& s = app::Get();
+    return c >= 0 && c < int(s.keys.size()) ? s.keys[size_t(c)] : app::DefaultKeys(c);
 }
 
 bool TakeMouse(float& x, float& y) {
@@ -238,12 +250,23 @@ Pad Poll(int port) {
     // the keyboard is controller 1, plugged in while keyboard play is on (alt-tabbing away must not unplug it), its
     // keys read while the game window has the focus
     HWND hwnd = static_cast<HWND>(app::Window());
-    if (port == 0 && s.keyboard) p.connected = true;
-    if (port == 0 && s.keyboard && hwnd && GetForegroundWindow() == hwnd) {
-        for (int c = 0; c < kControls; c++) {
-            std::array<uint16_t, 2> keys = c < int(s.keys.size()) ? s.keys[c] : app::DefaultKeys(c);
-            for (uint16_t k : keys)
-                if (k && (GetAsyncKeyState(k) & 0x8000)) out[c] = 1.0f;
+    if (port == 0) {
+        bool pad_used = false, key_used = false;
+        for (int c = 0; c < kControls; c++) pad_used |= in[c] >= 0.5f;
+        if (s.keyboard && !p.connected) key_used = true;  // nothing else to play with
+        if (s.keyboard) p.connected = true;
+        if (s.keyboard && hwnd && GetForegroundWindow() == hwnd) {
+            for (int c = 0; c < kControls; c++) {
+                std::array<uint16_t, 2> keys = c < int(s.keys.size()) ? s.keys[c] : app::DefaultKeys(c);
+                for (uint16_t k : keys)
+                    if (k && (GetAsyncKeyState(k) & 0x8000)) out[c] = 1.0f, key_used = true;
+            }
+        }
+        if (pad_used) {
+            g_keyboard = false;
+            g_mouse_travel = 0;
+        } else if (key_used) {
+            g_keyboard = true;
         }
     }
     // Back + Start on a controller opens or closes the settings window, Start alone closes it; what was held then

@@ -3,7 +3,8 @@
 // count vertical blanks at 60 a second, the frames the title asked for (a frame at 30 a second is two), so a script
 // keeps its timing when a title changes its frame rate between screens:
 // UP DOWN LEFT RIGHT START BACK A B X Y LT RT LS LSD LSL LSR (left stick up, down, left, right) RS RSD RSL RSR (right)
-// MOUSEL MOUSER MOUSEU MOUSED (a mouse moving for input::TakeMouse)
+// MOUSEL MOUSER MOUSEU MOUSED (a mouse moving for input::TakeMouse), KEYS (nothing pressed, on the keyboard: from then
+// input::UsingKeyboard is true, as with the mouse tokens, until a controller's token)
 // cmd in the run folder: "buttons [vblanks held]" pressed once from when it is read, then removed
 #include <cstdio>
 #include <string>
@@ -19,6 +20,7 @@ namespace input {
 namespace {
 
 float g_mouse_x = 0, g_mouse_y = 0;  // this poll's scripted mouse, for input::TakeMouse
+bool g_keyboard = false;             // input::UsingKeyboard
 
 struct Press {
     double at;
@@ -49,6 +51,8 @@ void Apply(const std::string& s, Pad& p) {
         if (e == std::string::npos) e = s.size();
         std::string b = s.substr(at, e - at);
         at = e + 1;
+        if (b == "KEYS" || b.rfind("MOUSE", 0) == 0) g_keyboard = true;
+        else if (!b.empty()) g_keyboard = false;
         if (b == "UP") p.buttons |= 1;
         else if (b == "DOWN") p.buttons |= 2;
         else if (b == "LEFT") p.buttons |= 4;
@@ -109,6 +113,13 @@ bool TakeMouse(float& x, float& y) {
     x = g_mouse_x;
     y = g_mouse_y;
     return true;
+}
+
+bool UsingKeyboard() { return g_keyboard; }
+
+// the title's defaults (no settings file headless)
+std::array<uint16_t, 2> ControlKeys(int c) {
+    return app::kGame.default_keys ? app::kGame.default_keys(c) : std::array<uint16_t, 2>{0, 0};
 }
 
 void Rumble(int port, uint16_t left, uint16_t right) {
