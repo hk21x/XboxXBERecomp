@@ -8,6 +8,7 @@
 
 #include "app/app.h"
 #include "core/log.h"
+#include "kernel/kernel.h"
 #include "harness.h"
 
 namespace app {
@@ -51,6 +52,11 @@ int Instance() {
     return n;
 }
 void* Window() { return nullptr; }
+void Quit() {
+    LOGR("quit asked for");
+    logx::Flush();
+    kernel::Shutdown(0);
+}
 
 bool OpenSplash() { return false; }
 void SplashFirstFrame() {}

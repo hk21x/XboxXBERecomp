@@ -255,6 +255,10 @@ std::recursive_mutex& UiLock() {
 }
 
 void ApplyDisplay() { PostMessageW(g_hwnd, kApplyDisplay, 0, 0); }
+void Quit() {
+    LOGR("quit asked for");
+    PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+}
 void OpenGameWindow(bool apply) { SendMessageW(g_hwnd, kOpenWindow, apply, 0); }
 
 bool Paused() { return Get().pause_unfocused && !g_active && g_hwnd && IsWindowVisible(g_hwnd); }

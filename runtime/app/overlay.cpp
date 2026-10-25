@@ -538,6 +538,8 @@ void DrawOverlay() {
                              ImGuiCond_Appearing);
     bool open = true;
     if (ImGui::Begin("Settings (F1)", &open, ImGuiWindowFlags_NoCollapse)) {
+        // the tabs scroll above a footer that stays: the quit button
+        ImGui::BeginChild("tabs_area", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 2.2f));
         if (ImGui::BeginTabBar("tabs")) {
             if (ImGui::BeginTabItem("Display")) {
                 Display(s);
@@ -568,6 +570,18 @@ void DrawOverlay() {
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
+        }
+        ImGui::EndChild();
+        // leaving the game, asked twice so a stray press does not do it
+        ImGui::Separator();
+        static bool asked = false;
+        if (!asked) {
+            if (ImGui::Button("Quit game")) asked = true;
+        } else {
+            ImGui::TextUnformatted("Quit the game? Progress since the last save is lost.");
+            if (ImGui::Button("Quit")) Quit();
+            ImGui::SameLine();
+            if (ImGui::Button("Keep playing")) asked = false;
         }
     }
     ImGui::End();
