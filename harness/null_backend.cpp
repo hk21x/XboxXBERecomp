@@ -175,15 +175,18 @@ private:
         }
         if (s.streams[0].vb) {
             // the vertex buffer's Data at +4 is a physical address
+            // the first vertex; each of a small draw's (6 or fewer: a quad's corners)
             uint32_t data = mem::VirtualFromPhysical(kernel::R32(s.streams[0].vb + 4)) + start * s.streams[0].stride;
-            std::fprintf(f, "  v0 stride %u:", s.streams[0].stride);
-            for (uint32_t i = 0; i < s.streams[0].stride / 4 && i < 10; i++) {
-                uint32_t v = kernel::R32(data + i * 4);
-                float x;
-                std::memcpy(&x, &v, 4);
-                std::fprintf(f, " %g(%08X)", x, v);
+            for (uint32_t n = 0; n < (count <= 6 ? count : 1); n++) {
+                std::fprintf(f, n ? "  v%u:" : "  v0 stride %u:", n ? n : s.streams[0].stride);
+                for (uint32_t i = 0; i < s.streams[0].stride / 4 && i < 10; i++) {
+                    uint32_t v = kernel::R32(data + n * s.streams[0].stride + i * 4);
+                    float x;
+                    std::memcpy(&x, &v, 4);
+                    std::fprintf(f, " %g(%08X)", x, v);
+                }
+                std::fprintf(f, "\n");
             }
-            std::fprintf(f, "\n");
         }
     }
 

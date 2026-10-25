@@ -1136,6 +1136,7 @@ HLE_STDCALL(D3DDevice_SetTexture, 2) {
     Release(ctx, old);
     g_state.textures[stage] = tex;
     W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
+    if (tex && app::kGame.texture_bound && app::kGame.texture_bound(tex)) gpu::MarkDirty(tex);
     return 0;
 }
 

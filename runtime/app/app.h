@@ -183,6 +183,9 @@ struct GameInfo {
     bool mouse_look = false;
     // the keys each input::Control starts with (two Windows virtual keys, 0 none), else the SDK's (DefaultKeys)
     std::array<uint16_t, 2> (*default_keys)(int c) = nullptr;
+    // a texture the title binds (SetTexture, its guest D3DBaseTexture), on the title's thread before the draws that
+    // use it: the title may change its texels in guest memory (EoN's button pictures), true when it did
+    bool (*texture_bound)(uint32_t header) = nullptr;
 };
 extern const GameInfo kGame;
 
