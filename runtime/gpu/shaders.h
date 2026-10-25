@@ -21,16 +21,22 @@ enum : uint8_t {
     kTexOpaque = 8,  // a target read as a format without alpha (R5G6B5, X1R5G5B5, X8R8G8B8): alpha reads 1, whatever
                      // the draws into it wrote
     // a depth buffer read through a 32 bit colour format: the console gives its word's bytes (depth's top byte in
-    // alpha, the stencil byte lowest), not a depth comparison; ABGR for A8B8G8R8, else in A8R8G8B8's order
+    // alpha, the stencil byte lowest), not a depth comparison; ABGR for A8B8G8R8, BGRA for B8G8R8A8 (depth's top
+    // byte in blue, the stencil byte in alpha), else in A8R8G8B8's order
     kTexDepthBytes = 16,
     kTexDepthAbgr = 32,
+    kTexDepthBgra = 64,
 };
-// a 32 bit colour format a depth buffer can be read through: 1 A8R8G8B8's byte order, 2 A8B8G8R8's, 0 another
+// a 32 bit colour format a depth buffer can be read through: 1 A8R8G8B8's byte order, 2 A8B8G8R8's, 3 B8G8R8A8's
+// (007: Everything or Nothing's weapon carousel reads its depth buffer as LIN_B8G8R8A8), 0 another
 inline int DepthBytesOrder(uint32_t f) {
     if (f == 0x06 || f == 0x07 || f == 0x12 || f == 0x1E) return 1;
     if (f == 0x3A || f == 0x3F) return 2;
+    if (f == 0x3B || f == 0x40) return 3;
     return 0;
 }
+// depthbytes()'s order argument for a stage's flags
+inline int DepthBytesArg(uint8_t flags) { return (flags & kTexDepthAbgr) ? 1 : (flags & kTexDepthBgra) ? 2 : 0; }
 // a format without an alpha channel, swizzled or linear: sampled, its alpha is 1
 inline bool NoAlphaFormat(uint32_t f) { return f == 0x03 || f == 0x05 || f == 0x07 || f == 0x11 || f == 0x1C || f == 0x1E; }
 

@@ -419,13 +419,15 @@ void FillCombinerConstants(const State& s, DrawConstants& c) {
 constexpr float kGlowBoxTexels = 3.0f;  // console texels across the box each wide tap averages
 
 void FillTexelConstants(int i, const TextureDesc& d, const StageReads& stages, DrawConstants& c) {
-    c.texsize[i][0] = float(d.width);
-    c.texsize[i][1] = float(d.height);
+    // a smaller texture read from a bigger target's top left: its texel coordinates over the target's size
+    uint32_t w = stages.size[i][0] ? stages.size[i][0] : d.width, h = stages.size[i][1] ? stages.size[i][1] : d.height;
+    c.texsize[i][0] = float(w);
+    c.texsize[i][1] = float(h);
     // the console samples pixels at integer positions, D3D12 half a pixel on: targets are read half a texel back
     if (!stages.rt[i]) return;
     float k = stages.k[i];
-    c.texsize[i][2] = -0.5f / (float(d.width) * k);
-    c.texsize[i][3] = -0.5f / (float(d.height) * k);
+    c.texsize[i][2] = -0.5f / (float(w) * k);
+    c.texsize[i][3] = -0.5f / (float(h) * k);
     // a 3 console texel box per tap keeps the console chain's glow width and brightness
     if (stages.wide[i] > 0) {
         float n = std::ceil(kGlowBoxTexels * stages.wide[i] * 0.5f);
@@ -658,9 +660,27 @@ UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 // depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
 bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
 
+// the depth buffer is one of the draw's textures and the draw leaves it alone (no test that fails, no depth or
+// stencil writes): the console reads it while it is bound, which D3D12 and D3D11 do not allow, so it is not bound
+// (007: Everything or Nothing's weapon carousel reads its depth buffer as B8G8R8A8 colour so)
+bool DepthOnlySampled(const State& s) {
+    // XBE_BIND_SAMPLED_DEPTH=1 binds it all the same, to compare
+    static const bool off = [] {
+        const char* e = std::getenv("XBE_BIND_SAMPLED_DEPTH");
+        bool v = e && *e == '1';
+        if (v) LOGR("gpu: XBE_BIND_SAMPLED_DEPTH=1, a sampled depth buffer stays bound");
+        return v;
+    }();
+    if (off || !s.zs.header || DepthTested(s) || SimpleState(s, kMZWriteEnable) || s.rs[kRsStencilEnable]) return false;
+    for (uint32_t t : s.textures)
+        if (t && (kernel::R32(t + 4) & 0x0FFFFFFF) == (s.zs.data & 0x0FFFFFFF)) return true;
+    return false;
+}
+
 void DepthRead(uint32_t format, TexInfo& info) {
     if (!Format(format).depth && DepthBytesOrder(format)) {
-        info.flags |= kTexDepthBytes | (DepthBytesOrder(format) == 2 ? kTexDepthAbgr : 0);
+        int order = DepthBytesOrder(format);
+        info.flags |= kTexDepthBytes | (order == 2 ? kTexDepthAbgr : 0) | (order == 3 ? kTexDepthBgra : 0);
         LOG_FIRST(4, "gpu: a depth buffer read as colour format %X: its bytes, depth's top byte in alpha", format);
         return;
     }

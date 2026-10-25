@@ -215,6 +215,7 @@ struct DrawTextures {
     bool rt[4] = {};            // stage samples a render target
     float k[4] = {1, 1, 1, 1};  // Extension::Sample's k
     float wide[4] = {};         // host texels per console texel of a target read into a smaller one, 0 otherwise
+    uint32_t size[4][2] = {};   // the bound target's console size when the texture is a smaller one on its memory
 };
 class D3D12Backend final : public Backend, public Context {
 public:
@@ -1034,8 +1035,10 @@ Target* D3D12Backend::DepthTarget(const State& s) {
 
 bool D3D12Backend::BindTargets(const State& s) {
     // the same surfaces as the last lookup this frame, no target made or dropped since: the same targets
-    bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
-    uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth),
+    bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
+    bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
+    bool colour = SimpleState(s, kMColorWriteEnable) != 0;
+    uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
                          s.rt.header ? kernel::R32(s.rt.header + 12) : 0, s.rt.header ? kernel::R32(s.rt.header + 16) : 0,
                          s.zs.header ? kernel::R32(s.zs.header + 12) : 0, s.zs.header ? kernel::R32(s.zs.header + 16) : 0};
     uint64_t key = Hash(words, sizeof(words));
@@ -1046,12 +1049,12 @@ bool D3D12Backend::BindTargets(const State& s) {
         rt = target_memo_.rt;
         ds = target_memo_.ds;
     } else {
-        // the colour target on the depth buffer's own memory (007: Everything or Nothing draws its character shadows
-        // into a D24S8 surface given as both, colour writes off): the console writes only depth there, and one
-        // resource cannot be bound as both here, so the depth target alone
-        bool one = depth && s.rt.header && s.zs.header && s.rt.data == s.zs.data;
-        rt = one ? nullptr : EnsureTarget(s.rt, false);
-        ds = depth ? DepthTarget(s) : nullptr;
+        // the colour target on the depth buffer's own memory: one resource cannot be bound as both here, so what the
+        // console writes there alone. 007: Everything or Nothing draws its character shadows into a D24S8 surface
+        // given as both with colour writes off (the depth target), and copies the frame into a colour surface on
+        // the same memory for its weapon carousel, depth always passing and not written (the colour target)
+        rt = shared && depth && !colour ? nullptr : EnsureTarget(s.rt, false);
+        ds = depth && !(shared && colour) ? DepthTarget(s) : nullptr;
         if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
         // made now or not: what targets_gen_ is after the lookups
         target_memo_ = {key, presents_ << 24 ^ targets_gen_, rt, ds};
@@ -1822,6 +1825,31 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height) | alt);
+    // a smaller depth texture on a depth buffer's memory, and no target of its size: the buffer's top left (007:
+    // Everything or Nothing draws its character shadows into the corner of a 640x480 depth surface and reads them
+    // through 128x128 and 256x256 headers; guest memory, which the GPU never wrote, gave a hatched patch instead)
+    if (tit == targets_.end() && fi.depth && d.linear) {
+        auto big = targets_.find(TargetMapKey(d.data, true) | alt);
+        if (big != targets_.end() && big->second.gw >= d.width && big->second.gh >= d.height) {
+            tit = big;
+            stages.size[stage][0] = big->second.gw;
+            stages.size[stage][1] = big->second.gh;
+        }
+    }
+    if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format)) {
+        // a depth buffer read as colour found nothing: what is there, for the log (once each)
+        // (only when a target is at its address: an ordinary texture has none)
+        static std::unordered_set<uint32_t> told;
+        std::string at;
+        for (auto& [k, t] : targets_)
+            if (((t.data ^ d.data) & 0x0FFFFFFF) == 0 || ((uint32_t(k >> 1) ^ d.data) & 0x0FFFFFFF) == 0)  // physical or virtual
+                at += " [key " + std::to_string(k) + " data " + std::to_string(t.data) + (t.depth ? " depth " : " colour ") +
+                      std::to_string(t.gw) + "x" + std::to_string(t.gh) + "]";
+        if (!at.empty() && told.size() < 8 && told.insert(d.data).second)
+            LOGR("d3d12: texture %08X (format %X, %ux%u) read as a depth buffer's bytes finds no target, key %llu;%s",
+                 d.data, d.format, d.width, d.height, (unsigned long long)(SizedTargetKey(d.data, true, d.width, d.height) | alt),
+                 at.c_str());
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
@@ -1901,6 +1929,8 @@ StageReads Reads(const DrawTextures& stages) {
         r.rt[i] = stages.rt[i];
         r.k[i] = stages.k[i];
         r.wide[i] = stages.wide[i];
+        r.size[i][0] = stages.size[i][0];
+        r.size[i][1] = stages.size[i][1];
     }
     return r;
 }
@@ -1932,7 +1962,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     }
     FillSurfaceConstants(s, size, c);
     // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
-    if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale();
+    if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale() * s.aa_y;
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
     if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);
@@ -2085,7 +2115,7 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
     DrawStateCache& c = ds_cache_;
     if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) cl_->RSSetViewports(1, &vp);
-    float sx = W / gw, sy = b->gh ? H / b->gh : sx;  // across and down differ for a stretched target
+    float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(s.viewport.x * sx);
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
@@ -2314,6 +2344,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     auto perf_consts = PerfNow();
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
+    size = DrawnExtent(s, size);
     DrawConstants c{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
@@ -2322,7 +2353,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_,
                     XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);
     c.hud[1] = guest_w_ * 0.5f;
-    if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f;
+    if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f / s.aa_x;
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
 

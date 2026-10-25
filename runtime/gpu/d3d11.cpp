@@ -649,13 +649,15 @@ bool D3D11Backend::TargetStale(uint32_t data) const {
 }
 
 bool D3D11Backend::BindTargets(const State& s) {
-    bool depth = s.rs[kRsZEnable] || s.rs[kRsStencilEnable];
-    // the colour target on the depth buffer's own memory (007: Everything or Nothing draws its character shadows
-    // into a D24S8 surface given as both, colour writes off): the console writes only depth there, and one
-    // resource cannot be bound as both here, so the depth target alone
-    bool one = depth && s.rt.header && s.zs.header && s.rt.data == s.zs.data;
-    Target* rt = one ? nullptr : EnsureTarget(s.rt, false);
-    Target* ds = depth ? DepthTarget(s) : nullptr;
+    bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
+    // the colour target on the depth buffer's own memory: one resource cannot be bound as both here, so what the
+    // console writes there alone. 007: Everything or Nothing draws its character shadows into a D24S8 surface given
+    // as both with colour writes off (the depth target), and copies the frame into a colour surface on the same
+    // memory for its weapon carousel, depth always passing and not written (the colour target)
+    bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
+    bool colour = SimpleState(s, kMColorWriteEnable) != 0;
+    Target* rt = shared && depth && !colour ? nullptr : EnsureTarget(s.rt, false);
+    Target* ds = depth && !(shared && colour) ? DepthTarget(s) : nullptr;
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
     if (rt && LatchCpuWrite(*rt)) {
@@ -1398,6 +1400,17 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height));
+    // a smaller depth texture on a depth buffer's memory, and no target of its size: the buffer's top left (007:
+    // Everything or Nothing draws its character shadows into the corner of a 640x480 depth surface and reads them
+    // through 128x128 and 256x256 headers; guest memory, which the GPU never wrote, gave a hatched patch instead)
+    if (tit == targets_.end() && fi.depth && d.linear) {
+        auto big = targets_.find(TargetMapKey(d.data, true));
+        if (big != targets_.end() && big->second.gw >= d.width && big->second.gh >= d.height) {
+            tit = big;
+            stages.reads.size[stage][0] = big->second.gw;
+            stages.reads.size[stage][1] = big->second.gh;
+        }
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed)
         return BindTargetTexture(s, stage, d, tit->second, stages);
     return BindGuestTexture(s, stage, d, fi, stages);
@@ -1503,7 +1516,7 @@ void D3D11Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     // points: host pixels per console pixel
     if (k.topo == uint32_t(Topology::Points)) {
         const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
-        c.surf[3] = t && t->gh ? float(t->h) / float(t->gh) : 1.0f;
+        c.surf[3] = t && t->gh ? float(t->h) * s.aa_y / float(t->gh) : 1.0f;
     }
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
@@ -1549,7 +1562,7 @@ void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw) {
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
     float W = float(b->w), H = float(b->h);
     D3D11_VIEWPORT vp{0, 0, W, H, 0, 1};
-    float sx = W / gw, sy = b->gh ? H / b->gh : sx;  // across and down differ for a stretched target
+    float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(s.viewport.x * sx);
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
@@ -1714,6 +1727,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // constants
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
+    size = DrawnExtent(s, size);
     DrawConstants c{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     float stretch = bound_rt_ ? XStretch(aspect_, guest_h_, bound_rt_->gw, bound_rt_->gh) : 0;
@@ -1721,7 +1735,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     c.hud[2] = DepthTested(s) ? 1.0f : 0.0f;
     if (bound_rt_)
         NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_, stretch, c.hud[0]);
-    c.hud[1] = (bound_rt_ ? bound_rt_->gw : guest_w_) * 0.5f;
+    c.hud[1] = (bound_rt_ ? bound_rt_->gw : guest_w_) * 0.5f / s.aa_x;
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
     SetViewportScissor(s, size.w);

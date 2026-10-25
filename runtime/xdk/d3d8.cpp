@@ -241,13 +241,19 @@ gpu::Surface SurfaceOf(uint32_t header) {
     return s;
 }
 
-// hdr: where the surface object goes, 0 for a new one
-uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0) {
+// hdr: where the surface object goes, 0 for a new one; keep: a title's own surface there keeps its memory when it
+// holds this one (the title may find that memory again another way: 007: Everything or Nothing's GetTile)
+uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0, bool keep = false) {
     uint32_t pitch = (w * bpp + 63) & ~63u;
-    uint32_t data = mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000);
+    uint32_t phys = 0;
+    if (keep && hdr && R32(hdr + 4) && R32(hdr + 16)) {
+        uint32_t size = R32(hdr + 16), had = ((size >> 24) + 1) * 64 * (((size >> 12) & 0xFFF) + 1);
+        if (had >= pitch * h) phys = R32(hdr + 4) & 0x0FFFFFFF;
+    }
+    if (!phys) phys = mem::PhysicalFromVirtual(mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000));
     if (!hdr) hdr = mem::AllocSystem(24);
     W32(hdr + 0, 0x000D0001);  // surface, one reference, one internal reference held by the device
-    W32(hdr + 4, mem::PhysicalFromVirtual(data));
+    W32(hdr + 4, phys);
     W32(hdr + 8, 0);
     W32(hdr + 12, 0x00010021 | (fmt << 8));  // dma A, 2D, one level
     W32(hdr + 16, (w - 1) | (h - 1) << 12 | (pitch / 64 - 1) << 24);
@@ -293,9 +299,27 @@ void UpdateViewportConstants() {
     }
 }
 
+// the back buffer's samples across and down, from the D3DPRESENT_PARAMETERS MultiSampleType (0x2021, 2 across)
+uint32_t g_made_samples[2] = {1, 1};
+
+// State::aa_x, aa_y: D3DRS_MULTISAMPLEMODE (on the back buffer) or _RENDERTARGETMODE (on another target) asking for
+// more samples than the target was made with: D3DMULTISAMPLEMODE_1X 0, _2X 1 (the made buffer's way, else across),
+// _4X 2 (2 by 2). Fewer, as a supersampled buffer drawn 1X, keep 1: the renderer makes the buffer its drawn size.
+void UpdateSampleScale() {
+    bool back = g_state.rt.header && g_state.rt.header == g_buffers[1];
+    uint32_t made_x = back ? g_made_samples[0] : 1, made_y = back ? g_made_samples[1] : 1;
+    uint32_t mode = g_state.rs[back ? gpu::kRsMultiSampleMode : gpu::kRsMultiSampleRenderTargetMode];
+    uint32_t x = 1, y = 1;
+    if (mode == 2) x = y = 2;
+    else if (mode == 1) (made_y == 2 && made_x == 1 ? y : x) = 2;
+    g_state.aa_x = std::max<uint32_t>(x / made_x, 1);
+    g_state.aa_y = std::max<uint32_t>(y / made_y, 1);
+}
+
 void SetComplex(uint32_t rs, uint32_t v) {
     g_state.rs[rs] = v;
     if (uint32_t t = xdk::states::kNumbering.rs[rs]; t != xdk::states::kNone) W32(kRenderState + t * 4, v);
+    if (rs == gpu::kRsMultiSampleMode || rs == gpu::kRsMultiSampleRenderTargetMode) UpdateSampleScale();
 }
 
 // a texture stage state as the library stores it, in the title's numbering
@@ -383,7 +407,9 @@ uint32_t GivenSurface(uint32_t at) {
 // objects become the buffers, in this size and format (a supersampled size is not kept: the renderer scales instead).
 bool MakeFrameBuffers(uint32_t pp) {
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
-    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
+    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), samples = R32(pp + 0x10);
+    g_made_samples[0] = std::max<uint32_t>(samples >> 4 & 0xF, 1);
+    g_made_samples[1] = std::max<uint32_t>(samples & 0xF, 1);
     // older XDKs' parameters end before these fields (3948's after the presentation interval, 0x34 bytes): what
     // follows there is the caller's stack, which once named game code a back buffer
     constexpr uint32_t kGiven = XDK_PresentParams_BufferSurfaces;
@@ -408,7 +434,8 @@ bool MakeFrameBuffers(uint32_t pp) {
             g_buffers[i] = NewSurface(w, h, color_fmt, 4,
                                       given[kSlot[i]]                              ? given[kSlot[i]]
                                       : XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0
-                                                                                   : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24);
+                                                                                   : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24,
+                                      given[kSlot[i]] != 0);
         g_copy_target = NewSurface(w, h, color_fmt, 4);
         g_depth = 0;
         if (auto_depth || given_depth) {
@@ -416,7 +443,8 @@ bool MakeFrameBuffers(uint32_t pp) {
             g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4,  // 0x30 LIN_D16, 0x31 LIN_F16
                                  given_depth                                     ? given_depth
                                  : XDK_CDevice_AutoDepthSurface == xdk::kUnknown ? 0
-                                                                                 : kDevice + XDK_CDevice_AutoDepthSurface);
+                                                                                 : kDevice + XDK_CDevice_AutoDepthSurface,
+                                 given_depth != 0);
         }
         std::memcpy(made, want, sizeof made);
     }
@@ -439,6 +467,7 @@ bool MakeFrameBuffers(uint32_t pp) {
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
     g_state.rt = SurfaceOf(g_buffers[1]);
     g_state.zs = SurfaceOf(g_depth);
+    UpdateSampleScale();
     return fresh;
 }
 }  // namespace
@@ -709,6 +738,7 @@ void SetTargets(X86Context& ctx, uint32_t rt, uint32_t zs) {
     Release(ctx, old_zs);
     g_state.rt = SurfaceOf(rt);
     g_state.zs = SurfaceOf(zs);
+    UpdateSampleScale();
 }
 
 HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
@@ -803,6 +833,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         SetDev(kDevDepth, 0);
         g_state.rt = SurfaceOf(g_copy_target);
         g_state.zs = SurfaceOf(0);
+        UpdateSampleScale();
         // in the device's slots too, with their references: the title may read them back (Forza 0x1DB3C0 takes
         // texture 0 with GetTexture2 and releases it)
         for (uint32_t i = 0; i < 4; i++) {
@@ -870,6 +901,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         SetDev(kDevSwapCount, Dev(kDevSwapCount) + 1);
     }
     g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
+    UpdateSampleScale();
     return Dev(kDevSwapCount);
 }
 }  // namespace
@@ -1525,7 +1557,19 @@ uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h = 1469598103934665603ull) {
 }
 FILE* g_framelog = nullptr;  // open while frames are being logged
 uint32_t g_framelog_first = 0;
+// a texture whose data is physical address 0: a header the title filled from something the host left empty. Its
+// address and fields, once each
+void WarnEmptyTextures() {
+    for (int i = 0; i < 4; i++)
+        if (uint32_t t = g_state.textures[i]; t && (R32(t + 4) & 0x0FFFFFFF) == 0) {
+            static std::unordered_set<uint32_t> told;
+            if (told.size() < 16 && told.insert(t).second)
+                LOGW("d3d: stage %d texture %08X points at physical address 0 (common %08X, format %08X, size %08X, frame %u)",
+                     i, t, R32(t), R32(t + 12), R32(t + 16), uint32_t(g_presents));
+        }
+}
 void FrameLogDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    WarnEmptyTextures();
     static const long frames = [] {
         const char* e = std::getenv("XBE_FRAMELOG");
         return e && *e ? std::atol(e) : 0L;
@@ -1730,6 +1774,7 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
 void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !stride) return;
     SyncDeferred();
+    WarnEmptyTextures();
     if (KeepDraw(prim, 0, count, 0, vertices, stride)) return;
     auto stream = g_state.streams[0];
     bool input = g_state.input_active;  // vertices from memory are read by the shader's declaration
@@ -2191,7 +2236,14 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
 }
 
 // frame buffer compression tiles are the console's memory controller's business
-HLE_STDCALL(D3DDevice_SetTile, 2) { return 0; }
+// (index, tile): there is no tiled memory here, but the record is kept where the library keeps it: titles read it
+// back with GetTile (007: Everything or Nothing finds its depth buffer's memory so, for its weapon carousel)
+HLE_STDCALL(D3DDevice_SetTile, 2) {
+    constexpr uint32_t kTileBytes = 24, kTiles = 8;
+    if (XDK_CDevice_Tiles != xdk::kUnknown && a[0] < kTiles)
+        for (uint32_t i = 0; i < kTileBytes; i += 4) W32(kDevice + XDK_CDevice_Tiles + a[0] * kTileBytes + i, a[1] ? R32(a[1] + i) : 0);
+    return 0;
+}
 
 // the library's Begin pushes the start of the primitive, here it is opened
 HLE_STDCALL(D3DDevice_Begin, 1) {

@@ -194,6 +194,11 @@ struct State {
     std::array<std::array<uint32_t, 26>, 8> lights{};  // D3DLIGHT8
     uint32_t light_enable = 0;                         // bit per light
     float ss_offset_x = 0, ss_offset_y = 0;
+    // the target's pixels per pixel drawn: D3DRS_MULTISAMPLEMODE (the back buffer) or _RENDERTARGETMODE (another
+    // target) asking for more samples than the target was made with. The console then draws the target as a smaller
+    // one, each pixel covering aa_x by aa_y of its samples (EoN's particles: 4X on its 640x480 buffer, drawn 320x240
+    // and stretched). Positions, the viewport and scissors are in those larger pixels.
+    uint32_t aa_x = 1, aa_y = 1;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
     // 1 / the projection's far w, as the XDK's SetTransform derives it (0x1C34A0). W-buffered, the fixed function and
     // pretransformed vertices have w scaled by zscale * inv_wfar (0x1C0FC0 folds it into the matrix, 0x1C0300 into

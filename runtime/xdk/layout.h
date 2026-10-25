@@ -66,6 +66,9 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_Palettes
 #define XDK_CDevice_Palettes 0xFFFFFFFFu
 #endif
+#ifndef XDK_CDevice_Tiles
+#define XDK_CDevice_Tiles 0xFFFFFFFFu  // the D3DTILE records SetTile keeps, 24 bytes each, GetTile reads
+#endif
 #ifndef XDK_CDevice_RenderTarget
 #define XDK_CDevice_RenderTarget 0xFFFFFFFFu
 #endif

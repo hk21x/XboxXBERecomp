@@ -118,11 +118,15 @@ struct GuestExtent {
     uint32_t h;
 };
 
+// the size in the pixels draws address (State::aa_x, aa_y)
+inline GuestExtent DrawnExtent(const State& s, GuestExtent size) { return {size.w / s.aa_x, size.h / s.aa_y}; }
+
 // how each stage reads its texture, for the texel constants
 struct StageReads {
     bool rt[4] = {};            // a render target
     float k[4] = {1, 1, 1, 1};  // Extension::Sample's k
     float wide[4] = {};         // host texels per console texel of a target read into a smaller one, 0 otherwise
+    uint32_t size[4][2] = {};   // the bound target's console size when the texture is a smaller one on its memory
 };
 
 // D3D12_SAMPLER_DESC and D3D11_SAMPLER_DESC are the same layout
@@ -156,6 +160,7 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
 }
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
 bool DepthTested(const State& s);
+bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture of a draw that leaves it alone
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
 // a depth target sampled as format: through a depth format the console compares (a shadow map), through a 32 bit
 // colour format it reads the word's bytes (PGR2's depth of field weighs its blur by them)
