@@ -144,8 +144,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RAWINPUT ri;
         UINT size = sizeof(ri);
         if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) != UINT(-1) &&
-            ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) && input::MouseLooking())
-            input::MouseMoved(ri.data.mouse.lLastX, ri.data.mouse.lLastY);
+            ri.header.dwType == RIM_TYPEMOUSE && input::MouseLooking()) {
+            if (!(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) input::MouseMoved(ri.data.mouse.lLastX, ri.data.mouse.lLastY);
+            if (ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) input::MouseWheel(short(ri.data.mouse.usButtonData));
+        }
         HoldCursor(hwnd);
         return DefWindowProcW(hwnd, msg, wp, lp);
     }

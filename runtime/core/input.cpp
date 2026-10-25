@@ -182,6 +182,29 @@ void MouseMoved(int dx, int dy) {
 
 bool UsingKeyboard() { return g_keyboard; }
 
+std::atomic<int> g_wheel{0};  // WHEEL_DELTA units
+
+void MouseWheel(int delta) {
+    g_wheel += delta;
+    g_keyboard = true;
+}
+
+int TakeWheel() {
+    if (!MouseLooking()) {
+        g_wheel = 0;
+        return 0;
+    }
+    int w = g_wheel.load(), notches = w / 120;
+    g_wheel -= notches * 120;
+    return notches;
+}
+
+uint32_t MouseButtons() {
+    if (!MouseLooking()) return 0;
+    return uint32_t((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) |
+           ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
+}
+
 std::array<uint16_t, 2> ControlKeys(int c) {
     const app::Settings& s = app::Get();
     return c >= 0 && c < int(s.keys.size()) ? s.keys[size_t(c)] : app::DefaultKeys(c);

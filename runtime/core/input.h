@@ -42,6 +42,11 @@ bool TakeMouse(float& x, float& y);
 bool UsingKeyboard();
 // the keys controller 1's control c is bound to: the settings', else the defaults (0 none; mouse buttons VK_LBUTTON ..)
 std::array<uint16_t, 2> ControlKeys(int c);
+// the mouse for a title's own menus, while it looks (MouseLooking): the wheel's notches since the last call (up
+// positive), and the buttons held (1 left, 2 right, 4 middle)
+int TakeWheel();
+uint32_t MouseButtons();
+void MouseWheel(int delta);  // window thread, WHEEL_DELTA (120) a notch
 void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)
