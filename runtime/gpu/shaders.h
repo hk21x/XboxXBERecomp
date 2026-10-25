@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,11 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t reg
 // an ILU mov) of v0 and constants (D3D's pass-through program form: oPos.xy = v0.xy + c[59].w, z = v0.z * c[58].z,
 // w = v0.w)
 bool ScreenProgram(const std::vector<uint32_t>& program);
+// a program that starts by multiplying its position input by four consecutive constants (dp4 v0 with c[k] .. c[k+3],
+// then the screen tail): k, else -1. With an orthographic 2D matrix there (gpu::OrthoConstants), it draws 2D
+int MatrixProgram(const std::vector<uint32_t>& program);
+// c[k] .. c[k+3] (hardware order) are a 2D matrix: x and y each scaled and offset alone, y flipped, w 1
+bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k);
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:

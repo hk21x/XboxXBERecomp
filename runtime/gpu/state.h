@@ -145,6 +145,7 @@ struct VertexShader {
     std::array<uint32_t, 16> stream_stride{};  // bytes consumed per stream by the declaration
     std::vector<std::pair<uint32_t, std::array<float, 4>>> constants;  // D3DVSD_CONST tokens
     mutable int screen = -1;  // gpu::ScreenDraw's answer for the program, -1 not yet asked
+    mutable int matrix = -2;  // gpu::MatrixProgram's, -2 not yet asked
 };
 
 struct PixelShader {

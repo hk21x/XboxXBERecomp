@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1218,7 +1219,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     float squeeze = 1;
     const bool depth_tested = s.rs[kRsZEnable] && s.simple[kMZFunc >> 2] != 0x207;
     // a program only moving its position to the screen likewise, for a title asking (GameInfo::squeeze_screen_programs)
-    const bool screen = program && app::kGame.squeeze_screen_programs && ScreenProgram(s.vs->program);
+    const bool screen = program && app::kGame.squeeze_screen_programs &&
+                        (ScreenProgram(s.vs->program) || (MatrixProgram(s.vs->program) >= 0 &&
+                                                          OrthoConstants(s.vsc, MatrixProgram(s.vs->program))));
     if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();

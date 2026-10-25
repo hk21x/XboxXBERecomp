@@ -702,12 +702,14 @@ void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, u
          stretch, s.rs[kRsZEnable], SimpleState(s, kMZFunc), text[why]);
 }
 
-// a draw by a program that only moves its position to the screen, for a title asking (GameInfo::
-// squeeze_screen_programs); the answer kept with the shader
+// a draw by a program that only moves its position to the screen, or multiplies it by a 2D matrix, for a title asking
+// (GameInfo::squeeze_screen_programs); the program's kind kept with the shader
 bool ScreenDraw(const State& s) {
     if (!app::kGame.squeeze_screen_programs || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
     if (s.vs->screen < 0) s.vs->screen = ScreenProgram(s.vs->program) ? 1 : 0;
-    return s.vs->screen == 1;
+    if (s.vs->screen == 1) return true;
+    if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
+    return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
 }
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {

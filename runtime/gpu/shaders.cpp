@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -664,6 +665,30 @@ bool ScreenProgram(const std::vector<uint32_t>& prog) {
     return any;
 }
 
+int MatrixProgram(const std::vector<uint32_t>& prog) {
+    int k = -1;
+    for (int i = 0; i < 4; i++) {
+        size_t n = size_t(i) * 4;
+        if (n + 4 > prog.size()) return -1;
+        Tok t{&prog[n]};
+        uint32_t mac = t.f(1, 21, 4), ilu = t.f(1, 25, 3);
+        // dp4 (7), A the input v0 (mux 2, register 0), B a constant (mux 3) not indexed by a0
+        if (mac != 7 || ilu || t.f(2, 26, 2) != 2 || t.f(1, 9, 4) != 0 || t.f(2, 11, 2) != 3 || t.f(3, 1, 1)) return -1;
+        int cr = int(t.f(1, 13, 8));
+        if (i == 0) k = cr;
+        else if (cr != k + i) return -1;
+        if (t.f(3, 0, 1) && i < 3) return -1;  // ended early
+    }
+    return k >= 0 && k + 3 < 192 ? k : -1;
+}
+
+bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k) {
+    auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+    const auto &x = c[size_t(k)], &y = c[size_t(k) + 1], &w = c[size_t(k) + 3];
+    return x[0] > 0 && near(x[1], 0) && near(x[2], 0) && y[1] < 0 && near(y[0], 0) && near(y[2], 0) && near(w[0], 0) &&
+           near(w[1], 0) && near(w[2], 0) && near(w[3], 1);
+}
+
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode) {
     std::string s = Common();
     s += kVsHelpers;
@@ -702,8 +727,9 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         }
         if (k.f(3, 0, 1)) break;  // last instruction
     }
-    // ultrawide: 2D squeezed as pretransformed draws are (FixedVertexHlsl), at the near plane by its w (4 or less)
-    if (app::kGame.squeeze_screen_programs && ScreenProgram(prog))
+    // ultrawide: 2D squeezed as pretransformed draws are (FixedVertexHlsl), at the near plane by its w (4 or less);
+    // a matrix program's only when the draw's matrix is 2D (hud.x 1 otherwise: gpu::ScreenDraw)
+    if (app::kGame.squeeze_screen_programs && (ScreenProgram(prog) || MatrixProgram(prog) >= 0))
         s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5 && (hud.z == 0 || oPos.w <= 4))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
     s += kVsEpilogue;

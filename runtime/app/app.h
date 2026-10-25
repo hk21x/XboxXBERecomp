@@ -171,7 +171,8 @@ struct GameInfo {
     // the shape the title lays out its 2D for (HUD, menus): shown wider, that 2D is squeezed into it (gpu::HudSqueeze)
     float hud_aspect = 16.0f / 9.0f;
     // that 2D also where drawn by a vertex program that only moves its position input to the screen (gpu::
-    // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form)
+    // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form), or that multiplies it by a 2D
+    // orthographic matrix (gpu::MatrixProgram, OrthoConstants: EoN's driving HUD)
     bool squeeze_screen_programs = false;
     // a PAL release (the certificate's game regions without North America) runs on a PAL console with PAL 60 Hz on:
     // a title naming its files by the video standard finds the disc's (EoN's movies are _pal and _palw only)
