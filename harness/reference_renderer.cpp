@@ -212,6 +212,9 @@ void DecodeBlocks(const TextureDesc& d, Host host, const std::vector<uint8_t>& i
 
 // a P8 texture through the stage's palette (D3DPalette: Common, its top two bits the size code; Data, the colours'
 // physical address), as the renderers' ReadStagePalette
+// as the renderers' shaders (kVsHelpers): a vertex on the frame's left or right edge or just past it is not squeezed
+bool AtFrameEdge(float x, float width) { return (x <= 0.5f && x >= -2) || (x >= width - 0.5f && x <= width + 2); }
+
 std::shared_ptr<Image> FindImage(uint32_t header, uint32_t palette_header) {
     TextureDesc d;
     if (!header || !Describe(header, d)) return nullptr;
@@ -1245,7 +1248,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (program) {
             vp.Run(s.vs->program);
             o.pos = vp.out[0];
-            if (screen && o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f && (!depth_tested || o.pos[3] <= 4.0f))
+            if (screen && !AtFrameEdge(o.pos[0], float(rt.w)) && (!depth_tested || o.pos[3] <= 4.0f))
                 o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
             o.pos[3] = MagClamp(o.pos[3]);
             o.attr[kD0] = vp.out[3];
@@ -1259,7 +1262,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             const Vec& q = vp.in[0];
             if (as.pretransformed) {
                 o.pos = V(q[0], q[1], q[2] * s.zscale, q[3] == 0 ? 1 : 1 / q[3]);
-                if (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f && (!depth_tested || q[3] >= 0.25f))
+                if (!AtFrameEdge(o.pos[0], float(rt.w)) && (!depth_tested || q[3] >= 0.25f))
                     o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
             } else {
                 // world, view, projection, then the viewport, as the D3D12 path builds it

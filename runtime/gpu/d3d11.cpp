@@ -1463,6 +1463,19 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
             stages.reads.size[stage][1] = big->second.gh;
         }
     }
+    // a smaller linear texture over a colour target with the target's row pitch: the target's top left, as on the
+    // console (EoN's Thermovision shrinks the frame into 640x480 target 83170A00 and reads it back as 320x240)
+    if (tit != targets_.end() && !fi.depth && !tit->second.depth && d.linear &&
+        (tit->second.gw > d.width || tit->second.gh > d.height) && tit->second.gw >= d.width &&
+        tit->second.gh >= d.height) {
+        if (d.pitch == GuestPitch(tit->second.gw)) {
+            stages.reads.size[stage][0] = tit->second.gw;
+            stages.reads.size[stage][1] = tit->second.gh;
+        } else {
+            LOG_FIRST(4, "d3d11: texture %08X %ux%u (pitch %u) over target %ux%u read whole", d.data, d.width,
+                      d.height, d.pitch, tit->second.gw, tit->second.gh);
+        }
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed)
         return BindTargetTexture(s, stage, d, tit->second, stages);
     return BindGuestTexture(s, stage, d, fi, stages);

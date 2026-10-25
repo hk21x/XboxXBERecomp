@@ -73,6 +73,9 @@ std::string Common() { return kCommonHead + Hooks().Constants() + kCommonTail; }
 // vertex programs
 
 const char* kVsHelpers = R"(
+// ultrawide: a 2D vertex on the frame's left or right edge, or just past it (a full screen quad's corner), stays there
+// while the rest is squeezed to the centre; one further out (a big rotating tile of EoN's driving radar) is squeezed too
+bool AtFrameEdge(float x, float width) { return (x <= 0.5 && x >= -2) || (x >= width - 0.5 && x <= width + 2); }
 float4 mac_mul(float4 a, float4 b) { return (a == 0 || b == 0) ? (float4)0 : a * b; }
 int mac_arl(float v) { return (int)floor(v + 1e-3); }
 // magnitude clamped between 1 / 2^64 and 2^64, sign kept
@@ -735,7 +738,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     // ultrawide: 2D squeezed as pretransformed draws are (FixedVertexHlsl), at the near plane by its w (4 or less);
     // a matrix program's only when the draw's matrix is 2D (hud.x 1 otherwise: gpu::ScreenDraw)
     if (app::kGame.squeeze_screen_programs && (ScreenProgram(prog) || MatrixProgram(prog) >= 0))
-        s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5 && (hud.z == 0 || oPos.w <= 4))\n"
+        s += "    if (!AtFrameEdge(oPos.x, hud.y * 2) && (hud.z == 0 || oPos.w <= 4))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
     s += kVsEpilogue;
     return s;
@@ -783,7 +786,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         // ultrawide: 2D drawn in a centred 16:9 part; a corner on the frame's left or right edge stays there (HUD bars
         // reaching the edge keep reaching it, full screen passes and full width lines keep their width)
         // a depth tested draw (hud.z) only at the near plane: 2D drawn with depth on, not a glow out in the world
-        s += "    if (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5 && (hud.z == 0 || rhw.w >= 0.25))\n"
+        s += "    if (!AtFrameEdge(oPos.x, hud.y * 2) && (hud.z == 0 || rhw.w >= 0.25))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * hud.x;\n";
     } else {
         s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
