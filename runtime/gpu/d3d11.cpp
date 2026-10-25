@@ -24,6 +24,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <imgui.h>
 #include <backends/imgui_impl_dx11.h>
@@ -1463,18 +1464,17 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
             stages.reads.size[stage][1] = big->second.gh;
         }
     }
-    // a smaller linear texture over a colour target with the target's row pitch: the target's top left, as on the
-    // console (EoN's Thermovision shrinks the frame into 640x480 target 83170A00 and reads it back as 320x240)
+    // a smaller linear texture over a colour target: the target's top left, its texel coordinates over the target's
+    // size (EoN's Thermovision shrinks the frame into 640x480 target 8316CA00 and reads it back as 320x240)
     if (tit != targets_.end() && !fi.depth && !tit->second.depth && d.linear &&
         (tit->second.gw > d.width || tit->second.gh > d.height) && tit->second.gw >= d.width &&
         tit->second.gh >= d.height) {
-        if (d.pitch == GuestPitch(tit->second.gw)) {
-            stages.reads.size[stage][0] = tit->second.gw;
-            stages.reads.size[stage][1] = tit->second.gh;
-        } else {
-            LOG_FIRST(4, "d3d11: texture %08X %ux%u (pitch %u) over target %ux%u read whole", d.data, d.width,
-                      d.height, d.pitch, tit->second.gw, tit->second.gh);
-        }
+        stages.reads.size[stage][0] = tit->second.gw;
+        stages.reads.size[stage][1] = tit->second.gh;
+        static std::unordered_set<uint32_t> told;
+        if (told.size() < 4 && told.insert(d.data).second)
+            LOGR("d3d11: texture %08X %ux%u (pitch %u) read as the top left of target %ux%u", d.data, d.width,
+                 d.height, d.pitch, tit->second.gw, tit->second.gh);
     }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed)
         return BindTargetTexture(s, stage, d, tit->second, stages);
@@ -1803,6 +1803,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (bound_rt_)
         NoteSqueeze(s, a, bound_rt_->data, bound_rt_->gw, bound_rt_->gh, bound_rt_->w, aspect_, stretch, c.hud[0]);
     c.hud[1] = (bound_rt_ ? bound_rt_->gw : guest_w_) * 0.5f / s.aa_x;
+    if (c.hud[0] != 1 && !SpansFrameWidth(s, a, c.hud[1] * 2)) c.hud[1] = -c.hud[1];  // squeezed whole
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
     SetViewportScissor(s, size.w);

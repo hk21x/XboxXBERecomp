@@ -168,6 +168,9 @@ bool DepthTested(const State& s);
 bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture of a draw that leaves it alone
 bool ScreenDraw(const State& s);
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
+// a squeezed 2D draw reaching both the left and right edge of a frame `width` wide (a full screen quad): its vertices
+// on or past the edges stay there; any other draw is squeezed whole (true where its positions cannot be read)
+bool SpansFrameWidth(const State& s, const Assembled& a, float width);
 // a depth target sampled as format: through a depth format the console compares (a shadow map), through a 32 bit
 // colour format it reads the word's bytes (PGR2's depth of field weighs its blur by them)
 void DepthRead(uint32_t format, TexInfo& info);
