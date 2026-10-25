@@ -71,7 +71,7 @@ bool ScreenProgram(const std::vector<uint32_t>& program);
 // a program that starts by multiplying its position input by four consecutive constants (dp4 v0 with c[k] .. c[k+3],
 // then the screen tail): k, else -1. With an orthographic 2D matrix there (gpu::OrthoConstants), it draws 2D
 int MatrixProgram(const std::vector<uint32_t>& program);
-// c[k] .. c[k+3] (hardware order) are a 2D matrix: x and y each scaled and offset alone, y flipped, w 1
+// c[k] .. c[k+3] (hardware order) are a 2D matrix: x and y from x and y alone (scaled, rotated, offset), y flipped, w 1
 bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k);
 // fixed function vertex state a shader is built for
 struct FixedKey {

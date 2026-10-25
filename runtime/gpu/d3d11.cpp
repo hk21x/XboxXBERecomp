@@ -1768,7 +1768,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (fresh || ds_.layout != p->layout.Get()) ctx_->IASetInputLayout(ds_.layout = p->layout.Get());
     if (fresh || ds_.raster != p->raster.Get()) ctx_->RSSetState(ds_.raster = p->raster.Get());
     float bf[4];
-    Color(SimpleState(s, kMBlendColor), bf);
+    BlendFactor(s, bf);
     if (fresh || ds_.blend != p->blend.Get() || std::memcmp(ds_.bf, bf, sizeof(bf))) {
         ctx_->OMSetBlendState(ds_.blend = p->blend.Get(), bf, 0xFFFFFFFF);
         std::memcpy(ds_.bf, bf, sizeof(bf));

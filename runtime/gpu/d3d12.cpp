@@ -2204,7 +2204,7 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
 
 void D3D12Backend::SetBlendFactorStencilRef(const State& s) {
     float bf[4];
-    Color(SimpleState(s, kMBlendColor), bf);
+    BlendFactor(s, bf);
     DrawStateCache& c = ds_cache_;
     if (!c.bf_ok || std::memcmp(c.bf, bf, sizeof(bf))) {
         cl_->OMSetBlendFactor(bf);

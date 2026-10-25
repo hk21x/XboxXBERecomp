@@ -112,6 +112,15 @@ void Color(uint32_t argb, float* o) {
 // D3DBLEND, the console uses GL values
 constexpr uint32_t kBlendDestColor = 0x306;  // D3DBLEND_DESTCOLOR
 
+void BlendFactor(const State& s, float* o) {
+    Color(SimpleState(s, kMBlendColor), o);
+    uint32_t src = SimpleState(s, kMSrcBlend), dst = SimpleState(s, kMDestBlend);
+    auto constant_alpha = [](uint32_t v) { return v == 0x8003 || v == 0x8004; };
+    auto constant_colour = [](uint32_t v) { return v == 0x8001 || v == 0x8002; };
+    if ((constant_alpha(src) || constant_alpha(dst)) && !constant_colour(src) && !constant_colour(dst))
+        o[0] = o[1] = o[2] = o[3];
+}
+
 D3D12_BLEND Blend(uint32_t v, bool alpha) {
     switch (v) {
         case 0: return D3D12_BLEND_ZERO;

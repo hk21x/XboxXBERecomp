@@ -31,6 +31,9 @@ extern const char* kDepthResolveHlsl;
 
 float Bits(uint32_t v);
 void Color(uint32_t argb, float* o);  // console ARGB to RGBA floats
+// the draw's blend factor (D3DRS_BLENDCOLOR): its alpha in all four when the blend uses constant alpha (0x8003,
+// 0x8004) and not constant colour, since D3D's blend factor scales each channel by its own component
+void BlendFactor(const State& s, float* o);
 // console values (GL numbering) to host state
 D3D12_BLEND Blend(uint32_t v, bool alpha);
 D3D12_BLEND_OP BlendOp(uint32_t v);
