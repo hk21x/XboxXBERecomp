@@ -175,6 +175,20 @@ void MouseMoved(int dx, int dy) {
     g_mouse_dy += dy;
 }
 
+bool TakeMouse(float& x, float& y) {
+    x = y = 0;
+    if (!MouseLooking()) return false;
+    const app::Settings& s = app::Get();
+    static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    float dt = std::clamp(std::chrono::duration<float>(now - last).count(), 0.001f, 0.1f);
+    last = now;
+    float k = s.mouse_sensitivity / 100.0f / kFullRate / dt;
+    x = g_mouse_dx.exchange(0) * k;
+    y = -g_mouse_dy.exchange(0) * k * (s.mouse_invert_y ? -1.0f : 1.0f);
+    return true;
+}
+
 bool MouseLooking() {
     const app::Settings& s = app::Get();
     HWND hwnd = static_cast<HWND>(app::Window());
@@ -260,7 +274,7 @@ Pad Poll(int port) {
     p.rx = Stick(out[kRSLeft], out[kRSRight]);
     p.ry = Stick(out[kRSDown], out[kRSUp]);
     if (port == 0 && MouseLooking()) {
-        MouseStick(s, p.rx, p.ry);
+        if (!app::kGame.mouse_direct) MouseStick(s, p.rx, p.ry);
     } else if (port == 0) {  // nothing kept from before (the settings window, another window in front)
         g_mouse_dx = 0;
         g_mouse_dy = 0;

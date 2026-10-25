@@ -31,6 +31,10 @@ Pad Poll(int port);
 void MouseMoved(int dx, int dy);
 // the mouse plays the right stick now: mouse look on, the game window in front, the settings window shut
 bool MouseLooking();
+// for a title taking the mouse itself (GameInfo::mouse_direct): the movement since the last call as a rate, in full
+// stick deflections (2400 counts a second at 100% sensitivity is 1), up positive, the settings' sensitivity and invert
+// applied; false and nothing taken while the mouse is not looking
+bool TakeMouse(float& x, float& y);
 void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)

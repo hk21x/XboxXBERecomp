@@ -35,7 +35,7 @@ Instance k runs in `<out>/k` with its own `logs`, `hdd` and `cap`. With more tha
 Environment:
 
 - `SCRIPT` pad script: lines of `vblank buttons [vblanks held]` (default 8), `#` comments, buttons joined with `+`:
-  `UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT LS LSD LSL LSR`. Times count vertical blanks, 60 a second: each
+  `UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT LS LSD LSL LSR RS RSD RSL RSR MOUSEL MOUSER MOUSEU MOUSED`. Times count vertical blanks, 60 a second: each
   presented frame adds the vertical blanks its present interval asked for (at least one), so a title that runs its
   menus at 60 and its races at 30 keeps one clock. `renderer: frame` log lines carry the count.
 - `cmd` file in the run folder: `buttons [vblanks held]`, pressed once when read

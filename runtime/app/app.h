@@ -182,6 +182,8 @@ struct GameInfo {
     bool (*hide_file)(const std::string& xbox_path) = nullptr;
     // the mouse can play controller 1's right stick (Settings::mouse_look): a shooter's camera and aim
     bool mouse_look = false;
+    // the title's code takes the mouse's movement itself (input::TakeMouse) rather than as the right stick
+    bool mouse_direct = false;
     // the keys each input::Control starts with (two Windows virtual keys, 0 none), else the SDK's (DefaultKeys)
     std::array<uint16_t, 2> (*default_keys)(int c) = nullptr;
     // a texture the title binds (SetTexture, its guest D3DBaseTexture) with its stage's palette (D3DPalette, 0 none), on

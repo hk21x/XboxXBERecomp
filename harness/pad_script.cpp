@@ -2,7 +2,8 @@
 // SCRIPT file: lines of "vblank buttons [vblanks held]", held 8 by default, # comments; buttons joined by +. Times
 // count vertical blanks at 60 a second, the frames the title asked for (a frame at 30 a second is two), so a script
 // keeps its timing when a title changes its frame rate between screens:
-// UP DOWN LEFT RIGHT START BACK A B X Y LT RT LS LSD LSL LSR (left stick up, down, left, right)
+// UP DOWN LEFT RIGHT START BACK A B X Y LT RT LS LSD LSL LSR (left stick up, down, left, right) RS RSD RSL RSR (right)
+// MOUSEL MOUSER MOUSEU MOUSED (a mouse moving for input::TakeMouse)
 // cmd in the run folder: "buttons [vblanks held]" pressed once from when it is read, then removed
 #include <cstdio>
 #include <string>
@@ -16,6 +17,8 @@
 namespace input {
 
 namespace {
+
+float g_mouse_x = 0, g_mouse_y = 0;  // this poll's scripted mouse, for input::TakeMouse
 
 struct Press {
     double at;
@@ -64,6 +67,14 @@ void Apply(const std::string& s, Pad& p) {
         else if (b == "LSD") p.ly = -32767;
         else if (b == "LSL") p.lx = -32767;
         else if (b == "LSR") p.lx = 32767;
+        else if (b == "RS") p.ry = 32767;
+        else if (b == "RSD") p.ry = -32767;
+        else if (b == "RSL") p.rx = -32767;
+        else if (b == "RSR") p.rx = 32767;
+        else if (b == "MOUSEL") g_mouse_x = -0.5f;  // input::TakeMouse: a mouse moving at half a deflection
+        else if (b == "MOUSER") g_mouse_x = 0.5f;
+        else if (b == "MOUSEU") g_mouse_y = 0.5f;
+        else if (b == "MOUSED") g_mouse_y = -0.5f;
     }
 }
 
@@ -75,6 +86,7 @@ Pad Poll(int port) {
     Pad p;
     p.connected = port == 0;
     if (port == 0) {
+        g_mouse_x = g_mouse_y = 0;
         double t = double(harness::g_vblanks.load());
         std::string cmd = (app::ExeDir() / "cmd").string();
         if (FILE* f = std::fopen(cmd.c_str(), "r")) {
@@ -90,6 +102,13 @@ Pad Poll(int port) {
     }
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
+}
+
+// the script's mouse (MOUSEL MOUSER MOUSEU MOUSED) as of the last poll
+bool TakeMouse(float& x, float& y) {
+    x = g_mouse_x;
+    y = g_mouse_y;
+    return true;
 }
 
 void Rumble(int port, uint16_t left, uint16_t right) {
