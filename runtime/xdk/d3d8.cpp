@@ -1026,8 +1026,16 @@ COMPLEX_STATE(LogicOp, gpu::kRsLogicOp)
 COMPLEX_STATE(EdgeAntiAlias, gpu::kRsEdgeAntiAlias)
 COMPLEX_STATE(MultiSampleAntiAlias, gpu::kRsMultiSampleAntiAlias)
 COMPLEX_STATE(MultiSampleMask, gpu::kRsMultiSampleMask)
-COMPLEX_STATE(MultiSampleMode, gpu::kRsMultiSampleMode)
-COMPLEX_STATE(MultiSampleRenderTargetMode, gpu::kRsMultiSampleRenderTargetMode)
+// the multisample modes change where draws land (State::aa_x): draws pushed before them are read under the old mode
+// first (EoN's particles batched inside its 4X window were drawn after it at half their place: a second muzzle flash)
+#define SAMPLE_STATE(name, rs)                        \
+    HLE_STDCALL(D3DDevice_SetRenderState_##name, 1) { \
+        WalkBeforeState();                            \
+        SetComplex(rs, a[0]);                         \
+        return 0;                                     \
+    }
+SAMPLE_STATE(MultiSampleMode, gpu::kRsMultiSampleMode)
+SAMPLE_STATE(MultiSampleRenderTargetMode, gpu::kRsMultiSampleRenderTargetMode)
 COMPLEX_STATE(ShadowFunc, gpu::kRsShadowFunc)
 COMPLEX_STATE(LineWidth, gpu::kRsLineWidth)
 COMPLEX_STATE(SampleAlpha, gpu::kRsSampleAlpha)
