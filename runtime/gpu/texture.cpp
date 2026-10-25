@@ -3,10 +3,18 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cmath>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <unordered_map>
 
+#include "app/app.h"
 #include "core/log.h"
 #include "gpu/shaders.h"
 #include "kernel/kernel.h"
@@ -447,6 +455,13 @@ std::atomic<size_t> g_replace_count{0};  // every bind looks, so none is checked
 uint64_t g_replace_version = 0;
 }  // namespace
 
+static void RegisterReplacement(std::shared_ptr<Replacement> r) {
+    std::lock_guard<std::mutex> lock(g_replace_lock);
+    r->version = ++g_replace_version;
+    g_replace[r->data] = std::move(r);
+    g_replace_count = g_replace.size();
+}
+
 void SetReplacement(uint32_t data, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra) {
     if (!width || !height || bgra.size() != size_t(width) * height || !guest_bytes) return;
     auto r = std::make_shared<Replacement>();
@@ -456,10 +471,7 @@ void SetReplacement(uint32_t data, uint32_t guest_bytes, uint32_t width, uint32_
     r->width = width;
     r->height = height;
     r->bgra = std::move(bgra);
-    std::lock_guard<std::mutex> lock(g_replace_lock);
-    r->version = ++g_replace_version;
-    g_replace[data] = std::move(r);
-    g_replace_count = g_replace.size();
+    RegisterReplacement(std::move(r));
 }
 
 void ClearReplacement(uint32_t data) {
@@ -475,8 +487,15 @@ std::shared_ptr<const Replacement> FindReplacement(uint32_t data) {
     return it == g_replace.end() ? nullptr : it->second;
 }
 
+std::mutex g_sharp_lock;
+std::unordered_map<uint32_t, int> g_sharp_drops;  // sharpened pictures dropped, by texture
+
 bool ReplacementHolds(const Replacement& r) {
     if (Hash(kernel::HostPtr(r.data), r.guest_bytes) == r.guest_hash) return true;
+    if (r.sharpened) {
+        std::lock_guard<std::mutex> lock(g_sharp_lock);
+        g_sharp_drops[r.data]++;
+    }
     std::lock_guard<std::mutex> lock(g_replace_lock);
     auto it = g_replace.find(r.data);
     if (it != g_replace.end() && it->second->version == r.version) {
@@ -485,6 +504,261 @@ bool ReplacementHolds(const Replacement& r) {
         LOGR("gpu: the picture for texture %08X dropped, the game's bytes there changed", r.data);
     }
     return false;
+}
+
+std::vector<uint8_t> UpscaleMask(const uint8_t* alpha, uint32_t width, uint32_t height, uint32_t scale) {
+    const int w = int(width), h = int(height), s = int(scale);
+    auto at = [&](int x, int y) { return alpha[size_t(std::clamp(y, 0, h - 1)) * width + size_t(std::clamp(x, 0, w - 1))] / 255.0f; };
+    auto cubic = [](float t, float* k) {  // Catmull-Rom weights for the four taps around t
+        float t2 = t * t, t3 = t2 * t;
+        k[0] = -0.5f * t3 + t2 - 0.5f * t;
+        k[1] = 1.5f * t3 - 2.5f * t2 + 1;
+        k[2] = -1.5f * t3 + 2 * t2 + 0.5f * t;
+        k[3] = 0.5f * t3 - 0.5f * t2;
+    };
+    // the interpolated field at output pixel centres, a pixel of margin for the gradient
+    const int ow = w * s, oh = h * s;
+    std::vector<float> f(size_t(ow + 2) * size_t(oh + 2));
+    for (int y = -1; y <= oh; y++) {
+        float v = (y + 0.5f) / s - 0.5f;
+        int y0 = int(std::floor(v));
+        float ky[4];
+        cubic(v - y0, ky);
+        for (int x = -1; x <= ow; x++) {
+            float u = (x + 0.5f) / s - 0.5f;
+            int x0 = int(std::floor(u));
+            float kx[4];
+            cubic(u - x0, kx);
+            float sum = 0;
+            for (int j = 0; j < 4; j++) {
+                float row = 0;
+                for (int i = 0; i < 4; i++) row += kx[i] * at(x0 - 1 + i, y0 - 1 + j);
+                sum += ky[j] * row;
+            }
+            f[size_t(y + 1) * size_t(ow + 2) + size_t(x + 1)] = sum;
+        }
+    }
+    std::vector<uint8_t> out(size_t(ow) * size_t(oh));
+    for (int y = 0; y < oh; y++)
+        for (int x = 0; x < ow; x++) {
+            auto F = [&](int dx, int dy) { return f[size_t(y + 1 + dy) * size_t(ow + 2) + size_t(x + 1 + dx)]; };
+            float c = F(0, 0), gx = (F(1, 0) - F(-1, 0)) / 2, gy = (F(0, 1) - F(0, -1)) / 2;
+            float g = std::sqrt(gx * gx + gy * gy);  // per output pixel
+            float a = g > 1e-4f ? (c - 0.5f) / g + 0.5f : (c >= 0.5f ? 1.0f : 0.0f);
+            out[size_t(y) * size_t(ow) + size_t(x)] = uint8_t(std::clamp(a, 0.0f, 1.0f) * 255 + 0.5f);
+        }
+    return out;
+}
+
+namespace {
+// DXT1/3/5 blocks (Host BC1 BC2 BC3 rows from DecodeLevel) to B8G8R8A8
+void Unpack565(uint16_t c, uint8_t* o) {
+    o[0] = uint8_t((c & 31) * 255 / 31);
+    o[1] = uint8_t((c >> 5 & 63) * 255 / 63);
+    o[2] = uint8_t((c >> 11) * 255 / 31);
+}
+void DecodeBlocks(Host host, uint32_t w, uint32_t h, const std::vector<uint8_t>& in, uint32_t pitch,
+                  std::vector<uint32_t>& out) {
+    out.assign(size_t(w) * h, 0);
+    const uint32_t block = host == Host::BC1 ? 8 : 16;
+    for (uint32_t by = 0; by < (h + 3) / 4; by++)
+        for (uint32_t bx = 0; bx < (w + 3) / 4; bx++) {
+            size_t at = size_t(by) * pitch + size_t(bx) * block;
+            if (at + block > in.size()) continue;
+            const uint8_t* b = &in[at];
+            const uint8_t* c = b + (block - 8);
+            uint16_t c0 = uint16_t(c[0] | c[1] << 8), c1 = uint16_t(c[2] | c[3] << 8);
+            uint8_t pal[4][4] = {};
+            Unpack565(c0, pal[0]);
+            Unpack565(c1, pal[1]);
+            bool four = host != Host::BC1 || c0 > c1;
+            for (int i = 0; i < 3; i++) {
+                pal[2][i] = uint8_t(four ? (2 * pal[0][i] + pal[1][i]) / 3 : (pal[0][i] + pal[1][i]) / 2);
+                pal[3][i] = uint8_t(four ? (pal[0][i] + 2 * pal[1][i]) / 3 : 0);
+            }
+            pal[0][3] = pal[1][3] = pal[2][3] = 255;
+            pal[3][3] = four ? 255 : 0;
+            uint32_t idx = uint32_t(c[4] | c[5] << 8 | c[6] << 16 | c[7] << 24);
+            uint8_t alpha[16];
+            for (int k = 0; k < 16; k++) alpha[k] = 255;
+            if (host == Host::BC2) {
+                for (int k = 0; k < 16; k++) alpha[k] = uint8_t((b[k / 2] >> (k % 2 * 4) & 15) * 17);
+            } else if (host == Host::BC3) {
+                uint8_t a[8] = {b[0], b[1]};
+                for (int i = 2; i < 8; i++)
+                    a[i] = uint8_t(b[0] > b[1] ? ((8 - i) * b[0] + (i - 1) * b[1]) / 7
+                                   : i < 6     ? ((6 - i) * b[0] + (i - 1) * b[1]) / 5
+                                   : i == 6    ? 0
+                                               : 255);
+                uint64_t bits = 0;
+                for (int i = 0; i < 6; i++) bits |= uint64_t(b[2 + i]) << (8 * i);
+                for (int k = 0; k < 16; k++) alpha[k] = a[bits >> (3 * k) & 7];
+            }
+            for (int k = 0; k < 16; k++) {
+                uint32_t x = bx * 4 + uint32_t(k % 4), y = by * 4 + uint32_t(k / 4);
+                if (x >= w || y >= h) continue;
+                const uint8_t* p = pal[idx >> (2 * k) & 3];
+                uint8_t a = host == Host::BC1 ? p[3] : alpha[k];
+                out[size_t(y) * w + x] = uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(a) << 24;
+            }
+        }
+}
+
+float Cubic(float t, int i) {  // Catmull-Rom weight of tap i (0..3) around t
+    float t2 = t * t, t3 = t2 * t;
+    switch (i) {
+        case 0: return -0.5f * t3 + t2 - 0.5f * t;
+        case 1: return 1.5f * t3 - 2.5f * t2 + 1;
+        case 2: return -1.5f * t3 + 2 * t2 + 0.5f * t;
+        default: return 0.5f * t3 - 0.5f * t2;
+    }
+}
+}  // namespace
+
+bool DecodeBgra(const TextureDesc& d, uint32_t level, const uint8_t* guest, std::vector<uint32_t>& out) {
+    const FormatInfo& fi = Format(d.format);
+    if (fi.depth || fi.host == Host::None || fi.host == Host::R32F || fi.host == Host::R16Unorm) return false;
+    std::vector<uint8_t> px;
+    uint32_t pitch = 0;
+    DecodeLevel(d, level, 0, guest, nullptr, px, pitch);
+    uint32_t w = std::max(1u, d.width >> level), h = std::max(1u, d.height >> level);
+    if (fi.compressed) {
+        DecodeBlocks(fi.host, w, h, px, pitch, out);
+        return true;
+    }
+    if (pitch < w * 4 || px.size() < size_t(pitch) * h) return false;
+    out.resize(size_t(w) * h);
+    for (uint32_t y = 0; y < h; y++) std::memcpy(&out[size_t(y) * w], &px[size_t(y) * pitch], size_t(w) * 4);
+    return true;
+}
+
+std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t width, uint32_t height, uint32_t scale) {
+    const size_t n = size_t(width) * height;
+    std::vector<uint8_t> alpha(n);
+    size_t seen = 0, partial = 0;
+    for (size_t i = 0; i < n; i++) {
+        alpha[i] = uint8_t(bgra[i] >> 24);
+        seen += alpha[i] > 8;
+        partial += alpha[i] > 8 && alpha[i] < 247;
+    }
+    const bool mask = seen && partial * 4 < seen;  // edges, not glows
+    const int w = int(width), h = int(height), s = int(scale), ow = w * s, oh = h * s;
+    std::vector<uint8_t> a = mask ? UpscaleMask(alpha.data(), width, height, scale) : std::vector<uint8_t>();
+    std::vector<uint32_t> out(size_t(ow) * size_t(oh));
+    auto tap = [&](int x, int y) { return bgra[size_t(std::clamp(y, 0, h - 1)) * width + size_t(std::clamp(x, 0, w - 1))]; };
+    for (int y = 0; y < oh; y++) {
+        float v = (y + 0.5f) / s - 0.5f;
+        int y0 = int(std::floor(v));
+        float ky[4];
+        for (int j = 0; j < 4; j++) ky[j] = Cubic(v - y0, j);
+        for (int x = 0; x < ow; x++) {
+            float u = (x + 0.5f) / s - 0.5f;
+            int x0 = int(std::floor(u));
+            float kx[4];
+            for (int i = 0; i < 4; i++) kx[i] = Cubic(u - x0, i);
+            float sum[4] = {}, plain[3] = {}, wsum = 0;
+            for (int j = 0; j < 4; j++)
+                for (int i = 0; i < 4; i++) {
+                    uint32_t c = tap(x0 - 1 + i, y0 - 1 + j);
+                    float k = kx[i] * ky[j], ca = float(c >> 24) / 255;
+                    for (int ch = 0; ch < 3; ch++) {
+                        sum[ch] += k * ca * float(c >> (8 * ch) & 255);
+                        plain[ch] += k * float(c >> (8 * ch) & 255);
+                    }
+                    sum[3] += k * ca;
+                    wsum += k;
+                }
+            float al = std::clamp(sum[3] / wsum, 0.0f, 1.0f);
+            uint32_t o = 0;
+            for (int ch = 0; ch < 3; ch++) {
+                // the colour where it shows, weighted by alpha so clear texels lend none of theirs
+                float c = sum[3] > 1e-3f ? sum[ch] / sum[3] : plain[ch] / wsum;
+                o |= uint32_t(std::clamp(c, 0.0f, 255.0f) + 0.5f) << (8 * ch);
+            }
+            uint32_t oa = mask ? a[size_t(y) * size_t(ow) + size_t(x)] : uint32_t(al * 255 + 0.5f);
+            out[size_t(y) * size_t(ow) + size_t(x)] = o | oa << 24;
+        }
+    }
+    return out;
+}
+
+namespace {
+struct SharpJob {
+    TextureDesc d;
+    std::vector<uint8_t> bytes;  // level 0 as the game had it
+};
+std::condition_variable g_sharp_cv;
+std::deque<SharpJob> g_sharp_jobs;
+std::unordered_map<uint32_t, int> g_sharp_queued;  // queued or done, by texture: the drops it had then
+
+void SharpWorker() {
+    for (;;) {
+        SharpJob job;
+        {
+            std::unique_lock<std::mutex> lock(g_sharp_lock);
+            g_sharp_cv.wait(lock, [] { return !g_sharp_jobs.empty(); });
+            job = std::move(g_sharp_jobs.front());
+            g_sharp_jobs.pop_front();
+        }
+        std::vector<uint32_t> px;
+        if (!DecodeBgra(job.d, 0, job.bytes.data(), px)) continue;
+        // text (alpha only) and small pictures four times, larger ones twice: a 256 square picture at four times
+        // would be 4 MB here and 5 MB of video memory
+        uint32_t big = std::max(job.d.width, job.d.height);
+        bool text = job.d.format == 0x19 || job.d.format == 0x1F;  // A8
+        uint32_t scale = big <= 128 || (text && big <= 512) ? 4 : 2;
+        auto r = std::make_shared<Replacement>();
+        r->data = job.d.data;
+        r->guest_bytes = uint32_t(job.bytes.size());
+        r->guest_hash = Hash(job.bytes.data(), job.bytes.size());
+        r->width = job.d.width * scale;
+        r->height = job.d.height * scale;
+        r->sharpened = true;
+        r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
+        if (auto had = FindReplacement(job.d.data); had && !had->sharpened) continue;  // the title's own stays
+        // XBE_SHARPEN_DUMP=folder: each picture as a TGA, sharp_<texture>.tga
+        if (const char* dir = std::getenv("XBE_SHARPEN_DUMP")) {
+            std::string path = std::string(dir) + "/sharp_" + std::to_string(job.d.data) + ".tga";
+            if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                uint8_t head[18] = {0, 0, 2};
+                head[12] = uint8_t(r->width), head[13] = uint8_t(r->width >> 8);
+                head[14] = uint8_t(r->height), head[15] = uint8_t(r->height >> 8);
+                head[16] = 32, head[17] = 0x28;  // top row first, 8 bits of alpha
+                std::fwrite(head, 1, sizeof head, f);
+                std::fwrite(r->bgra.data(), 4, r->bgra.size(), f);
+                std::fclose(f);
+            }
+        }
+        RegisterReplacement(std::move(r));
+        static std::atomic<int> told{0};
+        if (told++ < 8)
+            LOGI("gpu: texture %08X (%s %ux%u) sharpened %u times for 2D", job.d.data, Format(job.d.format).name,
+                 job.d.width, job.d.height, scale);
+    }
+}
+}  // namespace
+
+void Sharpen2D(const TextureDesc& d) {
+    if (!app::kGame.sharpen_2d || !app::Get().sharp_2d) return;
+    if (d.linear || d.cube || d.depth > 1 || d.format == 0x0B) return;  // P8: its colours come with the palette bound
+    if (d.width < 8 || d.height < 8 || d.width > 512 || d.height > 512) return;
+    const FormatInfo& fi = Format(d.format);
+    if (fi.depth || fi.host == Host::None || fi.host == Host::R32F || fi.host == Host::R16Unorm) return;
+    std::lock_guard<std::mutex> lock(g_sharp_lock);
+    // made again after its bytes changed once (a level loaded over it); a texture changing more is left as it is
+    int drops = g_sharp_drops[d.data];
+    if (drops >= 2) return;
+    auto [it, fresh] = g_sharp_queued.emplace(d.data, drops);
+    if (!fresh && it->second == drops) return;
+    it->second = drops;
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(SharpWorker).detach(); });
+    SharpJob job{d, {}};
+    uint32_t size = LevelSize(d, 0);
+    const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
+    job.bytes.assign(p, p + size);
+    g_sharp_jobs.push_back(std::move(job));
+    g_sharp_cv.notify_one();
 }
 
 std::vector<std::vector<uint32_t>> ReplacementLevels(const Replacement& r) {

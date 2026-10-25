@@ -395,6 +395,7 @@ private:
     std::vector<Query> counted_;  // since the last ClearReport
     std::deque<Report> reports_;
     Assembled asm_;  // kept between draws for its buffers
+    bool draw_2d_ = false;  // the draw is 2D: its textures are sharpened (Sharpen2D)
     Target* bound_rt_ = nullptr;
     Target* bound_ds_ = nullptr;
     bool bound_ms_ = false;  // the bound targets are twins
@@ -1347,11 +1348,13 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
                                                          const FormatInfo& fi, DrawTextures& stages) {
     if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
+        if (r && r->sharpened && !app::Get().sharp_2d) r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return srv;
         }
     }
+    if (draw_2d_) Sharpen2D(d);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -1723,6 +1726,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     DrawTextures stages;
     draw_rt_ = bound_rt_;
     draw_ds_ = bound_ds_;
+    draw_2d_ = a.pretransformed || ScreenDraw(s);
     for (int i = 0; i < 4; i++) stages.srv[i] = BindTexture(s, i, stages);
     if (!BindTargets(s)) return;
     // the pixel shader made for the textures

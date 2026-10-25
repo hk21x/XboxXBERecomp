@@ -413,6 +413,7 @@ private:
     };
     std::unordered_map<uint64_t, StageMemo> stage_memo_;
     uint64_t stage_memo_key_ = 0;  // frame and targets_gen_ the memo holds for
+    bool draw_2d_ = false;  // the draw is 2D: its textures are sharpened (Sharpen2D)
     struct TargetMemo {
         uint64_t key = 0, valid = 0;
         Target* rt = nullptr;
@@ -1728,11 +1729,13 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     TexInfo& info = stages.info[stage];
     if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
+        if (r && r->sharpened && !app::Get().sharp_2d) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
         }
     }
+    if (draw_2d_) Sharpen2D(d);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -2363,6 +2366,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     g_perf.t_shaders += PerfMs(perf_shaders);
     // stage textures, then the pixel shader made for them
     DrawTextures stages;
+    draw_2d_ = a.pretransformed || ScreenDraw(s);
     if (!BindStageTexturesAndTargets(s, stages)) return;
     perf_shaders = PerfNow();
     PixelKey pk = MakePixelKey(s, stages.info);

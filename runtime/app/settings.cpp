@@ -212,6 +212,7 @@ void Load() {
     s.monitor = t["monitor"].value_or(s.monitor);
     s.pause_unfocused = t["pause_unfocused"].value_or(s.pause_unfocused);
     s.show_fps = t["show_fps"].value_or(s.show_fps);
+    s.sharp_2d = t["sharp_2d"].value_or(s.sharp_2d);
     std::string aa = t["antialiasing"].value_or(std::string(kAntialiasing[s.antialiasing % kAntialiasingCount]));
     for (uint32_t i = 0; i < kAntialiasingCount; i++)
         if (aa == kAntialiasing[i]) s.antialiasing = i;
@@ -299,6 +300,7 @@ toml::table Table() {
                   {"monitor", int64_t(s.monitor)},
                   {"pause_unfocused", s.pause_unfocused},
                   {"show_fps", s.show_fps},
+                  {"sharp_2d", s.sharp_2d},
                   {"antialiasing", kAntialiasing[s.antialiasing % kAntialiasingCount]},
                   {"renderer", kRenderers[s.renderer % kRendererCount]},
                   {"wheel_range", int64_t(s.wheel_range)},

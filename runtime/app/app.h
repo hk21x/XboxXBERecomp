@@ -43,6 +43,7 @@ struct Settings {
     uint32_t monitor = 0;            // 0 the primary display, n the nth display Windows lists
     bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
     bool show_fps = false;           // frames a second in a corner
+    bool sharp_2d = true;            // GameInfo::sharpen_2d: the HUD's, menus' and text's pictures enlarged sharp
     uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
     // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,
@@ -176,6 +177,10 @@ struct GameInfo {
     // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form), or that multiplies it by a 2D
     // orthographic matrix (gpu::MatrixProgram, OrthoConstants: EoN's driving HUD)
     bool squeeze_screen_programs = false;
+    // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
+    // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
+    // resolutions (Settings::sharp_2d turns it off)
+    bool sharpen_2d = false;
     // a PAL release (the certificate's game regions without North America) runs on a PAL console with PAL 60 Hz on:
     // a title naming its files by the video standard finds the disc's (EoN's movies are _pal and _palw only)
     bool pal_console = false;

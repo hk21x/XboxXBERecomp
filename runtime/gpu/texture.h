@@ -62,13 +62,25 @@ struct Replacement {
     uint64_t guest_hash = 0;
     uint32_t width = 0, height = 0;
     uint64_t version = 0;
+    bool sharpened = false;  // made by Sharpen2D (Settings::sharp_2d), not the title
     std::vector<uint32_t> bgra;
 };
 void SetReplacement(uint32_t data_va, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra);
+// a texture a 2D draw samples (GameInfo::sharpen_2d), from the render thread: its level 0 copied and enlarged on a
+// background thread, then set as its replacement (sharpened); one whose bytes keep changing is left alone
+void Sharpen2D(const TextureDesc& d);
+// a picture enlarged: alpha that is mostly fully in or out sharpened as a mask (UpscaleMask), else interpolated;
+// colour Catmull-Rom interpolated weighted by alpha. B8G8R8A8 in and out.
+std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t width, uint32_t height, uint32_t scale);
+// one level as B8G8R8A8 rows (the DXT formats decoded too); false for formats it cannot
+bool DecodeBgra(const TextureDesc& d, uint32_t level, const uint8_t* guest, std::vector<uint32_t>& out);
 void ClearReplacement(uint32_t data_va);
 // false (and dropped) when the guest bytes changed since it was set; a renderer checks once a frame
 bool ReplacementHolds(const Replacement& r);
 std::shared_ptr<const Replacement> FindReplacement(uint32_t data_va);  // null when there is none
+// a mask (text, outlines: alpha values, mostly 0 or full) enlarged `scale` times with sharp edges: Catmull-Rom
+// interpolated, then thresholded at half with an edge about one output pixel wide (from the interpolated gradient)
+std::vector<uint8_t> UpscaleMask(const uint8_t* alpha, uint32_t width, uint32_t height, uint32_t scale);
 // its mip chain down to 1x1, each level box filtered from the one above (level 0 the picture)
 std::vector<std::vector<uint32_t>> ReplacementLevels(const Replacement& r);
 

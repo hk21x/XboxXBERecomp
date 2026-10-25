@@ -1222,6 +1222,12 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     const bool screen = program && app::kGame.squeeze_screen_programs &&
                         (ScreenProgram(s.vs->program) || (MatrixProgram(s.vs->program) >= 0 &&
                                                           OrthoConstants(s.vsc, MatrixProgram(s.vs->program))));
+    // the hardware renderers' 2D sharpening (GameInfo::sharpen_2d) run headless too: its pictures with XBE_SHARPEN_DUMP
+    if (as.pretransformed || screen)
+        for (int i = 0; i < 4; i++) {
+            TextureDesc sd;
+            if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], sd) && !FindReplacement(sd.data)) Sharpen2D(sd);
+        }
     if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
