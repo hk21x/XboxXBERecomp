@@ -40,6 +40,7 @@ inline const std::filesystem::path& CaptureDir() {
 struct DrawRange {
     unsigned first = 1, last = 0;
     uint32_t vs = 0;
+    int aa_after = -1;  // "aa" or "aa:N": each draw drawn smaller and stretched (State::aa_x) and the N after it (4)
 };
 inline DrawRange CaptureDraws() {
     static const DrawRange r = [] {
@@ -48,6 +49,8 @@ inline DrawRange CaptureDraws() {
             unsigned a = 0, b = 0;
             if (std::sscanf(v, "vs:%x", &a) == 1) {
                 d.vs = a;
+            } else if (std::strncmp(v, "aa", 2) == 0) {
+                d.aa_after = std::sscanf(v, "aa:%u", &a) == 1 ? int(a) : 4;
             } else if (int n = std::sscanf(v, "%u-%u", &a, &b); n >= 1) {
                 d.first = a;
                 d.last = n == 2 ? b : a;

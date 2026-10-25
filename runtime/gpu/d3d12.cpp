@@ -551,6 +551,7 @@ private:
     FILE* cap_ = nullptr;
     std::filesystem::path cap_dir_;
     uint32_t cap_i_ = 0;
+    int cap_aa_left_ = 0;  // XBE_CAPTURE_DRAWS=aa: draws still to save after a stretched one
     uint32_t cap_rt_ = 0;
     Surface cap_zs_;     // the depth target drawn with, saved when the frame moves on from it
     uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
@@ -2034,6 +2035,7 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
             cap_i_++, s.rt.data, bound_ds_ ? s.zs.data : 0, prim, count, s.vs_handle, s.ps ? s.ps->handle : 0, k.blend,
             k.src, k.dst, k.zen, k.zfunc, k.zwrite, k.zbias, k.zslope, k.cull, k.wmask, c.pc[0][0], c.pc[0][1],
             c.pc[0][2], c.pc[0][3]);
+    if (s.aa_x != 1 || s.aa_y != 1) fprintf(cap_, " aa %ux%u", s.aa_x, s.aa_y);
     CaptureTextures(s, stages);
 }
 
@@ -2382,7 +2384,10 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (cap_ && draw_rt_) {
         diag::DrawRange r = diag::CaptureDraws();
         uint32_t i = cap_i_ - 1;
-        if ((i >= r.first && i <= r.last) || (r.vs && s.vs_handle == r.vs)) {
+        if (r.aa_after >= 0 && (s.aa_x != 1 || s.aa_y != 1)) cap_aa_left_ = r.aa_after + 1;
+        bool aa = cap_aa_left_ > 0;
+        if (aa) cap_aa_left_--;
+        if ((i >= r.first && i <= r.last) || (r.vs && s.vs_handle == r.vs) || aa) {
             char name[32];
             snprintf(name, sizeof(name), "%04u_draw_%08X", i, draw_rt_->data);
             CapSave(*draw_rt_, name);
