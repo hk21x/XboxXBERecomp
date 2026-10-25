@@ -105,6 +105,7 @@ struct DrawTextures {
     TexInfo info[4];
     ID3D11ShaderResourceView* srv[4] = {};
     uint32_t levels[4] = {1, 1, 1, 1};
+    bool replaced[4] = {};  // a title's replacement picture (FindReplacement)
     StageReads reads;
 };
 
@@ -323,6 +324,7 @@ private:
                                                DrawTextures& stages);
     bool CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi);
     void UploadTexture(Tex& tx, const TextureDesc& d, const uint8_t* p, const uint32_t* colours);
+    ID3D11ShaderResourceView* BindReplacement(const Replacement& r, const TextureDesc& d, uint32_t& levels);
     void CopyCubeTargets(Tex& tx, const TextureDesc& d);
     void EnsurePixelShader(const PixelKey& pk, DrawShaders& sh);
     Pipeline* EnsurePipeline(const PsoKey& k, ID3DBlob* vs);
@@ -1343,6 +1345,13 @@ bool SameTexture(const Tex& tx, const TextureDesc& d) {
 // a texture in guest memory: made again when its layout changed, uploaded again when its bytes did
 ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d,
                                                          const FormatInfo& fi, DrawTextures& stages) {
+    if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
+        auto r = FindReplacement(d.data);
+        if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
+            stages.replaced[stage] = true;
+            return srv;
+        }
+    }
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -1368,6 +1377,45 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
     return tx.srv.Get();
 }
 
+// a title's picture in place of the texture at d.data: made again when its size changed, uploaded again (with its
+// levels) for each new version
+ID3D11ShaderResourceView* D3D11Backend::BindReplacement(const Replacement& r, const TextureDesc& d, uint32_t& levels) {
+    constexpr uint32_t kFmtA8R8G8B8 = 0x06;
+    const uint64_t key = uint64_t(0xFFFFFFFFu) << 32 | d.data;  // no palette is at the top of memory
+    Tex& tx = textures_[key];
+    if (tx.frame != presents_ + 1 && !ReplacementHolds(r)) {
+        textures_.erase(key);
+        return nullptr;
+    }
+    tx.frame = presents_ + 1;
+    if (!tx.res || tx.sig != r.version) {
+        std::vector<std::vector<uint32_t>> pictures = ReplacementLevels(r);
+        if (!tx.res || tx.d.width != r.width || tx.d.height != r.height || tx.levels != pictures.size()) {
+            TextureDesc rd;
+            rd.data = d.data;
+            rd.format = kFmtA8R8G8B8;
+            rd.width = r.width;
+            rd.height = r.height;
+            rd.levels = uint32_t(pictures.size());
+            if (!CreateTexture(tx, rd, Format(kFmtA8R8G8B8))) {
+                textures_.erase(key);
+                return nullptr;
+            }
+            tx.frame = presents_ + 1;
+        }
+        uint32_t w = r.width, h = r.height;
+        for (uint32_t l = 0; l < pictures.size(); l++) {
+            ctx_->UpdateSubresource(tx.res.Get(), D3D11CalcSubresource(l, 0, tx.levels), nullptr, pictures[l].data(), w * 4,
+                                    w * 4 * h);
+            w = std::max(w / 2, 1u);
+            h = std::max(h / 2, 1u);
+        }
+        tx.sig = r.version;
+    }
+    levels = tx.levels;
+    return tx.srv.Get();
+}
+
 // a cube's faces drawn on the GPU (an environment map rendered each frame) replace level 0 of the face, once a frame
 void D3D11Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
     if (tx.fmt != kBgra || tx.faces == presents_ + 1) return;
@@ -1389,6 +1437,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
     stages.reads.k[stage] = 1;
     stages.reads.wide[stage] = 0;
     stages.levels[stage] = 1;
+    stages.replaced[stage] = false;
     uint32_t header = s.textures[size_t(stage)];
     TextureDesc d;
     if (!header || !Describe(header, d)) return nullptr;
@@ -1545,7 +1594,7 @@ void D3D11Backend::SetTexturesAndSamplers(const State& s, const Assembled& a, co
     bool clamp = UnitTexcoords(a);
     uint32_t aniso = app::Get().aniso;
     for (int i = 0; i < 4; i++) {
-        D3D12_SAMPLER_DESC d12 = StageSampler(s, i, stages.levels[i], stages.info[i].shadow, clamp, aniso);
+        D3D12_SAMPLER_DESC d12 = StageSampler(s, i, stages.levels[i], stages.info[i].shadow, clamp, aniso, stages.replaced[i]);
         D3D11_SAMPLER_DESC sd;
         std::memcpy(&sd, &d12, sizeof(sd));
         if (!sd.ComparisonFunc) sd.ComparisonFunc = D3D11_COMPARISON_NEVER;  // D3D11 checks it even when unused

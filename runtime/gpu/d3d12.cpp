@@ -216,6 +216,7 @@ struct DrawTextures {
     float k[4] = {1, 1, 1, 1};  // Extension::Sample's k
     float wide[4] = {};         // host texels per console texel of a target read into a smaller one, 0 otherwise
     uint32_t size[4][2] = {};   // the bound target's console size when the texture is a smaller one on its memory
+    bool replaced[4] = {};      // a title's replacement picture (FindReplacement)
 };
 class D3D12Backend final : public Backend, public Context {
 public:
@@ -316,6 +317,7 @@ private:
                                       DrawTextures& stages);
     ID3D12Resource* BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                      DrawTextures& stages);
+    ID3D12Resource* BindReplacement(const Replacement& r, const TextureDesc& d, D3D12_SHADER_RESOURCE_VIEW_DESC& sv);
     bool CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, uint64_t key);
     void CopyCubeTargets(Tex& tx, const TextureDesc& d);
     void UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint8_t* p, const uint32_t* colours,
@@ -407,6 +409,7 @@ private:
         ID3D12Resource* res;
         D3D12_SHADER_RESOURCE_VIEW_DESC sv;
         TexInfo info;
+        bool replaced;
     };
     std::unordered_map<uint64_t, StageMemo> stage_memo_;
     uint64_t stage_memo_key_ = 0;  // frame and targets_gen_ the memo holds for
@@ -1723,6 +1726,13 @@ void ReadStagePalette(const State& s, int stage, const TextureDesc& d, StagePale
 ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                                DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
+    if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
+        auto r = FindReplacement(d.data);
+        if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
+            stages.replaced[stage] = true;
+            return res;
+        }
+    }
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -1750,6 +1760,56 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     FillTextureView(tx, d, stages.sv[stage]);
     if (fi.depth) info.shadow = ShadowDepthKind(d.format);
     if (ext_) ext_->Sampled(d, nullptr, tx.flags, info);
+    return tx.res.Get();
+}
+
+// a title's picture in place of the texture at d.data: made again when its size changed, uploaded again (with its
+// levels) for each new version
+ID3D12Resource* D3D12Backend::BindReplacement(const Replacement& r, const TextureDesc& d,
+                                              D3D12_SHADER_RESOURCE_VIEW_DESC& sv) {
+    constexpr uint32_t kFmtA8R8G8B8 = 0x06;
+    const uint64_t key = uint64_t(0xFFFFFFFFu) << 32 | d.data;  // no palette is at the top of memory
+    Tex& tx = textures_[key];
+    if (tx.frame != presents_ + 1 && !ReplacementHolds(r)) {
+        if (tx.res) CurrentFrame().garbage.push_back(tx.res);
+        textures_.erase(key);
+        return nullptr;
+    }
+    tx.frame = presents_ + 1;
+    if (!tx.res || tx.sig != r.version) {
+        std::vector<std::vector<uint32_t>> levels = ReplacementLevels(r);
+        bool same = tx.res && tx.d.width == r.width && tx.d.height == r.height && tx.levels == levels.size();
+        if (!same) {
+            TextureDesc rd;
+            rd.data = d.data;
+            rd.format = kFmtA8R8G8B8;
+            rd.width = r.width;
+            rd.height = r.height;
+            rd.levels = uint32_t(levels.size());
+            if (!CreateTexture(tx, rd, Format(kFmtA8R8G8B8), key)) return nullptr;
+            tx.frame = presents_ + 1;
+        }
+        D3D12_RESOURCE_STATES st = same ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
+        Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
+        std::vector<uint8_t> px;
+        uint32_t w = r.width;
+        for (uint32_t l = 0; l < levels.size(); l++) {
+            px.resize(levels[l].size() * 4);
+            std::memcpy(px.data(), levels[l].data(), px.size());
+            UploadTextureLevel(tx, 0, l, px, w * 4);
+            w = std::max(w / 2, 1u);
+        }
+        st = D3D12_RESOURCE_STATE_COPY_DEST;
+        Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        tx.sig = r.version;
+        static bool said = false;
+        if (!said) {
+            said = true;
+            LOGR("d3d12: texture %08X (%ux%u) drawn from the title's %ux%u picture", d.data, d.width, d.height, r.width,
+                 r.height);
+        }
+    }
+    FillTextureView(tx, tx.d, sv);
     return tx.res.Get();
 }
 
@@ -1787,6 +1847,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     stages.rt[stage] = false;
     stages.k[stage] = 1;
     stages.wide[stage] = 0;
+    stages.replaced[stage] = false;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -1809,6 +1870,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         if (m != stage_memo_.end()) {
             info = m->second.info;
             sv = m->second.sv;
+            stages.replaced[stage] = m->second.replaced;
             return m->second.res;
         }
     }
@@ -1855,14 +1917,15 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
     ID3D12Resource* res = BindGuestTexture(s, stage, d, fi, stages);
-    if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info};
+    if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage]};
     return res;
 }
 
 uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp) {
     D3D12_SAMPLER_DESC sd[4];
     uint32_t aniso = app::Get().aniso;
-    for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso);
+    for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso,
+                                                   stages.replaced[i]);
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return it->second;

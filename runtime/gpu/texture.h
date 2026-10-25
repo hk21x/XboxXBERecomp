@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "gpu/state.h"
@@ -51,6 +52,25 @@ bool CopySurfaceMemory(const Surface& src, const Surface& dst, uint32_t count, u
 // the title locked a resource, the next bind re-uploads it
 void MarkDirty(uint32_t resource);
 uint64_t DirtyEpoch(uint32_t data_va);
+
+// A title's own picture for a texture (GameInfo hooks, e.g. a sharper redraw of a HUD atlas): the hardware renderers
+// sample it instead of the guest bytes at data, whatever its size, for a swizzled or compressed texture (a linear
+// one's coordinates are in its own texels), while those guest_bytes stay as they were when it was set (the memory
+// given to something else drops it). B8G8R8A8 rows, width x height; version is new for each SetReplacement.
+struct Replacement {
+    uint32_t data = 0, guest_bytes = 0;
+    uint64_t guest_hash = 0;
+    uint32_t width = 0, height = 0;
+    uint64_t version = 0;
+    std::vector<uint32_t> bgra;
+};
+void SetReplacement(uint32_t data_va, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra);
+void ClearReplacement(uint32_t data_va);
+// false (and dropped) when the guest bytes changed since it was set; a renderer checks once a frame
+bool ReplacementHolds(const Replacement& r);
+std::shared_ptr<const Replacement> FindReplacement(uint32_t data_va);  // null when there is none
+// its mip chain down to 1x1, each level box filtered from the one above (level 0 the picture)
+std::vector<std::vector<uint32_t>> ReplacementLevels(const Replacement& r);
 
 // vertex declarations and pixel shader constant routing, both follow the XDK's definitions
 void ParseDeclaration(VertexShader& vs);

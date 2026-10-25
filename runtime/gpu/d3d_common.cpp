@@ -216,7 +216,8 @@ constexpr uint32_t kTexfAnisotropic = 3;
 constexpr uint32_t kTaddressWrap = 1;
 constexpr uint32_t kTaddressClamp = 3;
 
-D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint8_t shadow, bool clamp, uint32_t aniso) {
+D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint8_t shadow, bool clamp, uint32_t aniso,
+                                bool replaced) {
     D3D12_SAMPLER_DESC sd = {};
     const auto& t = s.tss[size_t(i)];
     uint32_t mag = t[kTssMagFilter];
@@ -242,6 +243,12 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint
     sd.MipLODBias = Bits(t[kTssMipLodBias]);
     sd.MinLOD = float(t[kTssMaxMipLevel]);
     sd.MaxLOD = mip ? D3D12_FLOAT32_MAX : sd.MinLOD;
+    if (replaced && lin(min) && an == 1) {
+        // larger than the console's texture, so drawn smaller: its levels keep it from shimmering
+        sd.Filter = D3D12_FILTER(fmin << 4 | fmag << 2 | D3D12_FILTER_TYPE_LINEAR);
+        sd.MinLOD = 0;
+        sd.MaxLOD = D3D12_FLOAT32_MAX;
+    }
     Color(t[kTssBorderColor], sd.BorderColor);
     if (shadow) {
         // the console tests texel OP r, D3D12 tests r OP texel

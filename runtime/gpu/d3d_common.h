@@ -130,7 +130,9 @@ struct StageReads {
 };
 
 // D3D12_SAMPLER_DESC and D3D11_SAMPLER_DESC are the same layout
-D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint8_t shadow, bool clamp, uint32_t aniso);
+// replaced: the stage samples a title's replacement picture (FindReplacement), filtered across the levels made for it
+D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint8_t shadow, bool clamp, uint32_t aniso,
+                                bool replaced = false);
 
 uint32_t SimpleState(const State& s, uint32_t method);
 DrawShaders ClassifyShaders(const State& s, const Assembled& a, uint32_t count);

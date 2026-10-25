@@ -1,12 +1,14 @@
 #include "gpu/texture.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
 
 #include "core/log.h"
+#include "gpu/shaders.h"
 #include "kernel/kernel.h"
 
 namespace gpu {
@@ -436,6 +438,79 @@ uint64_t DirtyEpoch(uint32_t data) {
     std::lock_guard<std::mutex> lock(g_dirty_lock);
     auto it = g_dirty.find(data);
     return it == g_dirty.end() ? 0 : it->second;
+}
+
+namespace {
+std::mutex g_replace_lock;
+std::unordered_map<uint32_t, std::shared_ptr<const Replacement>> g_replace;
+std::atomic<size_t> g_replace_count{0};  // every bind looks, so none is checked without the lock
+uint64_t g_replace_version = 0;
+}  // namespace
+
+void SetReplacement(uint32_t data, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra) {
+    if (!width || !height || bgra.size() != size_t(width) * height || !guest_bytes) return;
+    auto r = std::make_shared<Replacement>();
+    r->data = data;
+    r->guest_bytes = guest_bytes;
+    r->guest_hash = Hash(kernel::HostPtr(data), guest_bytes);
+    r->width = width;
+    r->height = height;
+    r->bgra = std::move(bgra);
+    std::lock_guard<std::mutex> lock(g_replace_lock);
+    r->version = ++g_replace_version;
+    g_replace[data] = std::move(r);
+    g_replace_count = g_replace.size();
+}
+
+void ClearReplacement(uint32_t data) {
+    std::lock_guard<std::mutex> lock(g_replace_lock);
+    g_replace.erase(data);
+    g_replace_count = g_replace.size();
+}
+
+std::shared_ptr<const Replacement> FindReplacement(uint32_t data) {
+    if (!g_replace_count) return nullptr;
+    std::lock_guard<std::mutex> lock(g_replace_lock);
+    auto it = g_replace.find(data);
+    return it == g_replace.end() ? nullptr : it->second;
+}
+
+bool ReplacementHolds(const Replacement& r) {
+    if (Hash(kernel::HostPtr(r.data), r.guest_bytes) == r.guest_hash) return true;
+    std::lock_guard<std::mutex> lock(g_replace_lock);
+    auto it = g_replace.find(r.data);
+    if (it != g_replace.end() && it->second->version == r.version) {
+        g_replace.erase(it);
+        g_replace_count = g_replace.size();
+        LOGR("gpu: the picture for texture %08X dropped, the game's bytes there changed", r.data);
+    }
+    return false;
+}
+
+std::vector<std::vector<uint32_t>> ReplacementLevels(const Replacement& r) {
+    std::vector<std::vector<uint32_t>> levels{r.bgra};
+    uint32_t w = r.width, h = r.height;
+    while (w > 1 || h > 1) {
+        uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
+        const std::vector<uint32_t>& up = levels.back();
+        std::vector<uint32_t> down(size_t(nw) * nh);
+        for (uint32_t y = 0; y < nh; y++)
+            for (uint32_t x = 0; x < nw; x++) {
+                uint32_t sum[4] = {};
+                for (uint32_t dy = 0; dy < 2; dy++)
+                    for (uint32_t dx = 0; dx < 2; dx++) {
+                        uint32_t c = up[size_t(std::min(y * 2 + dy, h - 1)) * w + std::min(x * 2 + dx, w - 1)];
+                        for (int i = 0; i < 4; i++) sum[i] += c >> (i * 8) & 0xFF;
+                    }
+                uint32_t c = 0;
+                for (int i = 0; i < 4; i++) c |= (sum[i] + 2) / 4 << (i * 8);
+                down[size_t(y) * nw + x] = c;
+            }
+        levels.push_back(std::move(down));
+        w = nw;
+        h = nh;
+    }
+    return levels;
 }
 
 bool CopySurfaceMemory(const Surface& src, const Surface& dst, uint32_t count, uint32_t rects, uint32_t points) {
