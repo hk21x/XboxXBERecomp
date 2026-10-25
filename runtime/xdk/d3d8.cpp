@@ -384,8 +384,14 @@ uint32_t GivenSurface(uint32_t at) {
 bool MakeFrameBuffers(uint32_t pp) {
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
-    uint32_t given[3] = {GivenSurface(pp + 0x34), GivenSurface(pp + 0x38), GivenSurface(pp + 0x3C)};
-    uint32_t given_depth = GivenSurface(pp + 0x40);
+    // older XDKs' parameters end before these fields (3948's after the presentation interval, 0x34 bytes): what
+    // follows there is the caller's stack, which once named game code a back buffer
+    constexpr uint32_t kGiven = XDK_PresentParams_BufferSurfaces;
+    uint32_t given[3] = {}, given_depth = 0;
+    if (kGiven != xdk::kUnknown) {
+        for (uint32_t i = 0; i < 3; i++) given[i] = GivenSurface(pp + kGiven + i * 4);
+        given_depth = GivenSurface(pp + kGiven + 12);
+    }
     if (given_depth && !auto_depth) depth_fmt = R32(given_depth + 12) >> 8 & 0xFF;
     if (!w) w = 640;
     if (!h) h = 480;

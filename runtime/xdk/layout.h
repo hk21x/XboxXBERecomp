@@ -120,6 +120,11 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 // 3948: the frame buffers' surface objects inside the device, 24 bytes each (back, front, third), and the auto depth
 // buffer's; when known the runtime builds its surfaces there and CDevice_BackBuffer / FrontBuffer are not needed
 // 3948: the present interval as a device field (later XDKs: the D3D_PresentInterval global)
+// D3DPRESENT_PARAMETERS' BufferSurfaces[3] and DepthStencilSurface after them; unknown where the XDK's parameters
+// have none (3948's end at 0x34)
+#ifndef XDK_PresentParams_BufferSurfaces
+#define XDK_PresentParams_BufferSurfaces 0x34u
+#endif
 #ifndef XDK_CDevice_PresentInterval
 #define XDK_CDevice_PresentInterval 0xFFFFFFFFu
 #endif
