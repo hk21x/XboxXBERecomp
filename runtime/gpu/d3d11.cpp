@@ -1348,7 +1348,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
                                                          const FormatInfo& fi, DrawTextures& stages) {
     if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && r->sharpened && !app::Get().sharp_2d) r = nullptr;
+        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return srv;

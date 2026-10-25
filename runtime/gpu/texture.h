@@ -63,6 +63,8 @@ struct Replacement {
     uint32_t width = 0, height = 0;
     uint64_t version = 0;
     bool sharpened = false;  // made by Sharpen2D (Settings::sharp_2d), not the title
+    // the texture it stands for (Sharpen2D's; 0 any): the same memory read in another format or size is not it
+    uint32_t format = 0, src_width = 0, src_height = 0;
     std::vector<uint32_t> bgra;
 };
 void SetReplacement(uint32_t data_va, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra);
@@ -78,6 +80,7 @@ void ClearReplacement(uint32_t data_va);
 // false (and dropped) when the guest bytes changed since it was set; a renderer checks once a frame
 bool ReplacementHolds(const Replacement& r);
 std::shared_ptr<const Replacement> FindReplacement(uint32_t data_va);  // null when there is none
+bool ReplacementFits(const Replacement& r, const TextureDesc& d);  // read as the texture it was made for
 // a mask (text, outlines: alpha values, mostly 0 or full) enlarged `scale` times with sharp edges: Catmull-Rom
 // interpolated, then thresholded at half with an edge about one output pixel wide (from the interpolated gradient)
 std::vector<uint8_t> UpscaleMask(const uint8_t* alpha, uint32_t width, uint32_t height, uint32_t scale);

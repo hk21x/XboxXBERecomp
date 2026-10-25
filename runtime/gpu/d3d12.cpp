@@ -1729,7 +1729,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     TexInfo& info = stages.info[stage];
     if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && r->sharpened && !app::Get().sharp_2d) r = nullptr;
+        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
