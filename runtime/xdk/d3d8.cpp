@@ -1136,7 +1136,8 @@ HLE_STDCALL(D3DDevice_SetTexture, 2) {
     Release(ctx, old);
     g_state.textures[stage] = tex;
     W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
-    if (tex && app::kGame.texture_bound && app::kGame.texture_bound(tex)) gpu::MarkDirty(tex);
+    uint32_t pal = XDK_CDevice_Palettes == xdk::kUnknown ? 0 : Dev(kDevPalettes + stage * 4);
+    if (tex && app::kGame.texture_bound && app::kGame.texture_bound(tex, pal)) gpu::MarkDirty(tex);
     return 0;
 }
 
@@ -1152,6 +1153,8 @@ HLE_STDCALL(D3DDevice_SetPalette, 2) {
     Release(ctx, old);
     g_state.palettes[stage] = pal;
     LOG_FIRST(4, "d3d: SetPalette stage %u palette %08X", stage, pal);
+    uint32_t tex = g_state.textures[stage];
+    if (tex && pal && app::kGame.texture_bound && app::kGame.texture_bound(tex, pal)) gpu::MarkDirty(tex);
     return 0;
 }
 
