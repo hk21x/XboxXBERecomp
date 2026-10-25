@@ -1150,6 +1150,7 @@ HLE_STDCALL(D3DDevice_SetPalette, 2) {
     SetDev(kDevPalettes + stage * 4, pal);
     Release(ctx, old);
     g_state.palettes[stage] = pal;
+    LOG_FIRST(4, "d3d: SetPalette stage %u palette %08X", stage, pal);
     return 0;
 }
 

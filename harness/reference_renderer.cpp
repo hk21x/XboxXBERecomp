@@ -209,10 +209,19 @@ void DecodeBlocks(const TextureDesc& d, Host host, const std::vector<uint8_t>& i
         }
 }
 
-std::shared_ptr<Image> FindImage(uint32_t header) {
+// a P8 texture through the stage's palette (D3DPalette: Common, its top two bits the size code; Data, the colours'
+// physical address), as the renderers' ReadStagePalette
+std::shared_ptr<Image> FindImage(uint32_t header, uint32_t palette_header) {
     TextureDesc d;
     if (!header || !Describe(header, d)) return nullptr;
-    uint64_t key = uint64_t(d.data) << 32 ^ uint64_t(d.format) << 24 ^ uint64_t(d.width) << 12 ^ d.height ^ (d.cube ? 1ull << 63 : 0);
+    uint32_t colours[256] = {}, pal_va = 0;
+    if (d.format == 0x0B && palette_header) {
+        pal_va = mem::VirtualFromPhysical(kernel::R32(palette_header + 4));
+        size_t n = std::size(colours) >> (kernel::R32(palette_header) >> 30);
+        std::memcpy(colours, kernel::HostPtr(pal_va), n * 4);
+    }
+    uint64_t key = uint64_t(d.data) << 32 ^ uint64_t(d.format) << 24 ^ uint64_t(d.width) << 12 ^ d.height ^ (d.cube ? 1ull << 63 : 0) ^
+                   uint64_t(pal_va) * 0x9E3779B97F4A7C15ull;
     if (auto it = g_images.find(key); it != g_images.end()) return it->second;
     auto img = std::make_shared<Image>();
     const FormatInfo& fi = Format(d.format);
@@ -226,7 +235,7 @@ std::shared_ptr<Image> FindImage(uint32_t header) {
     for (uint32_t f = 0; f < img->faces; f++) {
         std::vector<uint8_t> raw;
         uint32_t pitch;
-        DecodeLevel(d, 0, f, guest, nullptr, raw, pitch);
+        DecodeLevel(d, 0, f, guest, pal_va ? colours : nullptr, raw, pitch);
         std::vector<Vec>& out = img->texels[f];
         if (fi.compressed) {
             DecodeBlocks(d, fi.host, raw, out);
@@ -1179,7 +1188,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (Format(d.format).depth) ti.shadow = d.format == 0x2C || d.format == 0x30 ? 2 : 1;
         Unit& u = mat.unit[i];
         const auto& ts = s.tss[size_t(i)];
-        u.img = FindImage(s.textures[size_t(i)]);
+        u.img = FindImage(s.textures[size_t(i)], s.palettes[size_t(i)]);
         u.address_u = ts[kTssAddressU];
         u.address_v = ts[kTssAddressV];
         u.mag = ti.shadow ? 1 : ts[kTssMagFilter];
