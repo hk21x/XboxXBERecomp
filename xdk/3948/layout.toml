@@ -26,6 +26,7 @@ CDevice_FrameSurfaces = 0x2150  # D3DDevice_GetBackBuffer 0xEBE3E returns +0x215
 CDevice_AutoDepthSurface = 0x219C # D3DDevice_Reset 0xEBB0E makes it the depth buffer when +0x2198 (its memory, 0xF3839) is set
 CDevice_SwapCount     = 0x2B60  # D3DDevice_Present 0xEED8C increments it
 CDevice_PresentInterval = 0x2B64 # the frame buffer init 0xF3615 stores the present parameters' interval (+0x30)
+PresentParams_BufferSurfaces = 0xFFFFFFFF # none: the parameters end at +0x34, the interval (+0x30) their last field read by 0xF3615
 CDevice_Size          = 0x2B90  # D3DDevice_Release 0xEB83B clears 0xAE4 dwords of the device after the last reference
 # the display miniport lives at +0x2308 (D3DDevice_Reset 0xEBA9F); the vertical blank handler 0xF4340 works on it
 CDevice_VBlankCount   = 0x2B28  # the vertical blank handler 0xF434E increments miniport + 0x820
