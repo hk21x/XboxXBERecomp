@@ -201,6 +201,11 @@ struct State {
     // one, each pixel covering aa_x by aa_y of its samples (EoN's particles: 4X on its 640x480 buffer, drawn 320x240
     // and stretched). Positions, the viewport and scissors are in those larger pixels.
     uint32_t aa_x = 1, aa_y = 1;
+    // ultrawide: a game hook spreads the 2D being drawn wider than the 4:3 frame (a 4:3 HUD laid out at 16:9): each
+    // draw moved by squeeze_shift guest pixels (a left panel left, a right one right, set per element) as it is
+    // squeezed, its shape kept; no corner is kept on the frame's edges meanwhile (a letter's edge may fall on one)
+    bool squeeze_beyond = false;
+    float squeeze_shift = 0;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
     // 1 / the projection's far w, as the XDK's SetTransform derives it (0x1C34A0). W-buffered, the fixed function and
     // pretransformed vertices have w scaled by zscale * inv_wfar (0x1C0FC0 folds it into the matrix, 0x1C0300 into

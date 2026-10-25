@@ -1245,8 +1245,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (program) {
             vp.Run(s.vs->program);
             o.pos = vp.out[0];
-            if (screen && o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f && (!depth_tested || o.pos[3] <= 4.0f))
-                o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
+            if (screen && (s.squeeze_beyond || (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f)) && (!depth_tested || o.pos[3] <= 4.0f))
+                o.pos[0] = rt.w * 0.5f + (o.pos[0] + (s.squeeze_beyond && squeeze < 0.999f ? s.squeeze_shift : 0.0f) - rt.w * 0.5f) * squeeze;
             o.pos[3] = MagClamp(o.pos[3]);
             o.attr[kD0] = vp.out[3];
             o.attr[kD1] = vp.out[4];
@@ -1259,8 +1259,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             const Vec& q = vp.in[0];
             if (as.pretransformed) {
                 o.pos = V(q[0], q[1], q[2] * s.zscale, q[3] == 0 ? 1 : 1 / q[3]);
-                if (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f && (!depth_tested || q[3] >= 0.25f))
-                    o.pos[0] = rt.w * 0.5f + (o.pos[0] - rt.w * 0.5f) * squeeze;
+                if ((s.squeeze_beyond || (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f)) && (!depth_tested || q[3] >= 0.25f))
+                    o.pos[0] = rt.w * 0.5f + (o.pos[0] + (s.squeeze_beyond && squeeze < 0.999f ? s.squeeze_shift : 0.0f) - rt.w * 0.5f) * squeeze;
             } else {
                 // world, view, projection, then the viewport, as the D3D12 path builds it
                 auto mul = [](const float* x, const float* y, float* r) {

@@ -719,6 +719,14 @@ bool ScreenDraw(const State& s) {
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
 }
 
+void SqueezeBeyond(const State& s, float hud[4]) {
+    float k = hud[0];
+    if (!s.squeeze_beyond || k >= 0.999f || k <= 0) return;
+    // x' = c + (x + shift - c) k is a squeeze about c + shift k / (1 - k)
+    hud[1] += s.squeeze_shift * k / (1 - k);
+    hud[0] = -k;
+}
+
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
     const float wide = app::kGame.hud_aspect;
     if (!(a.pretransformed || ScreenDraw(s)) || aspect <= wide + 1e-3f || stretch <= 1) return 1;
