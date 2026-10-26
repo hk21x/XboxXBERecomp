@@ -490,6 +490,10 @@ std::shared_ptr<const Replacement> FindReplacement(uint32_t data) {
 std::mutex g_sharp_lock;
 std::unordered_map<uint32_t, int> g_sharp_drops;  // sharpened pictures dropped, by texture
 
+bool ReplacementFits(const Replacement& r, const TextureDesc& d) {
+    return !r.format || (r.format == d.format && r.src_width == d.width && r.src_height == d.height);
+}
+
 bool ReplacementHolds(const Replacement& r) {
     if (Hash(kernel::HostPtr(r.data), r.guest_bytes) == r.guest_hash) return true;
     if (r.sharpened) {
@@ -714,6 +718,9 @@ void SharpWorker() {
         r->width = job.d.width * scale;
         r->height = job.d.height * scale;
         r->sharpened = true;
+        r->format = job.d.format;
+        r->src_width = job.d.width;
+        r->src_height = job.d.height;
         r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
         if (auto had = FindReplacement(job.d.data); had && !had->sharpened) continue;  // the title's own stays
         // XBE_SHARPEN_DUMP=folder: each picture as a TGA, the game's (orig_<texture>.tga) and enlarged (sharp_)

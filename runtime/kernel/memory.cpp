@@ -1,9 +1,12 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "core/log.h"
@@ -132,16 +135,28 @@ public:
     uint32_t Alloc(uint32_t size, uint32_t align, uint32_t lo, uint32_t hi, bool top_down) {
         if (!align) align = 1;
         if (top_down) {
+            // best fit: the smallest free range that takes it (the highest of equals), at its top. Small blocks fill
+            // small gaps and the big ranges stay whole for big blocks (PGR1's 22 MB city areas failed with 13 MB in
+            // use when the highest range took whatever came first)
+            // a range wholly in the first 16 MB counts as larger than any other unless the request is limited to
+            // there: that memory stays for requests that need it (D3D report pages)
+            const uint64_t low_end = uint64_t(lo & ~0x0FFFFFFFu) + (16u << 20);
+            const bool low_only = uint64_t(hi) + 1 <= low_end;
+            uint64_t best = 0, best_rank = ~0ull;
             for (auto it = free_.rbegin(); it != free_.rend(); ++it) {
                 uint64_t fs = it->first, fe = fs + it->second;
                 uint64_t e = std::min<uint64_t>(fe, uint64_t(hi) + 1);
                 if (e < size) continue;
                 uint64_t a = (e - size) & ~uint64_t(align - 1);
                 if (a < fs || a < lo) continue;
-                Take(uint32_t(a), size);
-                return uint32_t(a);
+                uint64_t rank = it->second + (!low_only && fe <= low_end ? (1ull << 32) : 0);
+                if (rank >= best_rank) continue;
+                best = a;
+                best_rank = rank;
             }
-            return 0;
+            if (best_rank == ~0ull) return 0;
+            Take(uint32_t(best), size);
+            return uint32_t(best);
         }
         for (auto& [fs, fz] : free_) {
             uint64_t a = std::max<uint64_t>(fs, lo);
@@ -152,6 +167,20 @@ public:
             }
         }
         return 0;
+    }
+
+    // the n largest free ranges, "start+size" in hex, largest first
+    std::string Largest(size_t n) const {
+        std::vector<std::pair<uint32_t, uint32_t>> v;
+        for (auto& [fs, fz] : free_) v.push_back({fz, fs});
+        std::sort(v.rbegin(), v.rend());
+        std::string out;
+        char b[40];
+        for (size_t i = 0; i < v.size() && i < n; i++) {
+            std::snprintf(b, sizeof b, " %X+%X", v[i].second, v[i].first);
+            out += b;
+        }
+        return out;
     }
 
     bool IsFree(uint32_t start, uint32_t size) const {
@@ -345,6 +374,15 @@ bool QueryVirtual(uint32_t addr, RegionInfo& out) {
     return true;
 }
 
+// XBE_MEM_LOG=1: contiguous allocations of a megabyte or more and their frees
+bool MemLog() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_MEM_LOG");
+        return e && *e == '1';
+    }();
+    return on;
+}
+
 uint32_t AllocContiguous(uint32_t size, uint32_t lowest, uint32_t highest, uint32_t align) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     EnsureRanges();
@@ -353,22 +391,26 @@ uint32_t AllocContiguous(uint32_t size, uint32_t lowest, uint32_t highest, uint3
     align = std::max<uint32_t>(align, kPage);
     uint32_t lo = kContiguousBase | (lowest & (kPhysicalSize - 1));
     uint32_t hi = highest >= kPhysicalSize - 1 ? kContiguousBase + kPhysicalSize - 1 : kContiguousBase | highest;
-    // highest fit first: low memory stays free for requests limited to it (D3D report pages, first 16 MB)
+    // best fit, high first: low memory stays free for requests limited to it (D3D report pages, first 16 MB)
     uint32_t a = g_contig.Alloc(size, align, lo, hi, true);
     if (!a) {
-        LOGE("memory: contiguous allocation of %X bytes failed (%X..%X align %X), %llu KB in use", size, lowest, highest, align,
-             (unsigned long long)(g_contig.Used() >> 10));
+        LOGE("memory: contiguous allocation of %X bytes failed (%X..%X align %X), %llu KB in use; largest free:%s", size,
+             lowest, highest, align, (unsigned long long)(g_contig.Used() >> 10), g_contig.Largest(6).c_str());
         return 0;
     }
     Commit(a, size);
     std::memset(g_base + a, 0, size);
+    if (size >= (1u << 20) && MemLog()) LOGI("memory: contiguous %X bytes at %08X", size, a);
     return a;
 }
 
 void FreeContiguous(uint32_t va) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t size;
-    if (g_contig.Free(va, &size)) Decommit(va, size);
+    if (g_contig.Free(va, &size)) {
+        Decommit(va, size);
+        if (size >= (1u << 20) && MemLog()) LOGI("memory: contiguous %X bytes at %08X freed", size, va);
+    }
 }
 
 uint32_t AllocSystem(uint32_t size, uint32_t align) {

@@ -1311,6 +1311,10 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     hash = Hash(src.data(), src.size(), entry_seed);
     auto it = blobs_.find(hash);
     if (it != blobs_.end()) return it->second.Get();
+    if (ComPtr<ID3DBlob> kept; CachedShader(hash, kept.GetAddressOf())) {
+        blobs_[hash] = kept;
+        return kept.Get();
+    }
     ComPtr<ID3DBlob> code;
     ComPtr<ID3DBlob> err;
     PerfScope perf_compile{g_perf.compile};
@@ -1324,6 +1328,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
         return nullptr;
     }
     blobs_[hash] = code;
+    KeepShader(hash, code.Get());
     return code.Get();
 }
 
@@ -1729,7 +1734,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     TexInfo& info = stages.info[stage];
     if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && r->sharpened && !app::Get().sharp_2d) r = nullptr;
+        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
@@ -1916,6 +1921,18 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
                  d.data, d.format, d.width, d.height, (unsigned long long)(SizedTargetKey(d.data, true, d.width, d.height) | alt),
                  at.c_str());
     }
+    // a smaller linear texture over a colour target: the target's top left, its texel coordinates over the target's
+    // size (EoN's Thermovision shrinks the frame into 640x480 target 8316CA00 and reads it back as 320x240)
+    if (tit != targets_.end() && !fi.depth && !tit->second.depth && d.linear &&
+        (tit->second.gw > d.width || tit->second.gh > d.height) && tit->second.gw >= d.width &&
+        tit->second.gh >= d.height) {
+        stages.size[stage][0] = tit->second.gw;
+        stages.size[stage][1] = tit->second.gh;
+        static std::unordered_set<uint32_t> told;
+        if (told.size() < 4 && told.insert(d.data).second)
+            LOGR("d3d12: texture %08X %ux%u (pitch %u) read as the top left of target %ux%u", d.data, d.width,
+                 d.height, d.pitch, tit->second.gw, tit->second.gh);
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
@@ -2080,6 +2097,23 @@ void D3D12Backend::CaptureInputs(const State& s, const Assembled& a, const DrawC
         for (uint32_t k = 0; k < n * 4; k++) fprintf(cap_, " %g", a.vertices[v * n * 4 + k]);
         fprintf(cap_, " ]");
     }
+    // drawn from the guest's buffers as they are: their first vertices as floats (texture coordinates and positions)
+    if (!n || a.vertices.empty()) {
+        for (uint32_t b = 0; b < a.buffer_count; b++) {
+            const VertexBuffer& vb = a.buffers[b];
+            if (!vb.src || !vb.stride) continue;
+            fprintf(cap_, "\n     buffer %u stride %u:", b, vb.stride);
+            for (uint32_t v = 0; v < std::min<uint32_t>(4, vb.bytes / vb.stride); v++) {
+                fprintf(cap_, " [");
+                for (uint32_t k = 0; k + 4 <= vb.stride; k += 4) {
+                    float f;
+                    std::memcpy(&f, static_cast<const uint8_t*>(vb.src) + size_t(v) * vb.stride + k, 4);
+                    fprintf(cap_, " %g", f);
+                }
+                fprintf(cap_, " ]");
+            }
+        }
+    }
     for (int r = 0; r < kVsConstants; r++) {
         const auto& v = s.vsc[r];
         if (v[0] || v[1] || v[2] || v[3]) {
@@ -2204,7 +2238,7 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
 
 void D3D12Backend::SetBlendFactorStencilRef(const State& s) {
     float bf[4];
-    Color(SimpleState(s, kMBlendColor), bf);
+    BlendFactor(s, bf);
     DrawStateCache& c = ds_cache_;
     if (!c.bf_ok || std::memcmp(c.bf, bf, sizeof(bf))) {
         cl_->OMSetBlendFactor(bf);
@@ -2424,6 +2458,11 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
                     XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);
     c.hud[1] = guest_w_ * 0.5f;
     if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f / s.aa_x;
+    if (c.hud[0] != 1 && !s.squeeze_beyond) {
+        Span span = DrawSpan(s, a, c.hud[1] * 2);
+        if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
+        if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
+    }
     SqueezeBeyond(s, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);

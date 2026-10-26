@@ -31,6 +31,9 @@ extern const char* kDepthResolveHlsl;
 
 float Bits(uint32_t v);
 void Color(uint32_t argb, float* o);  // console ARGB to RGBA floats
+// the draw's blend factor (D3DRS_BLENDCOLOR): its alpha in all four when the blend uses constant alpha (0x8003,
+// 0x8004) and not constant colour, since D3D's blend factor scales each channel by its own component
+void BlendFactor(const State& s, float* o);
 // console values (GL numbering) to host state
 D3D12_BLEND Blend(uint32_t v, bool alpha);
 D3D12_BLEND_OP BlendOp(uint32_t v);
@@ -112,6 +115,12 @@ struct DrawShaders {
     ID3DBlob* ps_code = nullptr;
 };
 
+// compiled shaders kept on disk by their Compile hash (shadercache.bin beside the exe), so a shader compiled in one
+// run is not compiled again in the next: D3DCompile takes tens of milliseconds a shader, a stall the first time a
+// draw needs it (a new car, effect or stretch of road in the middle of a race). Thread safe.
+bool CachedShader(uint64_t hash, ID3DBlob** out);  // the blob made from that hash's source, if kept
+void KeepShader(uint64_t hash, ID3DBlob* code);
+
 // the render target's console size in pixels, or the depth buffer's without one
 struct GuestExtent {
     uint32_t w;
@@ -165,6 +174,13 @@ bool DepthTested(const State& s);
 bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture of a draw that leaves it alone
 bool ScreenDraw(const State& s);
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
+// how a squeezed 2D draw is squeezed, by where its vertices reach (kSpanFrame where its positions cannot be read):
+// kSpanFrame reaches both the left and right edge of a frame `width` wide (a full screen quad): its vertices on or past
+// the edges stay there; kSpanViewport fills a viewport narrower than the frame (EoN's Thermovision shrinking the frame
+// into a 320x240 corner): not squeezed; kSpanNone (EoN's driving radar: big tiles past the left edge only): squeezed
+// whole
+enum Span { kSpanNone, kSpanFrame, kSpanViewport };
+Span DrawSpan(const State& s, const Assembled& a, float width);
 // State::squeeze_beyond: hud[0] negative (the shader keeps no corner on an edge) and the pivot hud[1] moved so the
 // squeeze also moves the draw by squeeze_shift
 void SqueezeBeyond(const State& s, float hud[4]);

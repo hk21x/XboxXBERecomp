@@ -212,6 +212,9 @@ void DecodeBlocks(const TextureDesc& d, Host host, const std::vector<uint8_t>& i
 
 // a P8 texture through the stage's palette (D3DPalette: Common, its top two bits the size code; Data, the colours'
 // physical address), as the renderers' ReadStagePalette
+// as the renderers' shaders (kVsHelpers): a vertex on or past the frame's left or right edge
+bool AtFrameEdge(float x, float width) { return x <= 0.5f || x >= width - 0.5f; }
+
 std::shared_ptr<Image> FindImage(uint32_t header, uint32_t palette_header) {
     TextureDesc d;
     if (!header || !Describe(header, d)) return nullptr;
@@ -1231,6 +1234,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
+    std::vector<uint8_t> squeezable(as.vertex_count, 0);  // squeezed below, once the draw's extent is known
     for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
         VertexProgram vp{s};
         for (int r = 0; r < 16; r++) {
@@ -1245,8 +1249,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (program) {
             vp.Run(s.vs->program);
             o.pos = vp.out[0];
-            if (screen && (s.squeeze_beyond || (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f)) && (!depth_tested || o.pos[3] <= 4.0f))
-                o.pos[0] = rt.w * 0.5f + (o.pos[0] + (s.squeeze_beyond && squeeze < 0.999f ? s.squeeze_shift : 0.0f) - rt.w * 0.5f) * squeeze;
+            squeezable[vi] = screen && (!depth_tested || o.pos[3] <= 4.0f);
             o.pos[3] = MagClamp(o.pos[3]);
             o.attr[kD0] = vp.out[3];
             o.attr[kD1] = vp.out[4];
@@ -1259,8 +1262,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             const Vec& q = vp.in[0];
             if (as.pretransformed) {
                 o.pos = V(q[0], q[1], q[2] * s.zscale, q[3] == 0 ? 1 : 1 / q[3]);
-                if ((s.squeeze_beyond || (o.pos[0] > 0.5f && o.pos[0] < rt.w - 0.5f)) && (!depth_tested || q[3] >= 0.25f))
-                    o.pos[0] = rt.w * 0.5f + (o.pos[0] + (s.squeeze_beyond && squeeze < 0.999f ? s.squeeze_shift : 0.0f) - rt.w * 0.5f) * squeeze;
+                squeezable[vi] = !depth_tested || q[3] >= 0.25f;
             } else {
                 // world, view, projection, then the viewport, as the D3D12 path builds it
                 auto mul = [](const float* x, const float* y, float* r) {
@@ -1290,6 +1292,26 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         // drawn in pixels of aa_x by aa_y target pixels (State::aa_x)
         o.pos[0] *= float(s.aa_x);
         o.pos[1] *= float(s.aa_y);
+    }
+    // as the renderers: a draw spanning the frame's width (a full screen quad) keeps the vertices on or past its edges
+    // where they are; any other is squeezed whole (EoN's driving radar: big tiles past the left edge only)
+    // (positions here are already in aa_x pixels; the squeeze works in the draw's own, as it did per vertex)
+    if (squeeze != 1) {
+        const float ax = float(s.aa_x), w = float(rt.w);
+        float lo = 1e30f, hi = -1e30f;
+        for (uint32_t vi = 0; vi < as.vertex_count; vi++)
+            if (squeezable[vi]) lo = std::min(lo, verts[vi].pos[0] / ax), hi = std::max(hi, verts[vi].pos[0] / ax);
+        // State::squeeze_beyond: squeezed whole and moved by squeeze_shift
+        bool spans = !s.squeeze_beyond && lo <= 0.5f && hi >= w - 0.5f;
+        const float shift = s.squeeze_beyond ? s.squeeze_shift : 0.0f;
+        // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
+        const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
+        if (!s.squeeze_beyond && !spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
+        for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
+            float x = verts[vi].pos[0] / ax;
+            if (squeezable[vi] && !(spans && AtFrameEdge(x, w)))
+                verts[vi].pos[0] = (w * 0.5f + (x + shift - w * 0.5f) * squeeze) * ax;
+        }
     }
 
     // point sprites: each point a square of its size in console pixels, clamped to D3DRS_POINTSIZE_MIN and _MAX, every

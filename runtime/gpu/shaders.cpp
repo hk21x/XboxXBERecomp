@@ -688,8 +688,10 @@ int MatrixProgram(const std::vector<uint32_t>& prog) {
 bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k) {
     auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
     const auto &x = c[size_t(k)], &y = c[size_t(k) + 1], &w = c[size_t(k) + 3];
-    return x[0] > 0 && near(x[1], 0) && near(x[2], 0) && y[1] < 0 && near(y[0], 0) && near(y[2], 0) && near(w[0], 0) &&
-           near(w[1], 0) && near(w[2], 0) && near(w[3], 1);
+    // any 2D map of x and y to the screen, rotated too (EoN's driving radar turns with the car): no depth in x or y, w
+    // 1, and y flipped (a negative determinant, as screen coordinates have)
+    return near(x[2], 0) && near(y[2], 0) && x[0] * y[1] - x[1] * y[0] < 0 && near(w[0], 0) && near(w[1], 0) &&
+           near(w[2], 0) && near(w[3], 1);
 }
 
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode) {
@@ -781,7 +783,8 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         // ultrawide: 2D drawn in a centred 16:9 part; a corner on the frame's left or right edge stays there (HUD bars
         // reaching the edge keep reaching it, full screen passes and full width lines keep their width)
         // a depth tested draw (hud.z) only at the near plane: 2D drawn with depth on, not a glow out in the world
-        // hud.x negative (State::squeeze_beyond): no corner kept on an edge
+        // hud.x negative: no corner kept on an edge (a draw not spanning the frame, gpu::DrawSpan: EoN's driving radar;
+        // State::squeeze_beyond)
         s += "    if ((hud.x < 0 || (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5)) && (hud.z == 0 || rhw.w >= 0.25))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
     } else {

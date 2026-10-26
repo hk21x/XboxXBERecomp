@@ -1,18 +1,100 @@
 // What the Direct3D 12 and Direct3D 11 renderers share (d3d_common.h)
 #include "gpu/d3d_common.h"
 
+#include <d3dcompiler.h>
+
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "app/app.h"
 #include "core/log.h"
+#include "gpu/backend.h"
 #include "kernel/kernel.h"
 
 namespace gpu {
+
+// ---- the shader cache: "XBESHC1" and a zero byte, then records of hash (8 bytes), size (4) and the blob
+namespace {
+constexpr char kShaderCacheMagic[8] = {'X', 'B', 'E', 'S', 'H', 'C', '1', 0};
+constexpr uint32_t kShaderCacheMaxBlob = 1u << 24;
+struct ShaderCache {
+    std::mutex m;
+    bool loaded = false;
+    std::unordered_map<uint64_t, std::string> blobs;
+    FILE* out = nullptr;
+};
+ShaderCache& Shaders() {
+    static ShaderCache c;
+    return c;
+}
+
+// the records up to the first that is cut short; a file of another kind, too big or none is started again
+void LoadShaderCache(ShaderCache& c) {
+    c.loaded = true;
+    const std::filesystem::path file = app::ExeDir() / "shadercache.bin";
+    std::string all;
+    if (std::ifstream in{file, std::ios::binary}) all.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    size_t good = 0;
+    // past 64 MB (shaders an older SDK made, never asked for again) it starts again
+    if (all.size() <= (64u << 20) && all.size() >= sizeof kShaderCacheMagic && std::memcmp(all.data(), kShaderCacheMagic, sizeof kShaderCacheMagic) == 0) {
+        size_t at = good = sizeof kShaderCacheMagic;
+        while (at + 12 <= all.size()) {
+            uint64_t h;
+            uint32_t n;
+            std::memcpy(&h, all.data() + at, 8);
+            std::memcpy(&n, all.data() + at + 8, 4);
+            if (n > kShaderCacheMaxBlob || at + 12 + n > all.size()) break;
+            c.blobs[h].assign(all.data() + at + 12, n);
+            good = at += 12 + n;
+        }
+    }
+    std::error_code ec;
+    if (good == 0) {
+        if (FILE* f = std::fopen(file.string().c_str(), "wb")) {
+            std::fwrite(kShaderCacheMagic, 1, sizeof kShaderCacheMagic, f);
+            std::fclose(f);
+        }
+    } else if (good != all.size()) {
+        std::filesystem::resize_file(file, good, ec);
+    }
+    c.out = std::fopen(file.string().c_str(), "ab");
+    LOGR("shaders: %zu compiled shaders kept from earlier runs (%s)%s", c.blobs.size(), file.filename().string().c_str(),
+         c.out ? "" : ", not writable: new ones are compiled again next run");
+}
+}  // namespace
+
+bool CachedShader(uint64_t hash, ID3DBlob** out) {
+    ShaderCache& c = Shaders();
+    std::lock_guard lock(c.m);
+    if (!c.loaded) LoadShaderCache(c);
+    auto it = c.blobs.find(hash);
+    if (it == c.blobs.end() || it->second.empty()) return false;
+    if (FAILED(D3DCreateBlob(it->second.size(), out))) return false;
+    std::memcpy((*out)->GetBufferPointer(), it->second.data(), it->second.size());
+    return true;
+}
+
+void KeepShader(uint64_t hash, ID3DBlob* code) {
+    g_shaders_compiled++;
+    if (!code || code->GetBufferSize() > kShaderCacheMaxBlob) return;
+    ShaderCache& c = Shaders();
+    std::lock_guard lock(c.m);
+    if (!c.loaded) LoadShaderCache(c);
+    const uint32_t n = uint32_t(code->GetBufferSize());
+    if (!c.blobs.emplace(hash, std::string(static_cast<const char*>(code->GetBufferPointer()), n)).second || !c.out) return;
+    std::fwrite(&hash, 8, 1, c.out);
+    std::fwrite(&n, 4, 1, c.out);
+    std::fwrite(code->GetBufferPointer(), 1, n, c.out);
+    std::fflush(c.out);
+}
 
 const char* kBlitHlsl = R"(
 cbuffer B : register(b1) { float4 uvrect; float4 opts; };
@@ -111,6 +193,15 @@ void Color(uint32_t argb, float* o) {
 
 // D3DBLEND, the console uses GL values
 constexpr uint32_t kBlendDestColor = 0x306;  // D3DBLEND_DESTCOLOR
+
+void BlendFactor(const State& s, float* o) {
+    Color(SimpleState(s, kMBlendColor), o);
+    uint32_t src = SimpleState(s, kMSrcBlend), dst = SimpleState(s, kMDestBlend);
+    auto constant_alpha = [](uint32_t v) { return v == 0x8003 || v == 0x8004; };
+    auto constant_colour = [](uint32_t v) { return v == 0x8001 || v == 0x8002; };
+    if ((constant_alpha(src) || constant_alpha(dst)) && !constant_colour(src) && !constant_colour(dst))
+        o[0] = o[1] = o[2] = o[3];
+}
 
 D3D12_BLEND Blend(uint32_t v, bool alpha) {
     switch (v) {
@@ -717,6 +808,47 @@ bool ScreenDraw(const State& s) {
     if (s.vs->screen == 1) return true;
     if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
+}
+
+Span DrawSpan(const State& s, const Assembled& a, float width) {
+    // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
+    const int regs = std::popcount(uint32_t(a.regs));
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& b = a.buffers[e.buffer];
+    const bool converted = !a.vertices.empty();
+    uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
+    if (!(a.regs & 1) || !count) return kSpanFrame;
+    if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
+                                  e.format != DXGI_FORMAT_R32G32_FLOAT)))
+        return kSpanFrame;
+    // the screen x: pretransformed and pass-through programs give it, a matrix program's 2D matrix (OrthoConstants) gives
+    // clip x, over the viewport
+    const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+    const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
+    if (program && s.vs->screen != 1 && k < 0) return kSpanFrame;
+    float lo = 1e30f, hi = -1e30f;
+    count = std::min<uint32_t>(count, 4096);
+    for (uint32_t i = 0; i < count; i++) {
+        float p[4] = {0, 0, 0, 1};
+        if (converted) {
+            std::memcpy(p, &a.vertices[size_t(i) * size_t(regs) * 4], sizeof p);
+        } else {
+            size_t n = e.format == DXGI_FORMAT_R32G32_FLOAT ? 2 : e.format == DXGI_FORMAT_R32G32B32_FLOAT ? 3 : 4;
+            std::memcpy(p, b.src + size_t(i) * b.stride + e.offset, n * 4);
+        }
+        float x = p[0];
+        if (k >= 0) {
+            const auto& m = s.vsc[size_t(k)];
+            float clip = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
+            x = s.viewport.x + (clip + 1) * 0.5f * s.viewport.w;
+        }
+        lo = std::min(lo, x);
+        hi = std::max(hi, x);
+    }
+    if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
+    const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
+    if (right - left < width - 1 && lo <= left + 0.5f && hi >= right - 0.5f) return kSpanViewport;
+    return kSpanNone;
 }
 
 void SqueezeBeyond(const State& s, float hud[4]) {
