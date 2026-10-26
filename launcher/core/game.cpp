@@ -54,6 +54,10 @@ bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string
     game.branch = j.value("branch", "main");
     game.toolchain = j.value("toolchain", "");
     game.music = j.value("music", false);
+    game.xbes = j.value("xbes", std::vector<std::string>{game.xbe});
+    game.exes = j.value("exes", std::vector<std::string>{game.exe});
+    if (game.xbes.empty()) game.xbes = {game.xbe};
+    if (game.exes.empty()) game.exes = {game.exe};
     json releases = j.value("releases", json::object());
     for (auto& [sha, name] : releases.items()) game.releases[Lower(sha)] = name.get<std::string>();
     if (game.title.empty() || game.short_name.empty() || game.repo.empty() || game.releases.empty()) {
@@ -64,18 +68,22 @@ bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string
 }
 
 bool ReadXbe(const GameConfig& game, const GameCheck& copy, std::vector<uint8_t>& out, std::string& error) {
+    return ReadXbeNamed(game.xbe, copy, out, error);
+}
+
+bool ReadXbeNamed(const std::string& name, const GameCheck& copy, std::vector<uint8_t>& out, std::string& error) {
     if (copy.iso) {
         kernel::Disc disc;
         if (!disc.Open(copy.path, error)) return false;
-        if (!disc.Load(game.xbe, out)) {
-            error = "the disc image has no " + game.xbe;
+        if (!disc.Load(name, out)) {
+            error = "the disc image has no " + name;
             return false;
         }
         return true;
     }
-    fs::path xbe = FindAnyCase(copy.path, game.xbe);
+    fs::path xbe = FindAnyCase(copy.path, name);
     if (xbe.empty() || !ReadFile(xbe, out)) {
-        error = "there is no " + game.xbe + " in " + U8(copy.path);
+        error = "there is no " + name + " in " + U8(copy.path);
         return false;
     }
     return true;

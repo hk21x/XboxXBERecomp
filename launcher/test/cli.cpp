@@ -113,6 +113,16 @@ int main(int argc, char** argv) {
         std::printf("%s %s\n", ok ? "source ready" : "failed:", error.c_str());
         return ok ? 0 : 1;
     }
+    if (cmd == "xbes") {  // the game's xbes into the source's assets (no clone)
+        bool ok = b.PutXbe(error);
+        std::printf("%s %s\n", ok ? "xbes in place" : "failed:", error.c_str());
+        return ok ? 0 : 1;
+    }
+    if (cmd == "install") {  // the built exes from source/out/build/release into play
+        bool ok = b.Install(error);
+        std::printf("%s %s\n", ok ? "installed" : "failed:", error.c_str());
+        return ok ? 0 : 1;
+    }
     if (cmd == "music" && argc >= 5) {  // the soundtracks from a music folder, with the ffmpeg on the PATH
         std::string summary;
         bool ok = b.ImportMusic(argv[4], summary, error);
