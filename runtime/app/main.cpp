@@ -13,7 +13,10 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cwchar>
+#include <filesystem>
+#include <string>
 #include <thread>
 
 #include <imgui.h>
@@ -26,6 +29,7 @@
 #include "gpu/backend.h"
 #include "image_symbols.h"
 #include "kernel/kernel.h"
+#include "kernel/memory.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -71,14 +75,45 @@ LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// F3 with XBE_CAPTURE_DIR: the guest's committed memory too, for a stalled title's state to be read elsewhere
+// (sdk/scripts/guestmem.py): "XBEMEM1" and a zero byte, then runs of committed pages, each its address, its length
+// and its bytes
+void DumpGuestMemory() {
+    if (diag::CaptureDir().empty()) return;
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::weakly_canonical(ExeDir() / diag::CaptureDir(), ec);
+    std::filesystem::create_directories(dir, ec);
+    std::filesystem::path file = dir / ("guest_mem_" + std::to_string(GetTickCount64()) + ".bin");
+    FILE* f = _wfopen(file.wstring().c_str(), L"wb");
+    if (!f) return;
+    std::fwrite("XBEMEM1", 1, 8, f);
+    uint64_t total = 0;
+    for (uint64_t va = 0x1000; va < 0x100000000ull;) {
+        if (!mem::IsCommitted(uint32_t(va))) {
+            va += 0x1000;
+            continue;
+        }
+        uint64_t end = va;
+        while (end < 0x100000000ull && end - va < 0x1000000 && mem::IsCommitted(uint32_t(end))) end += 0x1000;
+        uint32_t head[2] = {uint32_t(va), uint32_t(end - va)};
+        std::fwrite(head, 4, 2, f);
+        std::fwrite(kernel::HostPtr(uint32_t(va)), 1, size_t(end - va), f);
+        total += end - va;
+        va = end;
+    }
+    std::fclose(f);
+    LOGR("F3: guest memory, %llu MB, written to %s", (unsigned long long)(total >> 20), file.string().c_str());
+}
+
 void DumpThreads() {
     LOGR("F3: thread stacks%s", diag::CaptureDir().empty() ? " (no capture: XBE_CAPTURE_DIR is not set)" : ", the next frame captured");
     gpu::g_capture = true;
     for (auto& t : kernel::Threads())
         if (t->ctx) {
-            LOGI("thread %X", t->id);
+            LOGR("F3: thread %X", t->id);
             kernel::LogGuestStack(*t->ctx, 32);
         }
+    DumpGuestMemory();
 }
 
 // window thread only
