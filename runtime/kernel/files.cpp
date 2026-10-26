@@ -587,14 +587,14 @@ static uint32_t RawVolume(File& f, bool write, uint32_t buf, uint32_t len, uint6
     return len;
 }
 
-// XBE_DISC_RATE=<MB a second>: disc reads take as long as a drive of that speed would (the console's DVD drive
-// reads about 6 MB a second), on the thread that reads; reads here otherwise complete at once, which a title's
-// streaming may never have met on the console
+// GameInfo::disc_rate or XBE_DISC_RATE=<MB a second>: disc reads take as long as a drive of that speed would (the
+// console's DVD drive reads about 6 MB a second), on the thread that reads; reads here otherwise complete at once,
+// which a title's streaming may never have met on the console
 static void DiscPace(uint32_t bytes) {
     static const double rate = [] {
         const char* e = std::getenv("XBE_DISC_RATE");
-        double r = e ? std::atof(e) : 0;
-        if (r > 0) LOGR("files: disc reads paced at %.1f MB a second (XBE_DISC_RATE)", r);
+        double r = e ? std::atof(e) : app::kGame.disc_rate;
+        if (r > 0) LOGR("files: disc reads paced at %.1f MB a second (%s)", r, e ? "XBE_DISC_RATE" : "the game's");
         return r;
     }();
     if (rate <= 0 || !bytes) return;

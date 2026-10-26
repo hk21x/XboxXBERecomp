@@ -184,6 +184,9 @@ struct GameInfo {
     // a PAL release (the certificate's game regions without North America) runs on a PAL console with PAL 60 Hz on:
     // a title naming its files by the video standard finds the disc's (EoN's movies are _pal and _palw only)
     bool pal_console = false;
+    // disc reads paced as a drive of this many MB a second reads (the console's about 6), 0 at once; XBE_DISC_RATE
+    // overrides (EoN's driving streams stall for good on reads that complete at once)
+    float disc_rate = 0;
     // a file the title asks to open (its Xbox path, as named) is reported missing when this says so: a title that
     // passes over a missing movie skips it (EoN's logos, by a setting)
     bool (*hide_file)(const std::string& xbox_path) = nullptr;
