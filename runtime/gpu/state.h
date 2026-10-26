@@ -205,6 +205,10 @@ struct State {
     // draw moved by squeeze_shift guest pixels (a left panel left, a right one right, set per element) as it is
     // squeezed, its shape kept; no corner is kept on the frame's edges meanwhile (a letter's edge may fall on one)
     bool squeeze_beyond = false;
+    // a game hook turns the draws whose stage 0 texture has this format (D3DFORMAT, the header's format byte; 0 none)
+    // into a black clear of the target: EoN's menu movie (YUY2) behind the title art, which the console never shows; on
+    // ultrawide it showed at the sides, or a stale picture did without it (the title clears nothing)
+    uint32_t blank_format = 0;
     float squeeze_shift = 0;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
     // 1 / the projection's far w, as the XDK's SetTransform derives it (0x1C34A0). W-buffered, the fixed function and

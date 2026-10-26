@@ -1172,6 +1172,8 @@ HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
     W32(h + 4, a[1]);
     W32(h + 12, a[2]);
     g_state.textures[stage] = h;
+    // a title watching what it binds sees this as a bind too (EoN's title art is switched in)
+    if (app::kGame.texture_bound && app::kGame.texture_bound(h, 0)) gpu::MarkDirty(h);
     return 0;
 }
 
@@ -2161,6 +2163,14 @@ void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
         s.vsc = g_state.vsc;
         if (KeepDraw(d->prim, d->start, d->count, d->indices, d->up.empty() ? nullptr : d->up.data(), d->up_stride))
             continue;  // run while another buffer records: kept for that one
+        // the textures it binds, as a title watching its binds would see them drawn (EoN's title art is replayed)
+        if (app::kGame.texture_bound)
+            for (size_t t = 0; t < s.textures.size(); t++)
+                if (s.textures[t] && app::kGame.texture_bound(s.textures[t], s.palettes[t])) gpu::MarkDirty(s.textures[t]);
+        // and what a title's hooks ask now (gpu::State::squeeze_beyond, blank_format; set as its binds are seen)
+        s.squeeze_beyond = g_state.squeeze_beyond;
+        s.squeeze_shift = g_state.squeeze_shift;
+        s.blank_format = g_state.blank_format;
         if (!g_backend) continue;
         if (!d->up.empty()) {
             s.streams[0] = {UpVertices(d->up.data(), uint32_t(d->up.size())), d->up_stride};
