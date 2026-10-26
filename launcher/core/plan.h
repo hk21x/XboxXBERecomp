@@ -27,6 +27,7 @@ struct Tool {
     std::vector<FileRef> cabs;  // msi: the package's .cab files, the ones an .msi names are fetched with it
     int strip = 0;               // leading path components dropped
     std::vector<std::string> keep;  // after strip: "dir/" a folder and all in it, else a path ("*" within a name); empty: all
+    bool optional = false;          // not part of the build: fetched when a feature asks (ffmpeg, for the music)
     uint64_t Bytes() const;
 };
 

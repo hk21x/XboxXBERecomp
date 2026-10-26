@@ -42,7 +42,7 @@ configure_file(${nlohmann_json_SOURCE_DIR}/json.hpp ${CMAKE_BINARY_DIR}/include/
 
 set(XZ ${xz_embedded_SOURCE_DIR}/linux/lib/xz)
 add_library(launcher_core STATIC
-    core/archive.cpp core/builder.cpp core/game.cpp core/hash.cpp core/net.cpp core/plan.cpp
+    core/archive.cpp core/builder.cpp core/game.cpp core/hash.cpp core/music.cpp core/net.cpp core/plan.cpp
     ${SDK_ROOT}/runtime/kernel/disc.cpp
     ${miniz_SOURCE_DIR}/miniz.c
     ${XZ}/xz_crc32.c ${XZ}/xz_crc64.c ${XZ}/xz_dec_lzma2.c ${XZ}/xz_dec_stream.c ${XZ}/xz_dec_bcj.c)

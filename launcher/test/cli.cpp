@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
         return ok ? 0 : 1;
     }
     if (argc < 4) {
-        std::fprintf(stderr, "usage: launcher_cli <game.json> <root> plan|tool <id>|game <path>|source|env\n");
+        std::fprintf(stderr, "usage: launcher_cli <game.json> <root> plan|tool <id>|game <path>|source|env|music <folder>\n");
         return 2;
     }
     std::ifstream gj(argv[1]);
@@ -111,6 +111,13 @@ int main(int argc, char** argv) {
     if (cmd == "source") {
         bool ok = b.GetSource(error) && b.PutXbe(error);
         std::printf("%s %s\n", ok ? "source ready" : "failed:", error.c_str());
+        return ok ? 0 : 1;
+    }
+    if (cmd == "music" && argc >= 5) {  // the soundtracks from a music folder, with the ffmpeg on the PATH
+        std::string summary;
+        bool ok = b.ImportMusic(argv[4], summary, error);
+        std::printf("%s %s -> %s\n", ok ? "music:" : "failed:", ok ? summary.c_str() : error.c_str(),
+                    b.MusicDir().string().c_str());
         return ok ? 0 : 1;
     }
     std::fprintf(stderr, "unknown command %s\n", cmd.c_str());

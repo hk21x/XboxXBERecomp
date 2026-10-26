@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 
 #include "core/archive.h"
 #include "core/hash.h"
+#include "core/music.h"
 #include "nlohmann/json.hpp"
 
 #include "core/util.h"
@@ -122,9 +125,7 @@ bool Builder::SetGame(const GameCheck& copy, std::string& error) {
     } else if (!platform_.LinkFolder(assets, copy.path, error)) {
         return false;
     }
-    json j;
-    j["game"] = U8(copy.path);
-    std::ofstream(root_ / "launcher.json") << j.dump(2);
+    Remember("game", U8(copy.path));
     Log("game: " + U8(copy.path) + ", " + copy.release + ", sha1 " + copy.sha1);
     return true;
 }
@@ -148,7 +149,8 @@ bool Builder::LoadToolchain(Plan& plan, std::string& error) {
     if (!LoadPlan(text, plan, error)) return false;
     if (!ResolveMicrosoft(http_, text, plan, error)) return false;
     uint64_t bytes = 0;
-    for (const Tool& t : plan.tools) bytes += t.Bytes();
+    for (const Tool& t : plan.tools)
+        if (!t.optional) bytes += t.Bytes();
     Log("tools: " + std::to_string(plan.tools.size()) + ", " + Megabytes(bytes) + " to download at most");
     return true;
 }
@@ -315,7 +317,8 @@ bool Builder::Compile(std::string& error) {
     if (!fs::exists(cmake, ec)) cmake = "cmake";
     // a toolchain other than the last build's: CMake's cache (its compiler and header checks) is made again
     std::string tools;
-    for (const Tool& t : plan_.tools) tools += t.id + " " + t.stamp + "\n";
+    for (const Tool& t : plan_.tools)
+        if (!t.optional) tools += t.id + " " + t.stamp + "\n";
     fs::path build = src / "out" / "build" / "release", seen = build / ".launcher-tools";
     std::string last;
     // (a build folder from before this record counts as another toolchain)
@@ -382,7 +385,7 @@ bool Builder::BuildAll(std::string& error) {
     cancel = false;
     if (!LoadToolchain(plan_, error)) return false;
     for (const Tool& t : plan_.tools)
-        if (!InstallTool(t, error)) return false;
+        if (!t.optional && !InstallTool(t, error)) return false;
     if (!GetSource(error) || !PutXbe(error) || !Compile(error) || !Install(error)) return false;
     Say("Ready", "", 1);
     return true;
@@ -411,6 +414,173 @@ uint64_t Builder::BuildFilesBytes() const {
     for (auto it = fs::recursive_directory_iterator(out, ec); it != fs::recursive_directory_iterator(); it.increment(ec))
         if (it->is_regular_file(ec)) n += it->file_size(ec);
     return n;
+}
+
+void Builder::Remember(const std::string& key, const std::string& value) {
+    std::string text;
+    json j = ReadAll(root_ / "launcher.json", text) ? json::parse(text, nullptr, false) : json::object();
+    if (j.is_discarded() || !j.is_object()) j = json::object();
+    j[key] = value;
+    std::ofstream(root_ / "launcher.json") << j.dump(2);
+}
+
+fs::path Builder::SavedMusic() const {
+    std::string text;
+    if (!ReadAll(root_ / "launcher.json", text)) return {};
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded()) return {};
+    return PathOf(j.value("music", ""));
+}
+
+fs::path Builder::MusicDir() const { return PlayDir() / "hdd" / "E" / "TDATA" / "FFFE0000" / "MUSIC"; }
+
+bool Builder::ImportMusic(const fs::path& folder, std::string& summary, std::string& error) {
+    cancel = false;
+    std::error_code ec;
+    if (!fs::is_directory(folder, ec)) {
+        error = "The music folder is not there: " + U8(folder);
+        return false;
+    }
+    // ffmpeg and ffprobe: the portable ones in tools\ffmpeg (toolchain.json, optional), else on the PATH (Linux tests)
+    std::string ffmpeg = "ffmpeg", ffprobe = "ffprobe";
+    if (!platform_.ExeSuffix().empty()) {
+        if (!LoadToolchain(plan_, error)) return false;
+        auto it = std::find_if(plan_.tools.begin(), plan_.tools.end(), [](const Tool& t) { return t.id == "ffmpeg"; });
+        if (it == plan_.tools.end()) {
+            error = "toolchain.json lists no ffmpeg, which converts the music";
+            return false;
+        }
+        if (!InstallTool(*it, error)) return false;
+        ffmpeg = U8(ToolPath("ffmpeg") / "bin" / ("ffmpeg" + platform_.ExeSuffix()));
+        ffprobe = U8(ToolPath("ffmpeg") / "bin" / ("ffprobe" + platform_.ExeSuffix()));
+    }
+    fs::path music = MusicDir(), staging = music / ".staging", manifest_path = music / "launcher-music.json";
+    // soundtracks ripped on an Xbox and copied here are not ours to replace
+    if (fs::exists(music / "ST.DB", ec) && !fs::exists(manifest_path, ec)) {
+        error = "The game's music folder holds soundtracks not made here (copied from an Xbox?): " + U8(music) +
+                ". Move them away to use a folder of your own music.";
+        return false;
+    }
+    std::vector<std::string> notes;
+    std::vector<MusicSoundtrack> soundtracks = ScanMusic(folder, notes);
+    for (const std::string& n : notes) Log("music: " + n);
+    size_t total = 0;
+    for (const auto& st : soundtracks) total += st.songs.size();
+    if (total == 0) {
+        error = "No music found in " + U8(folder) + " (MP3, FLAC, OGG, Opus, M4A, AAC, WAV, WMA or AIFF files)";
+        return false;
+    }
+    // what is already converted: each source by its size and time, the file it became
+    std::string text;
+    json last = ReadAll(manifest_path, text) ? json::parse(text, nullptr, false) : json::object();
+    if (last.is_discarded() || !last.is_object()) last = json::object();
+    fs::remove_all(staging, ec);
+    fs::create_directories(staging, ec);
+    json now = json::object();
+    size_t done = 0, converted = 0, kept = 0, failed = 0;
+    std::vector<std::pair<fs::path, std::string>> moves;  // staging file, its place under MUSIC
+    std::vector<std::pair<fs::path, fs::path>> taken;     // a kept file moved to staging, where it was
+    auto stop = [&] {  // cancelled: the kept files go back, so the soundtracks stay as they were
+        for (const auto& [from, to] : taken) fs::rename(from, to, ec);
+        fs::remove_all(staging, ec);
+        error = "cancelled";
+        return false;
+    };
+    for (uint32_t i = 0; i < soundtracks.size(); i++) {
+        MusicSoundtrack& st = soundtracks[i];
+        std::vector<MusicSong> ok;
+        for (MusicSong& song : st.songs) {
+            if (cancel) return stop();
+            Say("Converting your music", std::to_string(done + 1) + " of " + std::to_string(total) + ": " +
+                U8(song.source.filename()), double(done) / double(total));
+            done++;
+            std::string key = U8(song.source);
+            uint64_t size = fs::file_size(song.source, ec);
+            int64_t time = int64_t(fs::last_write_time(song.source, ec).time_since_epoch().count());
+            std::string staged = std::to_string(moves.size()) + ".WMA";
+            const json* had = last.contains(key) ? &last[key] : nullptr;
+            bool reuse = had && had->value("size", uint64_t(0)) == size && had->value("time", int64_t(0)) == time &&
+                         fs::exists(music / PathOf(had->value("file", "")), ec);
+            if (reuse) {
+                song.name = had->value("name", song.name);
+                song.ms = had->value("ms", 0u);
+                fs::path was = music / PathOf(had->value("file", ""));
+                fs::rename(was, staging / staged, ec);
+                if (ec) reuse = false, ec.clear();
+                else taken.push_back({staging / staged, was});
+            }
+            if (!reuse) {
+                // its title, artist and length
+                std::string title, artist;
+                double seconds = 0;
+                platform_.Run({ffprobe, "-v", "error", "-show_entries", "format=duration:format_tags=title,artist", "-of",
+                               "default=noprint_wrappers=1", U8(song.source)},
+                              folder, {}, [&](const std::string& line) {
+                                  auto value = [&](const char* k) { return line.substr(std::strlen(k)); };
+                                  if (line.rfind("duration=", 0) == 0) seconds = std::atof(value("duration=").c_str());
+                                  else if (Lower(line).rfind("tag:title=", 0) == 0) title = value("TAG:title=");
+                                  else if (Lower(line).rfind("tag:artist=", 0) == 0) artist = value("TAG:artist=");
+                              }, &cancel);
+                if (!title.empty()) song.name = artist.empty() ? title : artist + " / " + title;
+                song.ms = uint32_t(seconds * 1000);
+                // WMA 2, stereo 44.1 kHz: what the Xbox's decoder plays (games decode it themselves)
+                std::string out_line;
+                int code = platform_.Run({ffmpeg, "-nostdin", "-y", "-v", "error", "-i", U8(song.source), "-vn",
+                                          "-map_metadata", "-1", "-ac", "2", "-ar", "44100", "-c:a", "wmav2", "-b:a",
+                                          "160k", U8(staging / staged)},
+                                         folder, {}, [&](const std::string& line) { out_line = line; }, &cancel);
+                if (code != 0 || !fs::exists(staging / staged, ec)) {
+                    if (cancel) return stop();
+                    Log("music: " + key + " could not be converted" + (out_line.empty() ? "" : ": " + out_line));
+                    failed++;
+                    continue;
+                }
+                converted++;
+            } else {
+                kept++;
+            }
+            uint32_t index = uint32_t(ok.size());
+            std::string file = SongFile(i + 1, index);
+            moves.push_back({staging / staged, file});
+            now[key] = {{"size", size}, {"time", time}, {"file", file}, {"name", song.name}, {"ms", song.ms}};
+            ok.push_back(song);
+        }
+        st.songs = std::move(ok);
+    }
+    soundtracks.erase(std::remove_if(soundtracks.begin(), soundtracks.end(), [](const MusicSoundtrack& st) {
+        return st.songs.empty();
+    }), soundtracks.end());
+    if (soundtracks.size() != 0) {
+        // song files are numbered by their soundtrack's place: a soundtrack emptied by failures moves the ones after it
+        uint32_t n = 0, sti = 0;
+        for (auto& st : soundtracks) {
+            sti++;
+            for (uint32_t k = 0; k < st.songs.size(); k++, n++) {
+                moves[n].second = SongFile(sti, k);
+                now[U8(st.songs[k].source)]["file"] = moves[n].second;
+            }
+        }
+    }
+    // the old soundtrack folders go, the new files take their places
+    for (const auto& e : fs::directory_iterator(music, ec))
+        if (e.is_directory(ec) && e.path() != staging) fs::remove_all(e.path(), ec);
+    for (const auto& [from, to] : moves) {
+        fs::path dest = music / PathOf(to);
+        fs::create_directories(dest.parent_path(), ec);
+        fs::rename(from, dest, ec);
+    }
+    fs::remove_all(staging, ec);
+    std::string db = SoundtrackDatabase(soundtracks);
+    std::ofstream(music / "ST.DB", std::ios::binary).write(db.data(), std::streamsize(db.size()));
+    std::ofstream(manifest_path) << now.dump(1);
+    Remember("music", U8(folder));
+    size_t songs = moves.size();
+    summary = std::to_string(songs) + " songs in " + std::to_string(soundtracks.size()) + " soundtracks";
+    if (failed) summary += " (" + std::to_string(failed) + " could not be converted: see launcher.log)";
+    Log("music: " + summary + ", " + std::to_string(converted) + " converted, " + std::to_string(kept) +
+        " kept from last time, from " + U8(folder));
+    Say("Ready", "", 1);
+    return true;
 }
 
 bool Builder::RemoveBuildFiles(std::string& error) {
