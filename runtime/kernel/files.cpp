@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -586,6 +587,20 @@ static uint32_t RawVolume(File& f, bool write, uint32_t buf, uint32_t len, uint6
     return len;
 }
 
+// XBE_DISC_RATE=<MB a second>: disc reads take as long as a drive of that speed would (the console's DVD drive
+// reads about 6 MB a second), on the thread that reads; reads here otherwise complete at once, which a title's
+// streaming may never have met on the console
+static void DiscPace(uint32_t bytes) {
+    static const double rate = [] {
+        const char* e = std::getenv("XBE_DISC_RATE");
+        double r = e ? std::atof(e) : 0;
+        if (r > 0) LOGR("files: disc reads paced at %.1f MB a second (XBE_DISC_RATE)", r);
+        return r;
+    }();
+    if (rate <= 0 || !bytes) return;
+    std::this_thread::sleep_for(std::chrono::microseconds(int64_t(bytes / (rate * 1048576.0) * 1e6)));
+}
+
 // pages is the FILE_SEGMENT_ELEMENT array for scatter and gather, 0 for one buffer
 static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     uint32_t h = a[0], event = a[1], apc = a[2], apc_ctx = a[3], iosb = a[4], buf = a[5], len = a[6], off = a[7];
@@ -616,6 +631,7 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
         if (done < chunk) break;
     }
     f->pos = pos + n;
+    if (!write && (f->entry || f->cdrom)) DiscPace(n);
     if (!write && n < len && FilesLogAll())  // the end of a file reached: copies do it at every file's end
         if (static std::atomic<int> said{0}; said.fetch_add(1) < 2000)
             LOGR("files: %s read short at %llu: %u of %u bytes (to %08X)", f->xbox.c_str(), (unsigned long long)pos, n,
