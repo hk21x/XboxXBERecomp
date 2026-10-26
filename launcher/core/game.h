@@ -16,6 +16,7 @@ struct GameConfig {
     std::map<std::string, std::string> releases;  // xbe SHA-1 -> release name; a copy must be one of them
     std::string repo, branch;  // the game's source (git)
     std::string toolchain;     // toolchain.json's address
+    bool music = false;        // the game plays Xbox custom soundtracks: the launcher makes them from a music folder
 };
 
 bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string& error);

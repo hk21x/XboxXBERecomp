@@ -9,9 +9,12 @@ builds, and from then on is the Play button (and Update, when the game's branch 
 
 A folder in the game's repository (`launcher/` in PGR2's) with:
 - `game.json`: `title`, `short` (the launcher's name and work folder), `exe`, `xbe`, `releases` (each supported
-  xbe's SHA-1 and its name), `repo` and `branch` (git, public), `toolchain` (where toolchain.json is published).
+  xbe's SHA-1 and its name), `repo` and `branch` (git, public), `toolchain` (where toolchain.json is published),
+  `music` (true: the game plays Xbox custom soundtracks, and the launcher makes them from a folder of the player's
+  music, below).
 - `toolchain.json`: the tools, each `id`, `title`, `kind` (`zip` or `tar.xz`), `url`, `sha256`, `size`, `strip`
-  (leading path parts dropped) and `keep` (what is unpacked: `dir/` or a path, `*` within a name); `msvc` (a
+  (leading path parts dropped), `keep` (what is unpacked: `dir/` or a path, `*` within a name) and `optional` (true:
+  not part of the build, fetched when a feature needs it: `ffmpeg` for the music); `msvc` (a
   Visual Studio channel, an MSVC version and its packages) and `sdk` (a Windows SDK package and the .msi files taken
   from it). The launcher reads the published copy each build, so versions move without a new launcher; it keeps the
   last copy and has its own built in.
@@ -35,8 +38,19 @@ Under `<short>\` beside itself:
 The build runs with the environment Visual Studio's developer prompt would set (INCLUDE, LIB, PATH) and links with
 lld. Downloads resume and every step can run again: what is done is kept.
 
+## Music (game.json `music`)
+
+Section 4 of the window: the player chooses a folder of their music. Each subfolder becomes a soundtrack (everything
+under it, in name order), the files in the folder itself one more, at most 100 of 504 songs (an Xbox's limits).
+Each MP3, FLAC, OGG, Opus, M4A, AAC, WAV, WMA or AIFF is converted to WMA 2 (stereo, 44.1 kHz, 160 kbit/s) with the
+toolchain's `ffmpeg` (fetched the first time), named from its tags ("Artist / Title") or its file name, and the
+Xbox's soundtrack database ST.DB written beside them in `play\hdd\E\TDATA\FFFE0000\MUSIC`, where a game's XAPI
+reads it and its own WMA decoder plays them (core/music.h has the format). `launcher-music.json` there remembers
+what each file became: *Update my music* converts only what changed. A MUSIC folder with an ST.DB not made here (an
+Xbox's, copied over) is left alone.
+
 ## Testing on Linux
 
 `launcher_cli` (built on Linux from the same CMakeLists) runs the steps from a terminal: `plan` (resolves the tools
 from the manifests), `tool <id>` (downloads and unpacks one; not the SDK, which needs msiexec), `game <iso|folder>`,
-`source`, `env`, and `hash`/`untar` for the pieces. With a toolchain.json beside game.json it uses that one.
+`source`, `env`, `music <folder>` (with the ffmpeg on the PATH), and `hash`/`untar` for the pieces. With a toolchain.json beside game.json it uses that one.

@@ -102,6 +102,7 @@ bool LoadPlan(const std::string& toolchain_json, Plan& plan, std::string& error)
         tool.title = t.value("title", tool.id);
         tool.kind = t.value("kind", "zip");
         tool.strip = t.value("strip", 0);
+        tool.optional = t.value("optional", false);
         if (t.contains("keep"))
             for (const json& k : t["keep"]) tool.keep.push_back(k.get<std::string>());
         FileRef f;

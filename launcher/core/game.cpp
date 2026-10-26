@@ -53,6 +53,7 @@ bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string
     game.repo = j.value("repo", "");
     game.branch = j.value("branch", "main");
     game.toolchain = j.value("toolchain", "");
+    game.music = j.value("music", false);
     json releases = j.value("releases", json::object());
     for (auto& [sha, name] : releases.items()) game.releases[Lower(sha)] = name.get<std::string>();
     if (game.title.empty() || game.short_name.empty() || game.repo.empty() || game.releases.empty()) {

@@ -51,6 +51,12 @@ public:
     uint64_t BuildFilesBytes() const;  // source\out, removable once built
     bool RemoveBuildFiles(std::string& error);
 
+    // the game's Xbox custom soundtracks (GameConfig::music) from a folder of the player's music: each file converted
+    // to WMA with ffmpeg (fetched the first time), ST.DB written, the folder remembered; summary: what was done
+    bool ImportMusic(const std::filesystem::path& folder, std::string& summary, std::string& error);
+    std::filesystem::path SavedMusic() const;  // the folder imported last, empty if none
+    std::filesystem::path MusicDir() const;    // where the game finds them: play\hdd\E\TDATA\FFFE0000\MUSIC
+
     // steps, for the test tool
     bool LoadToolchain(Plan& plan, std::string& error);
     bool InstallTool(const Tool& tool, std::string& error);
@@ -62,6 +68,7 @@ public:
 
 private:
     void Log(const std::string& line);
+    void Remember(const std::string& key, const std::string& value);  // an entry of launcher.json, the others kept
     void Say(const std::string& step, const std::string& detail = {}, double fraction = -1);
     int Git(const std::vector<std::string>& args, std::string* out, std::string& error);
     std::filesystem::path ToolPath(const std::string& id) const { return root_ / "tools" / id; }

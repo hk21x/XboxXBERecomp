@@ -104,7 +104,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // the shell's own picker: a disc image (or the xbe), or a folder
-fs::path Pick(HWND owner, bool folder) {
+fs::path Pick(HWND owner, bool folder, const wchar_t* title = nullptr) {
     fs::path out;
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return out;
@@ -112,7 +112,7 @@ fs::path Pick(HWND owner, bool folder) {
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | (folder ? FOS_PICKFOLDERS : 0));
     if (folder) {
-        dlg->SetTitle(L"Choose the folder with the game's files");
+        dlg->SetTitle(title ? title : L"Choose the folder with the game's files");
     } else {
         COMDLG_FILTERSPEC types[] = {{L"Xbox disc image or default.xbe", L"*.iso;default.xbe"}, {L"All files", L"*.*"}};
         dlg->SetFileTypes(2, types);
@@ -162,6 +162,9 @@ struct App {
     std::string error, done_message;
     std::deque<std::string> log;
     uint64_t build_bytes = 0;
+    fs::path music;            // the music folder imported last
+    bool music_job = false;    // the job running or last run imports the music: its result shows under Your music
+    std::string music_summary;
 
     void Start(std::function<bool(std::string&)> job, std::string done) {
         if (busy) return;
@@ -274,10 +277,12 @@ void Draw(App& app, HWND hwnd, ImFont* big) {
                 std::ofstream(app.root / "agreed.txt") << kLicenseUrl;
             }
             app.update = false;
+            app.music_job = false;
             app.Start([&app](std::string& e) { return app.builder->BuildAll(e); }, "The game is built. Press Play.");
         }
         ImGui::EndDisabled();
-        if (!error.empty()) {
+        if (app.music_job) {
+        } else if (!error.empty()) {
             ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", error.c_str());
             if (ImGui::SmallButton("Open launcher.log")) OpenUrl(U8(app.root / "launcher.log"));
         } else if (!done.empty()) {
@@ -313,11 +318,55 @@ void Draw(App& app, HWND hwnd, ImFont* big) {
     ImGui::BeginDisabled(busy || !built || build_bytes == 0);
     std::string clean = "Remove the build files (" + Megabytes(build_bytes) + ")";
     if (ImGui::Button(clean.c_str()))
-        app.Start([&app](std::string& e) { return app.builder->RemoveBuildFiles(e); },
+        app.music_job = false, app.Start([&app](std::string& e) { return app.builder->RemoveBuildFiles(e); },
                   "Build files removed. An update builds everything again.");
     ImGui::EndDisabled();
     ImGui::EndGroup();
     ImGui::TextDisabled("In the game: F1 opens the PC settings. Saves, settings and logs stay in the game's folder.");
+
+    if (app.game.music) {
+        Section("4  Your music");
+        ImGui::TextWrapped("The game plays Xbox custom soundtracks. Choose a folder of your own music: each folder in it "
+                           "becomes a soundtrack (MP3, FLAC, OGG, Opus, M4A, AAC, WAV, WMA, AIFF), and the songs in the "
+                           "folder itself one more. They are converted for the game (ffmpeg, about 90 MB, downloaded "
+                           "the first time; nothing is installed). In the game they are with the custom soundtracks.");
+        if (!app.music.empty()) ImGui::TextDisabled("Your music: %s", U8(app.music).c_str());
+        auto import = [&app](const fs::path& folder) {
+            app.music_job = true;
+            app.Start([&app, folder](std::string& e) {
+                std::string summary;
+                bool ok = app.builder->ImportMusic(folder, summary, e);
+                std::lock_guard l(app.lock);
+                if (ok) app.music = folder, app.music_summary = summary;
+                return ok;
+            }, "Your music is ready.");
+        };
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Choose a music folder...")) {
+            fs::path p = Pick(hwnd, true, L"Choose a folder of your music");
+            if (!p.empty()) import(p);
+        }
+        if (!app.music.empty()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Update my music")) import(app.music);
+            ImGui::SameLine();
+            ImGui::TextDisabled("after adding or changing songs: only those are converted");
+        }
+        ImGui::EndDisabled();
+        if (app.music_job && !busy) {
+            if (!error.empty()) {
+                ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", error.c_str());
+                if (ImGui::SmallButton("Open launcher.log##music")) OpenUrl(U8(app.root / "launcher.log"));
+            } else if (!done.empty()) {
+                std::string summary;
+                {
+                    std::lock_guard l(app.lock);
+                    summary = app.music_summary;
+                }
+                ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "%s %s", done.c_str(), summary.c_str());
+            }
+        }
+    }
 
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Details")) {
@@ -377,6 +426,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     app.agreed = fs::exists(app.root / "agreed.txt", ec);
     fs::path saved = app.builder->SavedGame();
     if (!saved.empty()) app.copy = CheckGame(app.game, saved);
+    app.music = app.builder->SavedMusic();
     app.build_bytes = app.builder->BuildFilesBytes();
     // a new version: looked for once at start when the game was built before
     if (app.builder->Built())
