@@ -181,6 +181,9 @@ float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch
 // whole
 enum Span { kSpanNone, kSpanFrame, kSpanViewport };
 Span DrawSpan(const State& s, const Assembled& a, float width);
+// State::squeeze_beyond: hud[0] negative (the shader keeps no corner on an edge) and the pivot hud[1] moved so the
+// squeeze also moves the draw by squeeze_shift
+void SqueezeBeyond(const State& s, float hud[4]);
 // a depth target sampled as format: through a depth format the console compares (a shadow map), through a 32 bit
 // colour format it reads the word's bytes (PGR2's depth of field weighs its blur by them)
 void DepthRead(uint32_t format, TexInfo& info);

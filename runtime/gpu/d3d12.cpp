@@ -2458,11 +2458,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
                     XStretch(bound_rt_->gw, bound_rt_->gh), c.hud[0]);
     c.hud[1] = guest_w_ * 0.5f;
     if (bound_rt_) c.hud[1] = bound_rt_->gw * 0.5f / s.aa_x;
-    if (c.hud[0] != 1) {
+    if (c.hud[0] != 1 && !s.squeeze_beyond) {
         Span span = DrawSpan(s, a, c.hud[1] * 2);
-        if (span == kSpanNone) c.hud[1] = -c.hud[1];  // squeezed whole
+        if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
+    SqueezeBeyond(s, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
 
