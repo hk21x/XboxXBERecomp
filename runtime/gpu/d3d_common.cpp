@@ -811,6 +811,7 @@ bool ScreenDraw(const State& s) {
 }
 
 Span DrawSpan(const State& s, const Assembled& a, float width) {
+    constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
@@ -846,9 +847,11 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
         hi = std::max(hi, x);
     }
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
-    // an untextured fill ending on one edge and nowhere past it (EoN's sniper scope: black bars from x 0 to 176 and
-    // from 464 to 640 around the sight) keeps that edge too; textured pieces past an edge (the radar's tiles) do not
-    if (!s.textures[0] && lo >= -0.5f && hi <= width + 0.5f && (lo <= 0.5f || hi >= width - 0.5f)) return kSpanFrame;
+    // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
+    // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
+    // radar's tiles) do not
+    if (!s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
+        return kSpanFrame;
     const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
     if (right - left < width - 1 && lo <= left + 0.5f && hi >= right - 0.5f) return kSpanViewport;
     return kSpanNone;
