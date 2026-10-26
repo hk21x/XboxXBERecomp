@@ -317,26 +317,36 @@ void Complete(Voice& v, Packet& pk, uint32_t status) {
 // the bins' headroom as the library's DirectSoundCreate leaves it (the APU shifts each bin's sum down by it)
 constexpr float kMixBinGain = 1.0f / float(1u << XDK_DSound_MixBinHeadroom);
 
-// gain of voice channel c on host left and right. A hardware voice holds two channels and owns a run of slots,
-// which alternate left and right.
-void Levels(Voice& v, float g[2][2]) {
-    static const uint8_t kFront[2] = {0, 1};
-    const uint8_t* bin = v.nbins ? v.bin : kFront;
-    uint32_t n = v.nbins ? v.nbins : 2, voices = (std::max<uint32_t>(v.channels, 1) - 1) / 2 + 1;
-    uint32_t per = std::max<uint32_t>(n / voices, 2), step = v.channels == 1 ? 1 : 2;
+// gain of voice channel c on host left and right, for up to kMixChannels channels. A hardware voice holds two channels
+// and owns a run of slots, which alternate left and right; a buffer of more channels is several voices, each its
+// share of the slots. With no bins listed a mono or stereo voice plays front left and right, one of more channels its
+// channels to front left, front right, centre, LFE, back left and back right in turn (EoN's driving missions mix
+// their music and speech into one 6 channel buffer, the speech in the centre).
+constexpr uint32_t kMixChannels = 6;
+void Levels(Voice& v, float g[kMixChannels][2]) {
+    static const uint8_t kDefault[kMixChannels] = {0, 1, 2, 3, 4, 5};
+    const uint8_t* bin = v.nbins ? v.bin : kDefault;
+    const uint32_t channels = std::min<uint32_t>(std::max<uint32_t>(v.channels, 1), kMixChannels);
+    uint32_t n = v.nbins ? v.nbins : std::max<uint32_t>(channels, 2), voices = (channels - 1) / 2 + 1;
+    uint32_t per = std::max<uint32_t>(n / voices, 2), step = channels == 1 ? 1 : 2;
     // an audible speaker bin: the effect sends are left out (their effects are not modelled). With none, the sends stand
     // in for what the effects would put out: PGR2's radio goes to FXSEND 14 alone, its speaker bins at -10000, and the
     // DSP image plays it into the speakers. Heard dry, left and right kept, at the title's send_level (app.h).
     bool speakers = false;
     for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3 && (!v.nbins || v.bin_mb[bin[s]] > -10000);
-    const bool sends_stereo = !speakers && v.channels == 2;
+    const bool sends_stereo = !speakers && channels == 2;
     const float send_level = !speakers && app::kGame.send_level ? std::clamp(app::kGame.send_level(), 0.0f, 1.0f) : 1.0f;
-    for (uint32_t c = 0; c < 2; c++) {
+    for (uint32_t c = 0; c < kMixChannels; c++) {
         g[c][0] = g[c][1] = 0;
-        for (uint32_t s = c; c < v.channels && s < per && s < n; s += step) {
+        if (c >= channels) continue;
+        // its voice's slots, its own lane of them
+        uint32_t first = (c / 2) * per, last = first + per;
+        for (uint32_t s = first + (channels == 1 ? 0 : c % 2); s < last && s < n; s += step) {
             uint32_t b = bin[s];
             if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
-            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f) * kMixBinGain * send_level;
+            // the centre and the back pair folded into left and right 3 dB down, as a stereo downmix of 5.1 does
+            const float fold = b == 2 || (speakers && (b == 4 || b == 5)) ? 0.707f : 1.0f;
+            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * fold * kMixBinGain * send_level;
             // even bins are left, odd right, 2 is the centre; effect sends standing in: each channel on its own side
             if (sends_stereo) {
                 g[c][c] = std::max(g[c][c], x);
@@ -365,7 +375,7 @@ void Levels(Voice& v, float g[2][2]) {
                       g_top[0] * g_front[1] - g_top[1] * g_front[0]};
     float side = rel ? d[0] : d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
     float pan = dist > 1e-3f ? side / dist : 0.0f;
-    for (int c = 0; c < 2; c++) {
+    for (uint32_t c = 0; c < kMixChannels; c++) {
         g[c][0] *= att * std::min(1.0f, 1.0f - pan);
         g[c][1] *= att * std::min(1.0f, 1.0f + pan);
     }
@@ -398,7 +408,7 @@ void Render(float* out, uint32_t frames) {
         for (auto& [obj, v] : g_voices) {
             if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
             n++;
-            float g[2][2];
+            float g[kMixChannels][2];
             Levels(v, g);
             if (g[0][0] + g[0][1] > 0.25f && top.size() < 600) {
                 char b[120];
@@ -407,7 +417,7 @@ void Render(float* out, uint32_t frames) {
                 top += b;
             }
         }
-        LOGI("dsound: %u voices playing, loud:%s", n, top.c_str());
+        LOGR("dsound: %u voices playing, loud:%s", n, top.c_str());  // asked for: in release logs too
         // XBE_DSOUND_LOG=2: every stream holding packets, whatever its level (a stream that plays nothing audible)
         static const bool all = [] {
             const char* e = std::getenv("XBE_DSOUND_LOG");
@@ -415,11 +425,11 @@ void Render(float* out, uint32_t frames) {
         }();
         for (auto& [obj, v] : g_voices) {
             if (!all || !v.stream || v.packets.empty()) continue;
-            float g[2][2];
+            float g[kMixChannels][2];
             Levels(v, g);
             std::string bins;
             for (uint32_t b = 0; b < v.nbins; b++) bins += " " + std::to_string(v.bin[b]) + ":" + std::to_string(v.bin_mb[v.bin[b]]);
-            LOGI("dsound:   stream %08X tag %X %u ch %uHz freq %u vol %.3f head %.2f gain %.3f/%.3f %s%s%s packets %zu bins%s", obj,
+            LOGR("dsound:   stream %08X tag %X %u ch %uHz freq %u vol %.3f head %.2f gain %.3f/%.3f %s%s%s packets %zu bins%s", obj,
                  v.tag, v.channels, v.rate, v.freq, v.volume, v.headroom, g[0][0], g[0][1], v.paused ? "paused " : "",
                  v.sync ? "sync " : "", v.active ? "active" : "idle", v.packets.size(), bins.c_str());
         }
@@ -438,13 +448,14 @@ void Render(float* out, uint32_t frames) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
         if (solo_tag >= 0 && long(v.tag) != solo_tag) continue;
         if (solo_obj && obj != solo_obj) continue;
-        float g[2][2];
+        float g[kMixChannels][2];
         Levels(v, g);
+        const uint32_t nch = std::min<uint32_t>(std::max<uint32_t>(v.channels, 1), kMixChannels);
         uint32_t base = v.data + v.play_start;
         double step = double(v.freq ? v.freq : v.rate) / audio::kRate;
         for (uint32_t i = 0; i < frames; i++) {
             uint32_t f = uint32_t(v.pos);
-            float a, b, a1, b1;  // this frame and the next, interpolated between
+            uint32_t from = 0, at = f, next_from = 0, next = 0;  // the memory and frames of this sample and the next
             if (v.stream) {
                 while (!v.packets.empty() && f >= FramesOf(v, v.packets.front().size)) {
                     Packet pk = v.packets.front();
@@ -460,17 +471,14 @@ void Render(float* out, uint32_t frames) {
                     break;
                 }
                 Packet& pk = v.packets.front();
-                a = Sample(v, pk.data, f, 0);
-                b = Sample(v, pk.data, f, 1);
+                from = pk.data;
+                at = f;
                 if (f + 1 < FramesOf(v, pk.size)) {
-                    a1 = Sample(v, pk.data, f + 1, 0);
-                    b1 = Sample(v, pk.data, f + 1, 1);
+                    next_from = pk.data, next = f + 1;
                 } else if (v.packets.size() > 1) {
-                    a1 = Sample(v, v.packets[1].data, 0, 0);
-                    b1 = Sample(v, v.packets[1].data, 0, 1);
+                    next_from = v.packets[1].data, next = 0;
                 } else {
-                    a1 = a;
-                    b1 = b;
+                    next_from = pk.data, next = f;
                 }
             } else {
                 uint32_t start = v.looping ? FramesOf(v, v.loop_start) : 0;
@@ -485,17 +493,20 @@ void Render(float* out, uint32_t frames) {
                     f = uint32_t(v.pos);
                 }
                 if (!v.data) break;
-                a = Sample(v, base, f, 0);
-                b = Sample(v, base, f, 1);
-                uint32_t next = f + 1 < end ? f + 1 : v.looping ? start : f;
-                a1 = Sample(v, base, next, 0);
-                b1 = Sample(v, base, next, 1);
+                from = next_from = base;
+                at = f;
+                next = f + 1 < end ? f + 1 : v.looping ? start : f;
             }
-            float t = float(v.pos - f);
-            a += (a1 - a) * t;
-            b += (b1 - b) * t;
-            out[i * 2] += a * g[0][0] + b * g[1][0];
-            out[i * 2 + 1] += a * g[0][1] + b * g[1][1];
+            float t = float(v.pos - f), l = 0, r = 0;
+            for (uint32_t c = 0; c < nch; c++) {
+                if (g[c][0] == 0 && g[c][1] == 0) continue;
+                float a = Sample(v, from, at, int(c)), a1 = Sample(v, next_from, next, int(c));
+                a += (a1 - a) * t;
+                l += a * g[c][0];
+                r += a * g[c][1];
+            }
+            out[i * 2] += l;
+            out[i * 2 + 1] += r;
             v.pos += step;
         }
     }
