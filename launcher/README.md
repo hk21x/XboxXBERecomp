@@ -69,7 +69,8 @@ Xbox's, copied over) is left alone.
 
 `launcher_cli` (built on Linux from the same CMakeLists) runs the steps from a terminal: `plan` (resolves the tools
 from the manifests), `tool <id>` (downloads and unpacks one; not the SDK, which needs msiexec), `game <iso|folder>`,
-`source`, `env`, `music <folder>` (with the ffmpeg on the PATH), and `hash`/`untar` for the pieces. With a toolchain.json beside game.json it uses that one.
+`source`, `xbes` (the game's xbes into the source's assets), `install` (the built exes into play), `env`,
+`music <folder>` (with the ffmpeg on the PATH), and `hash`/`untar` for the pieces. With a toolchain.json beside game.json it uses that one.
 
 `launcher_cli <game.json> <root> latest [version]` prints the latest release and whether a launcher of that version
 would be offered it; `LAUNCHER_VERSION=v1.0.1` makes any command act as that release's launcher.

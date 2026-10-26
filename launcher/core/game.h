@@ -20,6 +20,10 @@ struct GameConfig {
     std::string version = "dev";
     std::string toolchain;     // toolchain.json's address
     bool music = false;        // the game plays Xbox custom soundtracks: the launcher makes them from a music folder
+    // a game of several programs (007: Everything or Nothing's driving.xbe): every xbe the build recompiles, taken from
+    // the player's copy into the source's assets, and every exe the build makes that the game runs, installed beside
+    // the first; game.json "xbes" and "exes", by default only xbe and exe
+    std::vector<std::string> xbes, exes;
 };
 
 bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string& error);
@@ -37,5 +41,7 @@ struct GameCheck {
 GameCheck CheckGame(const GameConfig& game, const std::filesystem::path& path);
 // the xbe's bytes from a checked copy
 bool ReadXbe(const GameConfig& game, const GameCheck& copy, std::vector<uint8_t>& out, std::string& error);
+// another xbe of the copy by its name (GameConfig::xbes)
+bool ReadXbeNamed(const std::string& name, const GameCheck& copy, std::vector<uint8_t>& out, std::string& error);
 
 }  // namespace launcher

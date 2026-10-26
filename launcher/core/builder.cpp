@@ -279,15 +279,18 @@ bool Builder::PutXbe(std::string& error) {
         error = copy.error;
         return false;
     }
-    std::vector<uint8_t> xbe;
-    if (!ReadXbe(game_, copy, xbe, error)) return false;
-    fs::path to = root_ / "source" / "assets" / game_.xbe;
-    std::error_code ec;
-    fs::create_directories(to.parent_path(), ec);
-    std::string have;
-    if (ReadAll(to, have) && have.size() == xbe.size() && std::equal(xbe.begin(), xbe.end(), have.begin())) return true;
-    std::ofstream(to, std::ios::binary).write(reinterpret_cast<const char*>(xbe.data()), std::streamsize(xbe.size()));
-    Log("xbe written to " + U8(to));
+    // every xbe the build recompiles (GameConfig::xbes), written where it is not there already
+    for (const std::string& name : game_.xbes) {
+        std::vector<uint8_t> xbe;
+        if (!ReadXbeNamed(name, copy, xbe, error)) return false;
+        fs::path to = root_ / "source" / "assets" / name;
+        std::error_code ec;
+        fs::create_directories(to.parent_path(), ec);
+        std::string have;
+        if (ReadAll(to, have) && have.size() == xbe.size() && std::equal(xbe.begin(), xbe.end(), have.begin())) continue;
+        std::ofstream(to, std::ios::binary).write(reinterpret_cast<const char*>(xbe.data()), std::streamsize(xbe.size()));
+        Log("xbe written to " + U8(to));
+    }
     return true;
 }
 
@@ -375,7 +378,10 @@ bool Builder::Install(std::string& error) {
         std::string ext = Lower(U8(e.path().extension()));
         if (!e.is_regular_file(ec) || (ext != ".exe" && ext != ".dll")) continue;
         std::string name = Lower(U8(e.path().stem()));
-        if (ext == ".exe" && name != Lower(game_.exe)) continue;  // the build's own tools (xbe_recomp) stay
+        // the game's exes (GameConfig::exes); the build's own tools (xbe_recomp) stay
+        if (ext == ".exe" && std::none_of(game_.exes.begin(), game_.exes.end(),
+                                          [&](const std::string& x) { return Lower(x) == name; }))
+            continue;
         fs::copy_file(e.path(), PlayDir() / e.path().filename(), fs::copy_options::overwrite_existing, ec);
         if (ec) {
             error = "Cannot copy " + U8(e.path().filename()) + " (is the game still running?)";
