@@ -846,6 +846,9 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
         hi = std::max(hi, x);
     }
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
+    // an untextured fill ending on one edge and nowhere past it (EoN's sniper scope: black bars from x 0 to 176 and
+    // from 464 to 640 around the sight) keeps that edge too; textured pieces past an edge (the radar's tiles) do not
+    if (!s.textures[0] && lo >= -0.5f && hi <= width + 0.5f && (lo <= 0.5f || hi >= width - 0.5f)) return kSpanFrame;
     const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
     if (right - left < width - 1 && lo <= left + 0.5f && hi >= right - 0.5f) return kSpanViewport;
     return kSpanNone;

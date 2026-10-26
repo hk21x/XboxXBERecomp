@@ -175,8 +175,8 @@ bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture o
 bool ScreenDraw(const State& s);
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
 // how a squeezed 2D draw is squeezed, by where its vertices reach (kSpanFrame where its positions cannot be read):
-// kSpanFrame reaches both the left and right edge of a frame `width` wide (a full screen quad): its vertices on or past
-// the edges stay there; kSpanViewport fills a viewport narrower than the frame (EoN's Thermovision shrinking the frame
+// kSpanFrame reaches both the left and right edge of a frame `width` wide (a full screen quad), or is an untextured
+// fill ending on one edge and not past it (EoN's sniper scope bars): its vertices on or past the edges stay there; kSpanViewport fills a viewport narrower than the frame (EoN's Thermovision shrinking the frame
 // into a 320x240 corner): not squeezed; kSpanNone (EoN's driving radar: big tiles past the left edge only): squeezed
 // whole
 enum Span { kSpanNone, kSpanFrame, kSpanViewport };
