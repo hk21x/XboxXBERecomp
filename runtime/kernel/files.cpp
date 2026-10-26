@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -114,6 +115,7 @@ struct File : Object {
     const Disc::Entry* entry = nullptr;  // on the disc image instead of a host path
     bool dir = false;
     uint64_t pos = 0;
+    uint32_t reads_at_end = 0;  // reads in a row that found nothing past the end (Transfer)
     std::vector<fs::directory_entry> entries;
     std::vector<const Disc::Entry*> disc_entries;
     size_t next = 0;
@@ -615,8 +617,18 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     }
     f->pos = pos + n;
     if (!write && n < len && FilesLogAll())  // the end of a file reached: copies do it at every file's end
-        LOGI("files: %s read short at %llu: %u of %u bytes (to %08X)", f->xbox.c_str(), (unsigned long long)pos, n,
-             len, buf);
+        if (static std::atomic<int> said{0}; said.fetch_add(1) < 2000)
+            LOGR("files: %s read short at %llu: %u of %u bytes (to %08X)", f->xbox.c_str(), (unsigned long long)pos, n,
+                 len, buf);
+    // a title reading the same place at a file's end over and over (waiting for data that is not there): said at
+    // 100 such reads in a row and every 10000 after
+    if (!write && len && !n) {
+        if (++f->reads_at_end == 100 || f->reads_at_end % 10000 == 0)
+            LOGR("files: %s read at its end (%llu) %u times in a row, %u bytes asked", f->xbox.c_str(),
+                 (unsigned long long)pos, f->reads_at_end, len);
+    } else if (!write) {
+        f->reads_at_end = 0;
+    }
     if (write && n < len) return Finish(*f, 0xC000007F, n, event, apc, apc_ctx, iosb);  // disk full
     // a disc read from the end on completes with nothing read and no error: Forza reads ahead past the end of a file
     // with overlapped reads and treats a failed wait for one as a damaged disc (0x284470)
