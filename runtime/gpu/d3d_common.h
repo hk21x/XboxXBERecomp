@@ -115,6 +115,12 @@ struct DrawShaders {
     ID3DBlob* ps_code = nullptr;
 };
 
+// compiled shaders kept on disk by their Compile hash (shadercache.bin beside the exe), so a shader compiled in one
+// run is not compiled again in the next: D3DCompile takes tens of milliseconds a shader, a stall the first time a
+// draw needs it (a new car, effect or stretch of road in the middle of a race). Thread safe.
+bool CachedShader(uint64_t hash, ID3DBlob** out);  // the blob made from that hash's source, if kept
+void KeepShader(uint64_t hash, ID3DBlob* code);
+
 // the render target's console size in pixels, or the depth buffer's without one
 struct GuestExtent {
     uint32_t w;

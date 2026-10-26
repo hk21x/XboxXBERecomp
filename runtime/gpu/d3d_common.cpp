@@ -1,18 +1,100 @@
 // What the Direct3D 12 and Direct3D 11 renderers share (d3d_common.h)
 #include "gpu/d3d_common.h"
 
+#include <d3dcompiler.h>
+
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "app/app.h"
 #include "core/log.h"
+#include "gpu/backend.h"
 #include "kernel/kernel.h"
 
 namespace gpu {
+
+// ---- the shader cache: "XBESHC1" and a zero byte, then records of hash (8 bytes), size (4) and the blob
+namespace {
+constexpr char kShaderCacheMagic[8] = {'X', 'B', 'E', 'S', 'H', 'C', '1', 0};
+constexpr uint32_t kShaderCacheMaxBlob = 1u << 24;
+struct ShaderCache {
+    std::mutex m;
+    bool loaded = false;
+    std::unordered_map<uint64_t, std::string> blobs;
+    FILE* out = nullptr;
+};
+ShaderCache& Shaders() {
+    static ShaderCache c;
+    return c;
+}
+
+// the records up to the first that is cut short; a file of another kind, too big or none is started again
+void LoadShaderCache(ShaderCache& c) {
+    c.loaded = true;
+    const std::filesystem::path file = app::ExeDir() / "shadercache.bin";
+    std::string all;
+    if (std::ifstream in{file, std::ios::binary}) all.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    size_t good = 0;
+    // past 64 MB (shaders an older SDK made, never asked for again) it starts again
+    if (all.size() <= (64u << 20) && all.size() >= sizeof kShaderCacheMagic && std::memcmp(all.data(), kShaderCacheMagic, sizeof kShaderCacheMagic) == 0) {
+        size_t at = good = sizeof kShaderCacheMagic;
+        while (at + 12 <= all.size()) {
+            uint64_t h;
+            uint32_t n;
+            std::memcpy(&h, all.data() + at, 8);
+            std::memcpy(&n, all.data() + at + 8, 4);
+            if (n > kShaderCacheMaxBlob || at + 12 + n > all.size()) break;
+            c.blobs[h].assign(all.data() + at + 12, n);
+            good = at += 12 + n;
+        }
+    }
+    std::error_code ec;
+    if (good == 0) {
+        if (FILE* f = std::fopen(file.string().c_str(), "wb")) {
+            std::fwrite(kShaderCacheMagic, 1, sizeof kShaderCacheMagic, f);
+            std::fclose(f);
+        }
+    } else if (good != all.size()) {
+        std::filesystem::resize_file(file, good, ec);
+    }
+    c.out = std::fopen(file.string().c_str(), "ab");
+    LOGR("shaders: %zu compiled shaders kept from earlier runs (%s)%s", c.blobs.size(), file.filename().string().c_str(),
+         c.out ? "" : ", not writable: new ones are compiled again next run");
+}
+}  // namespace
+
+bool CachedShader(uint64_t hash, ID3DBlob** out) {
+    ShaderCache& c = Shaders();
+    std::lock_guard lock(c.m);
+    if (!c.loaded) LoadShaderCache(c);
+    auto it = c.blobs.find(hash);
+    if (it == c.blobs.end() || it->second.empty()) return false;
+    if (FAILED(D3DCreateBlob(it->second.size(), out))) return false;
+    std::memcpy((*out)->GetBufferPointer(), it->second.data(), it->second.size());
+    return true;
+}
+
+void KeepShader(uint64_t hash, ID3DBlob* code) {
+    g_shaders_compiled++;
+    if (!code || code->GetBufferSize() > kShaderCacheMaxBlob) return;
+    ShaderCache& c = Shaders();
+    std::lock_guard lock(c.m);
+    if (!c.loaded) LoadShaderCache(c);
+    const uint32_t n = uint32_t(code->GetBufferSize());
+    if (!c.blobs.emplace(hash, std::string(static_cast<const char*>(code->GetBufferPointer()), n)).second || !c.out) return;
+    std::fwrite(&hash, 8, 1, c.out);
+    std::fwrite(&n, 4, 1, c.out);
+    std::fwrite(code->GetBufferPointer(), 1, n, c.out);
+    std::fflush(c.out);
+}
 
 const char* kBlitHlsl = R"(
 cbuffer B : register(b1) { float4 uvrect; float4 opts; };

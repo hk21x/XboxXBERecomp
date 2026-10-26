@@ -1311,6 +1311,10 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     hash = Hash(src.data(), src.size(), entry_seed);
     auto it = blobs_.find(hash);
     if (it != blobs_.end()) return it->second.Get();
+    if (ComPtr<ID3DBlob> kept; CachedShader(hash, kept.GetAddressOf())) {
+        blobs_[hash] = kept;
+        return kept.Get();
+    }
     ComPtr<ID3DBlob> code;
     ComPtr<ID3DBlob> err;
     PerfScope perf_compile{g_perf.compile};
@@ -1324,6 +1328,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
         return nullptr;
     }
     blobs_[hash] = code;
+    KeepShader(hash, code.Get());
     return code.Get();
 }
 

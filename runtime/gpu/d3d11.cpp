@@ -938,6 +938,10 @@ ID3DBlob* D3D11Backend::Compile(const std::string& src, const char* entry, const
     hash = Hash(src.data(), src.size(), entry_seed);
     auto it = blobs_.find(hash);
     if (it != blobs_.end()) return it->second.Get();
+    if (ComPtr<ID3DBlob> kept; CachedShader(hash, kept.GetAddressOf())) {
+        blobs_[hash] = kept;
+        return kept.Get();
+    }
     ComPtr<ID3DBlob> code, err;
     HRESULT hr = D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, entry, profile,
                             D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &err);
@@ -948,6 +952,7 @@ ID3DBlob* D3D11Backend::Compile(const std::string& src, const char* entry, const
         return nullptr;
     }
     blobs_[hash] = code;
+    KeepShader(hash, code.Get());
     return code.Get();
 }
 
