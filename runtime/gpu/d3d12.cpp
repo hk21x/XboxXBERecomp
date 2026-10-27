@@ -570,6 +570,7 @@ private:
         uint64_t vs = 0, ps = 0;
         uint32_t buffers = 0, bytes = 0, stride = 0;
         float v0[4] = {};  // the first buffer's first vertex, its first four floats
+        uint32_t lo = 0, hi = 0;  // an indexed draw's lowest and highest index, with the base added
     };
     std::array<DrawNote, 128> draw_notes_{};
     std::vector<DrawNote> list_notes_;               // every draw of the list being recorded
@@ -2546,6 +2547,15 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         note.stride = a.buffers[0].stride;
         if (a.buffers[0].src && a.buffers[0].bytes >= 16) std::memcpy(note.v0, a.buffers[0].src, 16);
     }
+    if (a.index_count && a.index_src) {
+        uint32_t lo = ~0u, hi = 0;
+        for (uint32_t i = 0; i < a.index_count; i++) {
+            uint32_t v = a.index16 ? static_cast<const uint16_t*>(a.index_src)[i] : static_cast<const uint32_t*>(a.index_src)[i];
+            lo = std::min(lo, v), hi = std::max(hi, v);
+        }
+        note.lo = lo + uint32_t(a.base_vertex);
+        note.hi = hi + uint32_t(a.base_vertex);
+    }
     list_notes_.push_back(note);
     DrawGeometry(a);
     EndCountedDraw(query);
@@ -3031,8 +3041,23 @@ void D3D12Backend::ReportRemoved(const char* where) {
                 for (auto v = sent_notes_.rbegin(); all && !found && v != sent_notes_.rend(); ++v) {
                     if (v->size() > all || all - v->size() > 400 || draws >= v->size()) continue;
                     found = true;
-                    for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < all && i <= draws + 4; i++)
+                    for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < v->size() && i <= draws + 4; i++)
                         LogDrawNote((*v)[i], i == draws ? "  <- stopped here" : "");
+                    // the GPU works on many draws at once: the stopped one may wait on a later one. Those after it
+                    // that stand out (another target, big, another primitive), and the targets they draw to
+                    std::unordered_map<uint32_t, uint32_t> per_target;
+                    int shown = 0;
+                    const DrawNote& at = (*v)[draws];
+                    for (uint32_t i = draws + 5; i < v->size() && i < draws + 1500; i++) {
+                        const DrawNote& d = (*v)[i];
+                        per_target[d.rt]++;
+                        bool odd = d.rt != at.rt || d.count >= 300 || (d.topo != 4 && d.topo != 5) ||
+                                   (d.indexed && d.hi - d.lo >= 0x10000);
+                        if (odd && shown++ < 30) LogDrawNote(d, "  (after)");
+                    }
+                    std::string tg;
+                    for (auto& [rt, n] : per_target) tg += " " + std::to_string(n) + "x" + std::to_string(rt);
+                    LOGR("d3d12:   the 1500 draws after it by target (data, decimal):%s", tg.c_str());
                 }
                 if (all && !found) {
                     std::string sizes;
@@ -3068,10 +3093,10 @@ void D3D12Backend::LogDrawNote(const DrawNote& d, const char* mark) {
         return std::string(b);
     };
     LOGR("d3d12:   draw %llu.%u: topology %u, %u %s from %d, target %08X, textures %s %s, vs %08llX ps %08llX, "
-         "%u buffers, the first %u bytes stride %u starting %g %g %g %g%s",
+         "%u buffers, the first %u bytes stride %u starting %g %g %g %g, indices %u..%u%s",
          (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", int(d.base), d.rt,
          tex(d.t0).c_str(), tex(d.t1).c_str(), (unsigned long long)d.vs, (unsigned long long)d.ps, d.buffers, d.bytes,
-         d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], mark);
+         d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], d.lo, d.hi, mark);
 }
 
 void D3D12Backend::Present(const Surface& front) {
