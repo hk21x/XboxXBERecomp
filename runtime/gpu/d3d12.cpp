@@ -521,6 +521,9 @@ private:
 
     ComPtr<IDXGIFactory4> factory_;
     ComPtr<ID3D12Device> dev_;
+    bool debug_ = false;
+    ComPtr<ID3D12InfoQueue> info_;  // the debug layer's messages, with XBE_D3D12_DEBUG
+    void LogDebugMessages();
     ComPtr<IDXGIAdapter3> adapter3_;  // for the video memory in use (logged when a pipeline cannot be made)
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_;
@@ -667,9 +670,21 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
 }
 
 bool D3D12Backend::CreateDevice() {
-    if (GetEnvironmentVariableW(L"XBE_D3D12_DEBUG", nullptr, 0)) {
+    // XBE_D3D12_DEBUG=1 the debug layer, 2 with GPU based validation (slow); its messages go to the log
+    // (LogDebugMessages). It needs Windows' Graphics Tools (Settings, Optional features)
+    if (const char* e = std::getenv("XBE_D3D12_DEBUG"); e && *e) {
         ComPtr<ID3D12Debug> dbg;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) {
+            dbg->EnableDebugLayer();
+            debug_ = true;
+            ComPtr<ID3D12Debug1> dbg1;
+            bool gpu = *e == '2' && SUCCEEDED(dbg.As(&dbg1));
+            if (gpu) dbg1->SetEnableGPUBasedValidation(TRUE);
+            LOGR("d3d12: debug layer on%s", gpu ? ", with GPU based validation" : "");
+        } else {
+            LOGR("d3d12: XBE_D3D12_DEBUG set but the debug layer is not there (install Graphics Tools: Settings, "
+                 "System, Optional features)");
+        }
     }
     // Device Removed Extended Data: what the GPU last finished and where it faulted, for the report of a lost device
     {
@@ -691,6 +706,7 @@ bool D3D12Backend::CreateDevice() {
         LOGE("d3d12: no device");
         return false;
     }
+    if (debug_ && SUCCEEDED(dev_.As(&info_))) info_->SetMessageCountLimit(4096);
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     if (adapter) adapter.As(&adapter3_);
@@ -3031,6 +3047,7 @@ void D3D12Backend::ReportRemoved(const char* where) {
     HRESULT reason = dev_->GetDeviceRemovedReason();
     if (reason == S_OK) return;
     reported = true;
+    LogDebugMessages();
     LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one",
          where, unsigned(reason), (unsigned long long)lists_, list_draws_);
     ComPtr<dred::Data> data;
@@ -3120,7 +3137,29 @@ void D3D12Backend::LogDrawNote(const DrawNote& d, const char* mark) {
          d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], d.lo, d.hi, mark);
 }
 
+// the debug layer's messages since the last call: each kind three times, 400 in all
+void D3D12Backend::LogDebugMessages() {
+    if (!info_) return;
+    static std::unordered_map<int, int> seen;
+    static int total = 0;
+    static const char* const kSeverity[] = {"corruption", "error", "warning", "info", "message"};
+    UINT64 n = info_->GetNumStoredMessages();
+    for (UINT64 i = 0; i < n && total < 400; i++) {
+        SIZE_T size = 0;
+        if (FAILED(info_->GetMessage(i, nullptr, &size)) || !size) continue;
+        std::vector<uint8_t> buf(size);
+        auto* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (FAILED(info_->GetMessage(i, m, &size))) continue;
+        if (m->Severity >= D3D12_MESSAGE_SEVERITY_INFO || seen[int(m->ID)]++ >= 3) continue;
+        total++;
+        LOGR("d3d12 debug: %s %d (present %llu): %.*s", kSeverity[std::min<int>(int(m->Severity), 4)], int(m->ID),
+             (unsigned long long)presents_, int(m->DescriptionByteLength), m->pDescription);
+    }
+    info_->ClearStoredMessages();
+}
+
 void D3D12Backend::Present(const Surface& front) {
+    LogDebugMessages();
     PerfScope perf_present{g_perf.present};
     // a file named capture beside the exe asks for a capture as F3 does, checked every 30 frames
     if (presents_ % 30 == 0 && !diag::CaptureDir().empty()) {
