@@ -2917,6 +2917,20 @@ void D3D12Backend::Present(const Surface& front) {
         StartCapture();
     }
     ResizeSwap();
+    // a front buffer nothing drew into shows what guest memory holds: logged with the targets made at its data (a
+    // title describing its frame buffers twice, at other sizes, would show its picture stand still)
+    if (front.header && !FindTarget(front, false)) {
+        static std::unordered_set<uint64_t> told;
+        uint32_t fw = 0, fh = 0, data = mem::VirtualFromPhysical(front.data);
+        SurfaceSize(front, fw, fh);
+        if (told.size() < 16 && told.insert(uint64_t(front.header) << 32 | data).second) {
+            std::string at;
+            for (auto& [key, tg] : targets_)
+                if (tg.data == data) at += " " + std::to_string(tg.gw) + "x" + std::to_string(tg.gh) + (tg.depth ? " depth" : "");
+            LOGR("d3d12: presenting %08X (data %08X, %ux%u) at present %llu, no target drew it; targets at its data:%s",
+                 front.header, data, fw, fh, (unsigned long long)presents_, at.empty() ? " none" : at.c_str());
+        }
+    }
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Resolve(*t);
