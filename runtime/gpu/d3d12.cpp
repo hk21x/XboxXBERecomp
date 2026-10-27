@@ -1320,6 +1320,13 @@ void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_AD
     uint32_t si = sampler_slot ? *sampler_slot : EnsureBlitSamplers();
     SetRootTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
     cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // counted with the title's draws, as DRED counts every draw (a lost device's report)
+    DrawNote blit;
+    blit.list = lists_;
+    blit.n = list_draws_++;
+    blit.topo = 99;  // the renderer's own blit
+    blit.count = 3;
+    list_notes_.push_back(blit);
     cl_->DrawInstanced(3, 1, 0, 0);
 }
 
@@ -3019,13 +3026,19 @@ void D3D12Backend::ReportRemoved(const char* where) {
                      done, count, draws, all, ops.c_str());
                 // the draws recorded into it (found by its number of draws) around the one it stopped at
                 bool found = false;
+                // DRED counts the settings window's draws too, after the frame's: a list kept with as many or a
+                // few less
                 for (auto v = sent_notes_.rbegin(); all && !found && v != sent_notes_.rend(); ++v) {
-                    if (v->size() != all) continue;
+                    if (v->size() > all || all - v->size() > 400 || draws >= v->size()) continue;
                     found = true;
                     for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < all && i <= draws + 4; i++)
                         LogDrawNote((*v)[i], i == draws ? "  <- stopped here" : "");
                 }
-                if (all && !found) LOGR("d3d12:   (no list of %u draws kept)", all);
+                if (all && !found) {
+                    std::string sizes;
+                    for (const auto& v : sent_notes_) sizes += " " + std::to_string(v.size());
+                    LOGR("d3d12:   (no list of about %u draws kept; kept:%s)", all, sizes.c_str());
+                }
             }
             if (!nodes) LOGR("d3d12:   DRED: every command list finished");
         }
