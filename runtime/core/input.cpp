@@ -260,7 +260,7 @@ Pad Poll(int port) {
     }
     // a steering wheel plays as controller 1 too, by its own button map (the settings window's Wheel tab)
     float wheel[kControls] = {};
-    if (port == 0 && WheelRead(wheel)) {
+    if (port == 0 && WheelRead(wheel, &p.wheel)) {
         p.connected = true;
         for (int c = 0; c < kControls; c++) {
             out[c] = std::max(out[c], wheel[c]);

@@ -12,6 +12,7 @@ struct Pad {
     uint16_t buttons = 0;  // dpad up/down/left/right, start, back, left thumb, right thumb
     uint8_t analog[8] = {};  // A B X Y black white left trigger right trigger
     int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+    bool wheel = false;  // a steering wheel steers it: the port reports itself a wheel (XInputGetCapabilities)
 };
 
 // every input of the console controller, each 0 to 1: buttons, triggers, and each stick direction on its own
@@ -81,8 +82,9 @@ struct WheelInfo {
 };
 void WheelInit(void* hwnd);  // with the game window (force feedback needs it): starts the wheel thread
 void WheelSetup();           // the bindings again from app::Get(), after the settings window changed them
-// the rig's console inputs, 0 to 1 each in Control order; false when no binding reads a device
-bool WheelRead(float* v);
+// the rig's console inputs, 0 to 1 each in Control order; false when no binding reads a device. steers: the steering
+// is bound to a device that is plugged in
+bool WheelRead(float* v, bool* steers = nullptr);
 void WheelFeedback(const WheelFeel& feel, uint16_t rumble_left, uint16_t rumble_right);
 WheelInfo Wheel();           // the settings window's view
 void WheelTestForce(float level);  // -1 left to 1 right, for half a second

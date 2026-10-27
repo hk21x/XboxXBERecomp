@@ -12,6 +12,10 @@ using namespace kernel;
 #define SYM_XapiVerifyMediaInDrive FFFFFC00
 #define HAS_XapiVerifyMediaInDrive 0
 #endif
+#ifndef SYM_XInputGetCapabilities
+#define SYM_XInputGetCapabilities FFFFFC04
+#define HAS_XInputGetCapabilities 0
+#endif
 
 namespace {
 
@@ -21,18 +25,26 @@ constexpr uint32_t kMemoryUnitType = SYM(XPP_MemoryUnitType);
 
 std::mutex g_ports_lock;
 bool g_poller = false;
+uint32_t g_wheels = 0;  // ports a steering wheel steers, as XInputGetCapabilities last told
 
 void UpdatePorts() {
     std::lock_guard<std::mutex> lock(g_ports_lock);
-    uint32_t cur = 0;
-    for (int p = 0; p < 4; p++)
-        if (input::Poll(p).connected) cur |= 1u << p;
-    uint32_t old = R32(kGamepadType + XDK_XPP_Current);
-    if (cur != old) {
-        W32(kGamepadType + XDK_XPP_Changed, R32(kGamepadType + XDK_XPP_Changed) | (cur ^ old));
-        W32(kGamepadType + XDK_XPP_Current, cur);
-        LOGI("xapi: controller ports now %X", cur);
+    uint32_t cur = 0, wheels = 0;
+    for (int p = 0; p < 4; p++) {
+        input::Pad pad = input::Poll(p);
+        if (pad.connected) cur |= 1u << p;
+        if (pad.connected && pad.wheel) wheels |= 1u << p;
     }
+    uint32_t old = R32(kGamepadType + XDK_XPP_Current);
+    // a port that became or stopped being a wheel is unplugged and plugged again (XGetDeviceChanges reports both),
+    // so the title opens it again and reads its capabilities
+    uint32_t replug = (wheels ^ g_wheels) & cur & old;
+    if (cur != old || replug) {
+        W32(kGamepadType + XDK_XPP_Changed, R32(kGamepadType + XDK_XPP_Changed) | (cur ^ old) | replug);
+        W32(kGamepadType + XDK_XPP_Current, cur);
+        LOGI("xapi: controller ports now %X, wheels %X", cur, wheels);
+    }
+    g_wheels = wheels;
 }
 
 struct Handle {
@@ -110,6 +122,35 @@ HLE_STDCALL(XInputGetState, 2) {
     W16(s + 16, uint16_t(p.ly));
     W16(s + 18, uint16_t(p.rx));
     W16(s + 20, uint16_t(p.ry));
+    return 0;
+}
+
+// XINPUT_CAPABILITIES: SubType, Reserved, In (an XINPUT_GAMEPAD of what it has), Out (XINPUT_RUMBLE). A title may
+// treat a wheel (XINPUT_DEVSUBTYPE_GC_WHEEL) differently, PGR2 without its gamepad dead zone and stick shaping
+HLE_STDCALL(XInputGetCapabilities, 2) {
+    uint32_t port;
+    {
+        std::lock_guard<std::mutex> lock(g_ports_lock);
+        auto it = g_handles.find(a[0]);
+        if (it == g_handles.end()) return 6;
+        port = it->second.port;
+    }
+    input::Pad p = input::Poll(int(port));
+    if (!p.connected) return 1167;
+    uint32_t c = a[1];
+    std::memset(HostPtr(c), 0, 24);
+    G<uint8_t>(c) = p.wheel ? 0x10 : 0x01;  // XINPUT_DEVSUBTYPE_GC_WHEEL, XINPUT_DEVSUBTYPE_GC_GAMEPAD
+    W16(c + 2, 0xFF);
+    std::memset(HostPtr(c + 4), 0xFF, 8);
+    for (int i = 0; i < 4; i++) W16(c + 12 + i * 2, 0xFFFF);
+    W16(c + 20, 0xFFFF);
+    W16(c + 22, 0xFFFF);
+    {
+        std::lock_guard<std::mutex> lock(g_ports_lock);
+        if (p.wheel) g_wheels |= 1u << port;
+        else g_wheels &= ~(1u << port);
+    }
+    LOGI("xapi: controller %u is a %s", port + 1, p.wheel ? "steering wheel" : "gamepad");
     return 0;
 }
 
