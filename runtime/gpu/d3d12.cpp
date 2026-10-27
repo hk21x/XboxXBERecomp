@@ -568,11 +568,15 @@ private:
         uint64_t list = 0;
         uint32_t n = 0, topo = 0, count = 0, indexed = 0, base = 0, rt = 0, t0 = 0, t1 = 0;
         uint64_t vs = 0, ps = 0;
+        uint32_t buffers = 0, bytes = 0, stride = 0;
+        float v0[4] = {};  // the first buffer's first vertex, its first four floats
     };
     std::array<DrawNote, 128> draw_notes_{};
+    std::vector<DrawNote> list_notes_, last_list_notes_;  // every draw of the list being recorded and the one before
     uint32_t draw_note_ = 0, list_draws_ = 0;
     uint64_t lists_ = 0;
     void ReportRemoved(const char* where);
+    void LogDrawNote(const DrawNote& d, const char* mark);
     uint32_t cap_frame_ = 0, cap_frames_ = 1;  // XBE_CAPTURE_FRAMES=N: N frames in a row, this one's number
     char cap_stamp_[16] = {};
     std::unordered_set<uint32_t> cap_seen_;
@@ -826,6 +830,8 @@ void D3D12Backend::Submit(bool wait) {
     ID3D12CommandList* lists[] = {cl_.Get()};
     queue_->ExecuteCommandLists(1, lists);
     lists_++;
+    last_list_notes_.swap(list_notes_);
+    list_notes_.clear();
     queue_->Signal(fence_.Get(), ++fence_value_);
     Frame& f = CurrentFrame();
     f.fence = fence_value_;
@@ -2522,6 +2528,13 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
             a.index_count != 0, uint32_t(a.base_vertex), mem::VirtualFromPhysical(s.rt.data), s.textures[0],
             s.textures[1], s.vs ? s.vs->handle : 0, s.ps ? s.ps->handle : 0};
+    note.buffers = a.buffer_count;
+    if (a.buffer_count) {
+        note.bytes = a.buffers[0].bytes;
+        note.stride = a.buffers[0].stride;
+        if (a.buffers[0].src && a.buffers[0].bytes >= 16) std::memcpy(note.v0, a.buffers[0].src, 16);
+    }
+    list_notes_.push_back(note);
     DrawGeometry(a);
     EndCountedDraw(query);
     g_perf.geometry += PerfMs(perf_step);
@@ -2994,8 +3007,18 @@ void D3D12Backend::ReportRemoved(const char* where) {
                 std::string ops;
                 for (uint32_t i = done >= 3 ? done - 3 : 0; i < count && i < done + 4; i++)
                     ops += (i == done ? " [" : " ") + std::to_string(n->history[i]) + (i == done ? "]" : "");
-                LOGR("d3d12:   unfinished command list: %u of %u operations done, %u draws done; operations:%s", done,
-                     count, draws, ops.c_str());
+                uint32_t all = 0;
+                for (uint32_t i = 0; i < count; i++)
+                    all += n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
+                LOGR("d3d12:   unfinished command list: %u of %u operations done, %u of %u draws done; operations:%s",
+                     done, count, draws, all, ops.c_str());
+                // the draws recorded into it (found by its number of draws) around the one it stopped at
+                for (const std::vector<DrawNote>* v : {&last_list_notes_, &list_notes_}) {
+                    if (v->size() != all || !all) continue;
+                    for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < all && i <= draws + 4; i++)
+                        LogDrawNote((*v)[i], i == draws ? "  <- stopped here" : "");
+                    break;
+                }
             }
             if (!nodes) LOGR("d3d12:   DRED: every command list finished");
         }
@@ -3011,12 +3034,24 @@ void D3D12Backend::ReportRemoved(const char* where) {
         }
     }
     uint32_t total = std::min<uint32_t>(draw_note_, uint32_t(draw_notes_.size()));
-    for (uint32_t i = total > 40 ? total - 40 : 0; i < total; i++) {
-        const DrawNote& d = draw_notes_[(draw_note_ - total + i) % draw_notes_.size()];
-        LOGR("d3d12:   draw %llu.%u: topology %u, %u %s from %u, target %08X, textures %08X %08X, vs %016llX ps %016llX",
-             (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", d.base, d.rt, d.t0,
-             d.t1, (unsigned long long)d.vs, (unsigned long long)d.ps);
-    }
+    LOGR("d3d12:   the last draws recorded:");
+    for (uint32_t i = total > 12 ? total - 12 : 0; i < total; i++)
+        LogDrawNote(draw_notes_[(draw_note_ - total + i) % draw_notes_.size()], "");
+}
+
+void D3D12Backend::LogDrawNote(const DrawNote& d, const char* mark) {
+    // a texture's format and size words, from its guest header
+    auto tex = [](uint32_t t) {
+        char b[48];
+        if (!t) return std::string("none");
+        snprintf(b, sizeof(b), "%08X (format %08X size %08X)", t, kernel::R32(t + 12), kernel::R32(t + 16));
+        return std::string(b);
+    };
+    LOGR("d3d12:   draw %llu.%u: topology %u, %u %s from %d, target %08X, textures %s %s, vs %08llX ps %08llX, "
+         "%u buffers, the first %u bytes stride %u starting %g %g %g %g%s",
+         (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", int(d.base), d.rt,
+         tex(d.t0).c_str(), tex(d.t1).c_str(), (unsigned long long)d.vs, (unsigned long long)d.ps, d.buffers, d.bytes,
+         d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], mark);
 }
 
 void D3D12Backend::Present(const Surface& front) {
