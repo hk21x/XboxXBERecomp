@@ -224,7 +224,7 @@ uint32_t ScratchPush(uint32_t bytes = 0) {
     uint32_t need = std::max<uint32_t>(0x10000, (bytes + 0x1FFF) & ~0xFFFu);
     if (need > g_scratch_size) {
         if (g_scratch_push) mem::FreeContiguous(g_scratch_push);
-        g_scratch_push = mem::AllocContiguous(need, 0, 0xFFFFFFFF, 0x1000);
+        g_scratch_push = mem::AllocHostContiguous(need, 0x1000);
         g_scratch_size = need;
     }
     SetDev(kDevPush, g_scratch_push);
@@ -247,14 +247,17 @@ gpu::Surface SurfaceOf(uint32_t header) {
 
 // hdr: where the surface object goes, 0 for a new one; keep: a title's own surface there keeps its memory when it
 // holds this one (the title may find that memory again another way: 007: Everything or Nothing's GetTile)
-uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0, bool keep = false) {
+// host: memory the title never sees (mem::AllocHostContiguous), for the renderer's own surfaces
+uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0, bool keep = false, bool host = false) {
     uint32_t pitch = (w * bpp + 63) & ~63u;
     uint32_t phys = 0;
     if (keep && hdr && R32(hdr + 4) && R32(hdr + 16)) {
         uint32_t size = R32(hdr + 16), had = ((size >> 24) + 1) * 64 * (((size >> 12) & 0xFFF) + 1);
         if (had >= pitch * h) phys = R32(hdr + 4) & 0x0FFFFFFF;
     }
-    if (!phys) phys = mem::PhysicalFromVirtual(mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000));
+    if (!phys)
+        phys = mem::PhysicalFromVirtual(host ? mem::AllocHostContiguous(pitch * h, 0x1000)
+                                             : mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000));
     if (!hdr) hdr = mem::AllocSystem(24);
     W32(hdr + 0, 0x000D0001);  // surface, one reference, one internal reference held by the device
     W32(hdr + 4, phys);
@@ -459,7 +462,7 @@ bool MakeFrameBuffers(uint32_t pp) {
                                       : XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0
                                                                                    : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24,
                                       given[kSlot[i]] != 0);
-        g_copy_target = NewSurface(w, h, color_fmt, 4);
+        g_copy_target = NewSurface(w, h, color_fmt, 4, 0, false, true);
         g_depth = 0;
         if (auto_depth || given_depth) {
             uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
@@ -1802,7 +1805,7 @@ uint32_t g_up_ring = 0, g_up_pos = 0, g_up_header = 0, g_up_fence[2] = {};
 
 uint32_t UpVertices(const void* src, uint32_t bytes) {
     if (!g_up_ring) {
-        g_up_ring = mem::AllocContiguous(kUpRing, 0, 0xFFFFFFFF, 0x1000);
+        g_up_ring = mem::AllocHostContiguous(kUpRing, 0x1000);
         g_up_header = mem::AllocSystem(20);
         std::memset(HostPtr(g_up_header), 0, 20);
         W32(g_up_header, 1);  // a vertex buffer, one reference
