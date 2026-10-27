@@ -60,6 +60,10 @@ using namespace kernel;
 #define SYM_D3DDevice_SetVertexShaderConstant FFFFFE0C
 #define HAS_D3DDevice_SetVertexShaderConstant 0
 #endif
+#ifndef SYM_D3DDevice_GetRasterStatus
+#define SYM_D3DDevice_GetRasterStatus FFFFFE13
+#define HAS_D3DDevice_GetRasterStatus 0
+#endif
 #ifndef SYM_D3DDevice_BeginPushBuffer
 #define SYM_D3DDevice_BeginPushBuffer FFFFFE11
 #define HAS_D3DDevice_BeginPushBuffer 0
@@ -356,6 +360,9 @@ void ApplyDefaultStates(X86Context& ctx) {
 constexpr bool kVBlank = XDK_CDevice_VBlankCount != xdk::kUnknown && XDK_CDevice_VBlankEvent != xdk::kUnknown &&
                          XDK_CDevice_VBlankCallback != xdk::kUnknown;
 
+// when the last vertical blank began (steady clock nanoseconds), for the raster position
+std::atomic<int64_t> g_vblank_time{0};
+
 // what the library's vertical blank interrupt leaves for the title: count, event, callback
 void VerticalBlank(X86Context& ctx) {
     using clock = std::chrono::steady_clock;
@@ -366,6 +373,7 @@ void VerticalBlank(X86Context& ctx) {
         std::this_thread::sleep_until(next);
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
+        g_vblank_time = clock::now().time_since_epoch().count();
         ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
         SetEvent(*event);
         if (uint32_t callback = Dev(XDK_CDevice_VBlankCallback); callback && XDK_VBlankCallback_Count) {
@@ -702,6 +710,18 @@ HLE_STDCALL(D3D_MakeRequestedSpace, 2) {
 
 HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    return 0;
+}
+// (D3DRASTER_STATUS*): InVBlank, ScanLine. The library reads the CRTC's raster register through the GPU register base
+// the host device does not have (NightFire's XMV player polls it); the position is the time since the host's last
+// vertical blank over a 525 line frame, 480 of them shown, ScanLine 0 within the blank as the library reports it
+HLE_STDCALL(D3DDevice_GetRasterStatus, 1) {
+    constexpr int64_t kFrameNs = 16666667, kLines = 525, kShown = 480;
+    int64_t since = std::chrono::steady_clock::now().time_since_epoch().count() - g_vblank_time.load();
+    int64_t line = std::clamp<int64_t>(since, 0, kFrameNs - 1) * kLines / kFrameNs;
+    bool blank = line >= kShown;
+    W32(a[0], blank ? 1 : 0);
+    W32(a[0] + 4, blank ? 0 : uint32_t(line));
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }

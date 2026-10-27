@@ -58,6 +58,7 @@ D3DDevice_EndPush = {}
 D3DDevice_FlushVertexCache = {}
 D3DDevice_GetBackBuffer2 = {sec = "D3D", len = 0x43, hash = "0x98CB0C3795F52E34", calls = [[0x37, "0x4DD4FEAA2A7C506E", []], [0x37, "0x4DD4FEAA2A7C506E", []]], k = [0x21C0, 0x21C0], ret = 4, regs = []}
 D3DDevice_GetDepthStencilSurface2 = {sec = "D3D", len = 0x1E, hash = "0xE9197213B86373B", calls = [[0x37, "0x4DD4FEAA2A7C506E", []]], k = [0x21B8], ret = 0, regs = []}
+D3DDevice_GetRasterStatus = {sec = "D3D", len = 0x6B, hash = "0xA0157E236749345A", k = [0x4FC, 0x7FF, 0xFFF, 0x21C4], ret = 4, regs = []}
 D3DDevice_GetRenderTarget2 = {sec = "D3D", len = 0x1A, hash = "0x260301336BB8F0C0", calls = [[0x37, "0x4DD4FEAA2A7C506E", []]], k = [0x21B4], ret = 0, regs = []}
 D3DDevice_GetVertexShaderFunction = {}
 D3DDevice_InsertFence = {}
