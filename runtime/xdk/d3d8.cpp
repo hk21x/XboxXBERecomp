@@ -317,6 +317,14 @@ void UpdateSampleScale() {
     else if (mode == 1) (made_y == 2 && made_x == 1 ? y : x) = 2;
     g_state.aa_x = std::max<uint32_t>(x / made_x, 1);
     g_state.aa_y = std::max<uint32_t>(y / made_y, 1);
+    // XBE_NO_SAMPLE_SCALE=1 (experiment): the modes are not applied, every draw lands 1x1
+    static const bool off = [] {
+        const char* e = std::getenv("XBE_NO_SAMPLE_SCALE");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d: XBE_NO_SAMPLE_SCALE=1, the multisample modes are not applied");
+        return v;
+    }();
+    if (off) g_state.aa_x = g_state.aa_y = 1;
     // each target the back buffer's mode is asked on, once: applied (the back buffer) or not (another target)
     uint32_t asked = g_state.rs[gpu::kRsMultiSampleMode];
     if (asked && g_state.rt.header) {
