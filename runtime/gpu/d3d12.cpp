@@ -572,7 +572,8 @@ private:
         float v0[4] = {};  // the first buffer's first vertex, its first four floats
     };
     std::array<DrawNote, 128> draw_notes_{};
-    std::vector<DrawNote> list_notes_, last_list_notes_;  // every draw of the list being recorded and the one before
+    std::vector<DrawNote> list_notes_;               // every draw of the list being recorded
+    std::deque<std::vector<DrawNote>> sent_notes_;   // and of the last lists sent (several may be on the GPU at once)
     uint32_t draw_note_ = 0, list_draws_ = 0;
     uint64_t lists_ = 0;
     void ReportRemoved(const char* where);
@@ -830,7 +831,11 @@ void D3D12Backend::Submit(bool wait) {
     ID3D12CommandList* lists[] = {cl_.Get()};
     queue_->ExecuteCommandLists(1, lists);
     lists_++;
-    last_list_notes_.swap(list_notes_);
+    sent_notes_.push_back(std::move(list_notes_));
+    if (sent_notes_.size() > 6) {
+        list_notes_ = std::move(sent_notes_.front());  // its storage reused
+        sent_notes_.pop_front();
+    }
     list_notes_.clear();
     queue_->Signal(fence_.Get(), ++fence_value_);
     Frame& f = CurrentFrame();
@@ -3013,12 +3018,14 @@ void D3D12Backend::ReportRemoved(const char* where) {
                 LOGR("d3d12:   unfinished command list: %u of %u operations done, %u of %u draws done; operations:%s",
                      done, count, draws, all, ops.c_str());
                 // the draws recorded into it (found by its number of draws) around the one it stopped at
-                for (const std::vector<DrawNote>* v : {&last_list_notes_, &list_notes_}) {
-                    if (v->size() != all || !all) continue;
+                bool found = false;
+                for (auto v = sent_notes_.rbegin(); all && !found && v != sent_notes_.rend(); ++v) {
+                    if (v->size() != all) continue;
+                    found = true;
                     for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < all && i <= draws + 4; i++)
                         LogDrawNote((*v)[i], i == draws ? "  <- stopped here" : "");
-                    break;
                 }
+                if (all && !found) LOGR("d3d12:   (no list of %u draws kept)", all);
             }
             if (!nodes) LOGR("d3d12:   DRED: every command list finished");
         }
