@@ -381,12 +381,28 @@ bool Builder::Install(std::string& error) {
     return true;
 }
 
+bool Builder::PathTooLong(std::string& message) const {
+    size_t length = root_.wstring().size();
+    if (length <= kMaxRootLength) return false;
+    message = "This folder's path is too long for Microsoft's Windows SDK installer (" + std::to_string(length) +
+              " characters, at most " + std::to_string(kMaxRootLength) + "): " + U8(root_) +
+              ". Move " + game_.short_name + "Launcher.exe to a short folder, such as C:\\Games\\" + game_.short_name +
+              ", and run it from there.";
+    return true;
+}
+
 bool Builder::BuildAll(std::string& error) {
     cancel = false;
-    if (!LoadToolchain(plan_, error)) return false;
-    for (const Tool& t : plan_.tools)
-        if (!t.optional && !InstallTool(t, error)) return false;
-    if (!GetSource(error) || !PutXbe(error) || !Compile(error) || !Install(error)) return false;
+    auto steps = [&] {
+        if ((!Built() && PathTooLong(error)) || !LoadToolchain(plan_, error)) return false;
+        for (const Tool& t : plan_.tools)
+            if (!t.optional && !InstallTool(t, error)) return false;
+        return GetSource(error) && PutXbe(error) && Compile(error) && Install(error);
+    };
+    if (!steps()) {
+        if (error != "cancelled") Log("build stopped: " + error);
+        return false;
+    }
     Say("Ready", "", 1);
     return true;
 }

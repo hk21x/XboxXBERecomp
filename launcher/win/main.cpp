@@ -269,7 +269,10 @@ void Draw(App& app, HWND hwnd, ImFont* big) {
         } else {
             ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "Built and ready.");
         }
-        bool can = app.copy.ok && (built || app.agreed);
+        std::string too_long;
+        bool long_path = !built && app.builder->PathTooLong(too_long);  // built: the SDK is unpacked already
+        if (long_path) ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", too_long.c_str());
+        bool can = app.copy.ok && (built || app.agreed) && !long_path;
         ImGui::BeginDisabled(!can);
         const char* label = !built ? "Build" : app.update ? "Update" : "Rebuild";
         if (ImGui::Button(label, ImVec2(10 * em, 0))) {

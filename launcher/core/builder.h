@@ -44,8 +44,12 @@ public:
     bool SetGame(const GameCheck& copy, std::string& error);
     std::filesystem::path SavedGame() const;  // the copy remembered from last time, empty if none
 
-    // the whole build: tools, source, xbe, compile, install. Returns false with the reason
+    // the whole build: tools, source, xbe, compile, install. Returns false with the reason (also in launcher.log)
     bool BuildAll(std::string& error);
+    // the launcher's folder is too deep for the Windows SDK: msiexec (which unpacks it) fails past 260 characters, and
+    // the SDK's deepest headers lie about 130 below tools\; message: what to do
+    static constexpr size_t kMaxRootLength = 80;
+    bool PathTooLong(std::string& message) const;
     bool UpdateAvailable(bool& available, std::string& error);  // the source behind its branch's head
     bool Launch(std::string& error);
     uint64_t BuildFilesBytes() const;  // source\out, removable once built
