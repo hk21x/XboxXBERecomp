@@ -2465,6 +2465,14 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
             bound_rt_ = bound_ds_ = nullptr;  // the save may have drawn: the targets are bound again
         }
     }
+    // XBE_SKIP_TARGET=data (hex, experiment): draws into that target are left out
+    static const uint32_t skip_target = [] {
+        const char* e = std::getenv("XBE_SKIP_TARGET");
+        uint32_t v = e && *e ? uint32_t(std::strtoul(e, nullptr, 16)) & 0x0FFFFFFF : 0;
+        if (v) LOGR("d3d12: XBE_SKIP_TARGET leaves out draws into target %08X", v);
+        return v;
+    }();
+    if (skip_target && s.rt.data && (s.rt.data & 0x0FFFFFFF) == skip_target) return;
     MakeDescriptorRoom();
     if (DepthCopy(s)) return;
     if (diag::SkippedDraw(s.vs_handle)) {
