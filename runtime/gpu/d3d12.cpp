@@ -1020,6 +1020,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
     t.sig = MemSig(slot.data, t.bytes);
+    if (!depth) LOG_FIRST(48, "d3d12: colour target %08X %ux%u made (present %llu)", slot.data, slot.gw, slot.gh,
+                          (unsigned long long)presents_);
     auto& ref = targets_[slot.key] = std::move(t);
     targets_gen_++;
     return &ref;
@@ -2932,7 +2934,12 @@ void D3D12Backend::Present(const Surface& front) {
         }
     }
     Target* t = EnsureTarget(front, false);
-    if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
+    if (t && LatchCpuWrite(*t)) {
+        if (++reloads_[t->data | 1] <= 3)  // counted apart from the reloads before a draw
+            LOGR("d3d12: presented %08X %ux%u reloaded from guest memory (present %llu)", t->data, t->gw, t->gh,
+                 (unsigned long long)presents_);
+        UploadTarget(*t, front);
+    }
     if (t) Resolve(*t);
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3244,6 +3251,8 @@ void D3D12Backend::Sync(uint32_t data, uint32_t) {
                   it->second.w, it->second.h);
     }
     Target& t = it->second;
+    LOG_FIRST(16, "d3d12: read-back of %08X %ux%u into guest memory (present %llu)", data, t.gw, t.gh,
+              (unsigned long long)presents_);
     // src.down, when there is one, stays alive until ReadBack is done
     CopySource src = PrepareCopySource(t, {});
     if (!src.res) return;
