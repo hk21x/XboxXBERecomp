@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <bit>
 #include <chrono>
@@ -561,6 +562,17 @@ private:
     uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
     bool cap_vs_before_ = false;  // XBE_CAPTURE_DRAWS=vs: the target saved before the first such draw
     std::unordered_map<uint32_t, uint32_t> reloads_;  // targets reloaded from guest memory, for the log
+    // the last draws recorded, for the report of a lost device: the command list (counted by Submit), the draw's
+    // number in it, its geometry, shaders, target and first two textures
+    struct DrawNote {
+        uint64_t list = 0;
+        uint32_t n = 0, topo = 0, count = 0, indexed = 0, base = 0, rt = 0, t0 = 0, t1 = 0;
+        uint64_t vs = 0, ps = 0;
+    };
+    std::array<DrawNote, 128> draw_notes_{};
+    uint32_t draw_note_ = 0, list_draws_ = 0;
+    uint64_t lists_ = 0;
+    void ReportRemoved(const char* where);
     uint32_t cap_frame_ = 0, cap_frames_ = 1;  // XBE_CAPTURE_FRAMES=N: N frames in a row, this one's number
     char cap_stamp_[16] = {};
     std::unordered_set<uint32_t> cap_seen_;
@@ -651,6 +663,14 @@ bool D3D12Backend::CreateDevice() {
     if (GetEnvironmentVariableW(L"XBE_D3D12_DEBUG", nullptr, 0)) {
         ComPtr<ID3D12Debug> dbg;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
+    }
+    // Device Removed Extended Data: what the GPU last finished and where it faulted, for the report of a lost device
+    {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        }
     }
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory_)))) return false;
     // dedicated GPU first on hybrid laptops
@@ -795,13 +815,17 @@ void D3D12Backend::Begin() {
     bound_rt_ = bound_ds_ = nullptr;
     std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
     ForgetDrawState();
+    list_draws_ = 0;
 }
 
 void D3D12Backend::Submit(bool wait) {
-    if (HRESULT hr = cl_->Close(); FAILED(hr))
+    if (HRESULT hr = cl_->Close(); FAILED(hr)) {
         LOG_FIRST(4, "d3d12: command list close failed %08X (device %08X)", unsigned(hr), unsigned(dev_->GetDeviceRemovedReason()));
+        ReportRemoved("closing a command list");
+    }
     ID3D12CommandList* lists[] = {cl_.Get()};
     queue_->ExecuteCommandLists(1, lists);
+    lists_++;
     queue_->Signal(fence_.Get(), ++fence_value_);
     Frame& f = CurrentFrame();
     f.fence = fence_value_;
@@ -826,11 +850,13 @@ void D3D12Backend::Flush() {
 void D3D12Backend::WaitFence(uint64_t value) {
     fence_->SetEventOnCompletion(value, event_);
     // a wait past 5 s is logged (a GPU that stopped, or work that takes that long), then waited out
-    for (int i = 0; WaitForSingleObject(event_, 5000) == WAIT_TIMEOUT; i++)
+    for (int i = 0; WaitForSingleObject(event_, 5000) == WAIT_TIMEOUT; i++) {
         if (i < 4)
             LOGR("d3d12: still waiting for the GPU after %d s (fence %llu of %llu, device %08X)", (i + 1) * 5,
                  (unsigned long long)fence_->GetCompletedValue(), (unsigned long long)value,
                  unsigned(dev_->GetDeviceRemovedReason()));
+        ReportRemoved("waiting for the GPU");
+    }
 }
 
 void D3D12Backend::SetFullViewport(uint32_t w, uint32_t h) {
@@ -1536,6 +1562,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
     if (HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)); FAILED(hr)) {
+        ReportRemoved("making a pipeline");
         DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
         if (adapter3_) adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
         LOGE("d3d12: pipeline creation failed %08X (samples %u, colour %u format %u, depth %u, topology %u, fill %u; "
@@ -2491,6 +2518,10 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // geometry, counted while the title runs a visibility test
     perf_step = PerfNow();
     uint32_t query = BeginCountedDraw(s);
+    DrawNote& note = draw_notes_[draw_note_++ % draw_notes_.size()];
+    note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
+            a.index_count != 0, uint32_t(a.base_vertex), mem::VirtualFromPhysical(s.rt.data), s.textures[0],
+            s.textures[1], s.vs ? s.vs->handle : 0, s.ps ? s.ps->handle : 0};
     DrawGeometry(a);
     EndCountedDraw(query);
     g_perf.geometry += PerfMs(perf_step);
@@ -2899,6 +2930,95 @@ void LogPerf() {
     }
 }
 
+// DRED's output, declared here with the Windows SDK's layout (the MinGW headers the Linux check uses lack it):
+// ID3D12DeviceRemovedExtendedData, D3D12_AUTO_BREADCRUMB_NODE, D3D12_DRED_ALLOCATION_NODE, D3D12_DRED_PAGE_FAULT_OUTPUT
+namespace dred {
+constexpr GUID kIid = {0x98931D33, 0x5AE8, 0x4791, {0xAA, 0x3C, 0x1A, 0x73, 0xA2, 0x93, 0x4E, 0x71}};
+constexpr int kDrawInstanced = 3, kDrawIndexedInstanced = 4;  // D3D12_AUTO_BREADCRUMB_OP
+struct Node {
+    const char* list_a;
+    const wchar_t* list_w;
+    const char* queue_a;
+    const wchar_t* queue_w;
+    void* list;
+    void* queue;
+    UINT32 count;
+    const UINT32* last;
+    const int* history;
+    const Node* next;
+};
+struct Breadcrumbs {
+    const Node* head;
+};
+struct Allocation {
+    const char* name_a;
+    const wchar_t* name_w;
+    int type;
+    const Allocation* next;
+};
+struct PageFault {
+    UINT64 va;
+    const Allocation* existing;
+    const Allocation* freed;
+};
+struct Data : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetAutoBreadcrumbsOutput(Breadcrumbs* out) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPageFaultAllocationOutput(PageFault* out) = 0;
+};
+}  // namespace dred
+
+// the device lost (removed or reset): once, its reason, DRED's unfinished command lists (operations and draws
+// done) and page fault, and the last draws recorded, the one the GPU stopped at among them
+void D3D12Backend::ReportRemoved(const char* where) {
+    static bool reported = false;
+    if (reported || !dev_) return;
+    HRESULT reason = dev_->GetDeviceRemovedReason();
+    if (reason == S_OK) return;
+    reported = true;
+    LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one",
+         where, unsigned(reason), (unsigned long long)lists_, list_draws_);
+    ComPtr<dred::Data> data;
+    if (FAILED(dev_->QueryInterface(dred::kIid, reinterpret_cast<void**>(data.GetAddressOf())))) {
+        LOGR("d3d12:   no DRED");
+    } else {
+        dred::Breadcrumbs bc{};
+        if (SUCCEEDED(data->GetAutoBreadcrumbsOutput(&bc))) {
+            int nodes = 0;
+            for (const dred::Node* n = bc.head; n && nodes < 6; n = n->next) {
+                uint32_t count = n->count, done = n->last ? *n->last : 0;
+                if (done >= count) continue;
+                nodes++;
+                uint32_t draws = 0;
+                for (uint32_t i = 0; i < done && i < count; i++)
+                    draws += n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
+                std::string ops;
+                for (uint32_t i = done >= 3 ? done - 3 : 0; i < count && i < done + 4; i++)
+                    ops += (i == done ? " [" : " ") + std::to_string(n->history[i]) + (i == done ? "]" : "");
+                LOGR("d3d12:   unfinished command list: %u of %u operations done, %u draws done; operations:%s", done,
+                     count, draws, ops.c_str());
+            }
+            if (!nodes) LOGR("d3d12:   DRED: every command list finished");
+        }
+        dred::PageFault pf{};
+        if (SUCCEEDED(data->GetPageFaultAllocationOutput(&pf)) && pf.va) {
+            LOGR("d3d12:   page fault at %016llX", (unsigned long long)pf.va);
+            int k = 0;
+            for (const dred::Allocation* a = pf.existing; a && k < 6; a = a->next, k++)
+                LOGR("d3d12:     there: %s (type %d)", a->name_a ? a->name_a : "unnamed", a->type);
+            k = 0;
+            for (const dred::Allocation* a = pf.freed; a && k < 6; a = a->next, k++)
+                LOGR("d3d12:     freed just before: %s (type %d)", a->name_a ? a->name_a : "unnamed", a->type);
+        }
+    }
+    uint32_t total = std::min<uint32_t>(draw_note_, uint32_t(draw_notes_.size()));
+    for (uint32_t i = total > 40 ? total - 40 : 0; i < total; i++) {
+        const DrawNote& d = draw_notes_[(draw_note_ - total + i) % draw_notes_.size()];
+        LOGR("d3d12:   draw %llu.%u: topology %u, %u %s from %u, target %08X, textures %08X %08X, vs %016llX ps %016llX",
+             (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", d.base, d.rt, d.t0,
+             d.t1, (unsigned long long)d.vs, (unsigned long long)d.ps);
+    }
+}
+
 void D3D12Backend::Present(const Surface& front) {
     PerfScope perf_present{g_perf.present};
     // a file named capture beside the exe asks for a capture as F3 does, checked every 30 frames
@@ -2950,7 +3070,8 @@ void D3D12Backend::Present(const Surface& front) {
     DeliverReports();
     bool vsync = app::Get().vsync;
     auto perf_swap = PerfNow();
-    swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (FAILED(swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)))
+        ReportRemoved("presenting");
     g_perf.swap += PerfMs(perf_swap);
 
     presents_++;
