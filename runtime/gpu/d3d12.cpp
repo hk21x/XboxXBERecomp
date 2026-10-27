@@ -270,6 +270,7 @@ private:
     Alloc Upload(uint64_t size, uint64_t align = 256);
     Frame& CurrentFrame() { return frames_[frame_ % kFrames]; }
     uint32_t AllocSrvSlots(uint32_t n);
+    void MakeDescriptorRoom();
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(ID3D12DescriptorHeap* h, uint32_t i, uint32_t inc) {
         auto c = h->GetCPUDescriptorHandleForHeapStart();
         c.ptr += size_t(i) * inc;
@@ -908,11 +909,30 @@ D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
     return {r.Get(), 0, p, r->GetGPUVirtualAddress()};
 }
 
+// A draw takes a few view and sampler slots (16 kept in hand). When the frame's views or the samplers would run
+// out, the GPU first finishes everything recorded (Flush): reusing a slot a recorded draw still reads gave that draw
+// other descriptors, which hung NVIDIA GPUs (EoN's MI6 Training: 7800 draws a frame used up the frame's 32768 views
+// and the ring started again over its first draws). Called before a draw records anything.
+void D3D12Backend::MakeDescriptorRoom() {
+    bool views = CurrentFrame().srv + 16 > kSrvCount / kFrames, samplers = smp_used_ + 16 > kSamplerCount;
+    if (!views && !samplers) return;
+    static int told = 0;
+    if (told++ < 4)
+        LOGR("d3d12: %s nearly used up (views %u of %u this frame, samplers %u of %u): the GPU finishes first",
+             views ? "descriptors" : "samplers", CurrentFrame().srv, kSrvCount / kFrames, smp_used_, kSamplerCount);
+    Flush();  // Submit(true): the frame's views start again
+    if (samplers) {
+        samplers_.clear();
+        smp_used_ = 0;
+    }
+}
+
 uint32_t D3D12Backend::AllocSrvSlots(uint32_t n) {
     Frame& f = CurrentFrame();
     const uint32_t per = kSrvCount / kFrames;
     if (f.srv + n > per) {
-        LOG_FIRST(4, "d3d12: descriptor ring wrapped within a frame");
+        static int told = 0;
+        if (told++ < 4) LOGR("d3d12: descriptor ring wrapped within a frame (views a draw still reads may be overwritten)");
         f.srv = 0;
         ring_gen_++;
     }
@@ -2423,6 +2443,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
             bound_rt_ = bound_ds_ = nullptr;  // the save may have drawn: the targets are bound again
         }
     }
+    MakeDescriptorRoom();
     if (DepthCopy(s)) return;
     if (diag::SkippedDraw(s.vs_handle)) {
         static bool said = false;
