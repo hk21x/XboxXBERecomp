@@ -360,9 +360,14 @@ constexpr bool kVBlank = XDK_CDevice_VBlankCount != xdk::kUnknown && XDK_CDevice
 void VerticalBlank(X86Context& ctx) {
     using clock = std::chrono::steady_clock;
     uint32_t info = mem::AllocSystem(12), swap_data = mem::AllocSystem(20), shown = 0;
-    auto next = clock::now();
+    // blank k at app::VblankEpoch() + k periods, the clock the frames are paced on; after a stall the missed blanks
+    // are skipped, not caught up
+    int64_t k = (clock::now() - app::VblankEpoch()) / app::kVblankPeriod;
     for (;;) {
-        next = std::max(next + std::chrono::microseconds(16667), clock::now());
+        k++;
+        auto next = app::VblankEpoch() + app::kVblankPeriod * k;
+        if (auto now = clock::now(); next < now - app::kVblankPeriod)
+            k = (now - app::VblankEpoch()) / app::kVblankPeriod + 1, next = app::VblankEpoch() + app::kVblankPeriod * k;
         std::this_thread::sleep_until(next);
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
@@ -820,6 +825,25 @@ std::atomic<uint32_t> g_presents{0};
 // vertical blanks a frame the title asked for (D3DPRESENT_PARAMETERS or SetPresentationInterval, kept in a library
 // global the swap reads): DEFAULT 0 and ONE 1 wait for one, TWO 2 to FOUR 4 for that many, IMMEDIATE 0x80000000
 // none, and the _OR_IMMEDIATE values 0x80000001 to 0x80000003 as many unless the frame is late. 1 when unknown.
+uint32_t PresentVblanks();
+// frames paced at a rate dividing 60 should each see the same number of blanks go by (app::PaceOnBlanks): a line every
+// 600 frames with any that saw another number, while the frames keep up (a slow frame sees more, rightly)
+void CountBlanks(uint32_t vblanks) {
+    using clock = std::chrono::steady_clock;
+    static uint32_t last = Dev(XDK_CDevice_VBlankCount), frames = 0, uneven = 0, none = 0;
+    static clock::time_point began = clock::now();
+    uint32_t fps = app::PaceRate(app::Get().fps_cap, vblanks), now = Dev(XDK_CDevice_VBlankCount), seen = now - last;
+    last = now;
+    if (!fps || 60 % fps) return;
+    if (seen != 60 / fps) uneven++, none += seen == 0;
+    if (++frames < 600) return;
+    double took = std::chrono::duration<double>(clock::now() - began).count();
+    if (uneven && took < 600.0 / fps * 1.05)
+        LOGR("blanks: %u of 600 frames saw other than %u blank(s) go by (%u none)", uneven, 60 / fps, none);
+    frames = uneven = none = 0;
+    began = clock::now();
+}
+
 uint32_t PresentVblanks() {
     if (!HAS_D3D_PresentInterval && XDK_CDevice_PresentInterval == xdk::kUnknown) return 1;
     uint32_t v = HAS_D3D_PresentInterval ? R32(SYM(D3D_PresentInterval)) : Dev(XDK_CDevice_PresentInterval);
@@ -892,6 +916,7 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
     achievements::Frame();
     app::Pace(PresentVblanks());
+    CountBlanks(PresentVblanks());
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {

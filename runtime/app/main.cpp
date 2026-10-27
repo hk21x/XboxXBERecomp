@@ -337,8 +337,13 @@ void Pace(uint32_t vblanks) {
         frames = slow = 0;
         longest = 0;
     }
-    next += period;
-    if (next < now - period) next = now;
+    static int64_t slot = INT64_MIN / 2;
+    if (60 % cap == 0) {
+        next = PaceOnBlanks(slot, cap, now);
+    } else {
+        next += period;
+        if (next < now - period) next = now;
+    }
     while (clock::now() + std::chrono::milliseconds(2) < next) Sleep(1);
     while (clock::now() < next) std::this_thread::yield();
 }

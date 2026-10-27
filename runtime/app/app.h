@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -212,6 +213,27 @@ inline uint32_t PaceRate(uint32_t cap, uint32_t vblanks) {
     if (!vblanks) return cap;
     uint32_t fps = 60 / vblanks;
     return cap && cap < fps ? cap : fps;
+}
+
+// The console's vertical blanks and the frames paced at a rate dividing 60 keep one clock: blank k comes at
+// VblankEpoch() + k * kVblankPeriod (xdk/d3d8.cpp's blank thread) and such a frame is shown half way between two
+// blanks, so each frame sees the same number of blanks go by. Two clocks of their own drifted against each other and
+// gave some frames no blank and the next two: stutter in titles that step their world by the blanks or by timers.
+constexpr std::chrono::nanoseconds kVblankPeriod{1000000000 / 60};
+inline std::chrono::steady_clock::time_point VblankEpoch() {
+    static const std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    return t;
+}
+// when to show a frame paced at fps: half way after blank slot, 60 / fps blanks after the last frame's (slot keeps
+// it). A frame done after the blank that follows its point shows at once and the next ones go from the blank just
+// gone, so it alone sees one blank more and the next one does not see none. now when fps does not divide 60.
+inline std::chrono::steady_clock::time_point PaceOnBlanks(int64_t& slot, uint32_t fps,
+                                                           std::chrono::steady_clock::time_point now) {
+    if (!fps || 60 % fps) return now;
+    const int64_t blank = (now - VblankEpoch()) / kVblankPeriod;  // the last blank gone by
+    slot += 60 / fps;
+    if (slot < blank) slot = blank;
+    return VblankEpoch() + kVblankPeriod * slot + kVblankPeriod / 2;
 }
 
 }  // namespace app

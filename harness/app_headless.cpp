@@ -92,8 +92,13 @@ void Pace(uint32_t vblanks) {
     if (fps <= 0) return;
     auto period = std::chrono::nanoseconds(1000000000LL / fps);
     auto now = clock::now();
-    next += period;
-    if (next < now - period) next = now;
+    static int64_t slot = INT64_MIN / 2;
+    if (60 % fps == 0) {
+        next = PaceOnBlanks(slot, uint32_t(fps), now);
+    } else {
+        next += period;
+        if (next < now - period) next = now;
+    }
     std::this_thread::sleep_until(next);
 }
 

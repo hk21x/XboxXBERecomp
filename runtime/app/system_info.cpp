@@ -95,7 +95,14 @@ void LogSystem() {
         LOGR("GPU %zu: %s%s", seen.size(), dd.DeviceString, (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) ? " (primary)" : "");
     }
     Mode desk = Desktop();
-    LOGR("Desktop: %ux%u", desk.width, desk.height);
+    // the refresh rate: 60 frames on a display not at a multiple of 60 judder with vsync on
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    uint32_t hz = GetMonitorInfoW(static_cast<HMONITOR>(Monitor()), &mi) &&
+                          EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 0;
+    LOGR("Desktop: %ux%u, %u Hz", desk.width, desk.height, hz);
     LogSettings();
     // experiment and diagnostic switches stay set in a shell or the user's environment between runs: list them
     std::wstring game;
