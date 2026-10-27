@@ -62,6 +62,8 @@ void Apply(const std::string& s, Pad& p) {
         else if (b == "RIGHT") p.buttons |= 8;
         else if (b == "START") p.buttons |= 16;
         else if (b == "BACK") p.buttons |= 32;
+        else if (b == "LSC") p.buttons |= 64;   // the sticks' clicks
+        else if (b == "RSC") p.buttons |= 128;
         else if (b == "A") p.analog[0] = 255;
         else if (b == "B") p.analog[1] = 255;
         else if (b == "X") p.analog[2] = 255;
