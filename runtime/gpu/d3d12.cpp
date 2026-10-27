@@ -710,7 +710,13 @@ bool D3D12Backend::CreateDevice() {
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     if (adapter) adapter.As(&adapter3_);
-    LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
+    // the driver's version (the user mode driver's, as the vendor numbers it in its last parts)
+    LARGE_INTEGER umd{};
+    if (adapter && SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd)))
+        LOGR("D3D12 adapter: %ls, driver %u.%u.%u.%u", ad.Description, unsigned(umd.HighPart >> 16), unsigned(umd.HighPart & 0xFFFF),
+             unsigned(uint32_t(umd.LowPart) >> 16), unsigned(umd.LowPart & 0xFFFF));
+    else
+        LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     dev_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_));
