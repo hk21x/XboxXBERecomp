@@ -78,7 +78,23 @@ Stream_Size           = 12      # D3DDevice_SetStreamSource 0x1027BA/0x1027BD in
 Stream_Stride         = 0x0     # D3DDevice_SetStreamSource 0x102802 stores Stride at 0x111C68 + n * 12 [0x1C0072]
 Stream_Buffer         = 0x8     # D3DDevice_SetStreamSource 0x102808 stores the vertex buffer at 0x111C70 + n * 12 [0x1C0078]
 PixelShader_Definition = 0x8    # D3DDevice_SetPixelShader 0x10A0B0 reads the definition pointer [0x1C2640]
-# DSOUND: to come (unset keys trap where the runtime first needs them)
+# DSOUND 4831
+CDirectSoundStream_Vtable  = 0x0  # CDirectSoundStream constructor 0x11427E: mov [esi],0x16264C
+CDirectSoundStream_Vtable2 = 0x4  # CDirectSoundStream constructor 0x114277: mov [edi],0x162640, edi = esi+4 (0x11426D)
+EffectsImage_Skip0    = 0x804    # 0x115711 (reached from CDirectSound_DownloadEffectsImage 0x1126E1 via 0x115965 at
+                                 # 0x1126F3, then 0x1156F8 at 0x1159DA) adds this dword count
+EffectsImage_Skip1    = 0x80C    # 0x11570B loads this dword count
+EffectsImage_Desc     = 0x818    # 0x11571A: lea esi,[ebx+eax*4+0x818], descriptor at image + 0x818 + (Skip0 + Skip1) * 4
+DSound_MixBinMask     = 0        # 5659 way: the mix bin setter 0x11295B takes a DSMIXBINS pointer (0 = default table
+                                 # 0x11C794 by channel count, 0x112976): count byte [eax] (0x112981), pairs [eax+4] of 8
+                                 # bytes, bin byte (0x11298B/0x11298E), volume dword (0x11299D/0x1129A0); SetMixBinVolumes
+                                 # 0x112936 reads the same struct (0x11293D/0x112942)
+DSound_MixBinHeadroom = 1        # 3948 way: settings ctor 0x113D3D fills bytes +0x14..+0x32 (bins 0-30) with 1
+                                 # (0x113D90-0x113D99) and bin 31 (+0x33) with 0 (0x113D9A); the APU init 0x116704 loops
+                                 # bins 0..31 (0x1167E4, 0x1167EA) through 0x1161DC, which writes byte & 7 from
+                                 # [settings+0x14+bin] (0x116203, settings = [apu+0xC], stored AddRef'd at 0x11B781) to
+                                 # 0xFE820200 + bin*4 (0x11620B). No IDirectSound_SetMixBinHeadroom is linked to change it.
+# DSound_LockFlagsSwapped: not linked here (no IDirectSoundBuffer_Lock), left at its default
 # XAPI XPP device type record
 XPP_Current           = 0x0     # XGetDevices 0x158137 returns it (0x158142, 0x158153)
 XPP_Changed           = 0x4     # XGetDevices 0x158144 clears it, XGetDeviceChanges 0x158159 tests it (0x158162)
