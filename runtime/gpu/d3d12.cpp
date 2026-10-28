@@ -678,6 +678,7 @@ private:
     void CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, const D3D12_TEXTURE_COPY_LOCATION* src,
                     const D3D12_BOX* box);
     uint32_t draw_note_ = 0, list_draws_ = 0;
+    uint32_t list_seen_ = 0;  // draws asked for in the list, those left out too
     uint64_t lists_ = 0;
     void ReportRemoved(const char* where);
     void LogDrawNote(const DrawNote& d, const char* mark);
@@ -979,6 +980,7 @@ void D3D12Backend::Begin() {
     std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
     ForgetDrawState();
     list_draws_ = 0;
+    list_seen_ = 0;
     nvmark::Mark(lists_, 0xFFFFF);  // the list's start
 }
 
@@ -2814,6 +2816,20 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         (skip_strides[0] == ~0u || (a.buffer_count && std::find(skip_strides.begin(), skip_strides.end(),
                                                                 a.buffers[0].stride) != skip_strides.end())))
         return;
+    // XBE_DRAW_RANGE=a-b (experiment, with XBE_SKIP_AFTER): only each list's draws a to b-1 (counted before any left
+    // out) are drawn
+    static const std::pair<uint32_t, uint32_t> range = [] {
+        uint32_t lo = 0, hi = ~0u;
+        if (const char* e = std::getenv("XBE_DRAW_RANGE")) {
+            char* end;
+            lo = uint32_t(std::strtoul(e, &end, 10));
+            if (*end == '-') hi = uint32_t(std::strtoul(end + 1, nullptr, 10));
+            LOGR("d3d12: XBE_DRAW_RANGE: only draws %u to %u of each list", lo, hi);
+        }
+        return std::make_pair(lo, hi);
+    }();
+    uint32_t seen = list_seen_++;
+    if ((seen < range.first || seen >= range.second) && std::chrono::steady_clock::now() >= skip_from) return;
     // XBE_SKIP_PS=handle,handle (hex, experiment): draws with those pixel shaders left out
     static const std::vector<uint64_t> skip_ps = [] {
         std::vector<uint64_t> v;
