@@ -121,6 +121,19 @@ bool CaptureOn() {
 // rows of a texture upload start D3D12_TEXTURE_DATA_PITCH_ALIGNMENT apart
 uint32_t UploadPitch(uint32_t row_bytes) { return (row_bytes + 255) & ~255u; }
 
+// resources' names as given (a lost device's report names the copies' resources by them)
+std::unordered_map<const void*, std::string>& Names() {
+    static std::unordered_map<const void*, std::string> names;
+    return names;
+}
+std::string NameOf(const void* o) {
+    auto it = Names().find(o);
+    if (it != Names().end()) return it->second;
+    char b[24];
+    snprintf(b, sizeof(b), "%p", o);
+    return b;
+}
+
 // a resource's debug name, shown by DRED and NVIDIA's Aftermath when the GPU faults on it
 void Name(ID3D12Object* o, const char* fmt, ...) {
     if (!o) return;
@@ -129,6 +142,7 @@ void Name(ID3D12Object* o, const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(b, sizeof(b), fmt, ap);
     va_end(ap);
+    Names()[o] = b;
     wchar_t w[96];
     for (size_t i = 0; i < sizeof(b); i++) w[i] = wchar_t(uint8_t(b[i]));
     o->SetName(w);
@@ -593,6 +607,15 @@ private:
     std::array<DrawNote, 128> draw_notes_{};
     std::vector<DrawNote> list_notes_;               // every draw of the list being recorded
     std::deque<std::vector<DrawNote>> sent_notes_;   // and of the last lists sent (several may be on the GPU at once)
+    // the copies recorded into the same lists: the draw they came before, what they copied
+    struct CopyNote {
+        uint32_t before = 0;
+        std::string text;
+    };
+    std::vector<CopyNote> list_copies_;
+    std::deque<std::vector<CopyNote>> sent_copies_;
+    void CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, const D3D12_TEXTURE_COPY_LOCATION* src,
+                    const D3D12_BOX* box);
     uint32_t draw_note_ = 0, list_draws_ = 0;
     uint64_t lists_ = 0;
     void ReportRemoved(const char* where);
@@ -839,7 +862,7 @@ void D3D12Backend::CreateFrames() {
         D3D12_RESOURCE_DESC bd = BufferDesc(kUploadSize);
         dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                       IID_PPV_ARGS(&f.upload));
-        Name(f.upload.Get(), "upload ring %u", unsigned(&f - &frames_[0]));
+        Name(f.upload.Get(), "upload ring %u (%llu MB)", unsigned(&f - &frames_[0]), (unsigned long long)(kUploadSize >> 20));
         f.upload->Map(0, nullptr, reinterpret_cast<void**>(&f.map));
     }
     dev_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
@@ -883,11 +906,14 @@ void D3D12Backend::Submit(bool wait) {
     queue_->ExecuteCommandLists(1, lists);
     lists_++;
     sent_notes_.push_back(std::move(list_notes_));
+    sent_copies_.push_back(std::move(list_copies_));
     if (sent_notes_.size() > 6) {
         list_notes_ = std::move(sent_notes_.front());  // its storage reused
         sent_notes_.pop_front();
+        sent_copies_.pop_front();
     }
     list_notes_.clear();
+    list_copies_.clear();
     queue_->Signal(fence_.Get(), ++fence_value_);
     Frame& f = CurrentFrame();
     f.fence = fence_value_;
@@ -1318,7 +1344,7 @@ ComPtr<ID3D12Resource> D3D12Backend::CreatePixelTexture(const std::vector<uint8_
     D3D12_TEXTURE_COPY_LOCATION src{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     src.PlacedFootprint.Offset = a.off;
     src.PlacedFootprint.Footprint = {DXGI_FORMAT_B8G8R8A8_UNORM, w, h, 1, row};
-    cl_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    CopyRegion(&dst, 0, 0, &src, nullptr);
     D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
     Transition(tex.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return tex;
@@ -1799,7 +1825,7 @@ void D3D12Backend::UploadTextureLevel(Tex& tx, uint32_t f, uint32_t l, const std
     dl.SubresourceIndex = sub;
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     sl.PlacedFootprint = fp;
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
 }
 
 void D3D12Backend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint8_t* p,
@@ -1966,7 +1992,7 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         dl.SubresourceIndex = f * tx.levels;
         D3D12_TEXTURE_COPY_LOCATION sl{src.res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
         sl.SubresourceIndex = 0;
-        cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+        CopyRegion(&dl, 0, 0, &sl, nullptr);
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         // a shrunk copy is read by the recorded copy: kept until the frame is done
         if (src.down) CurrentFrame().garbage.push_back(src.down);
@@ -2796,7 +2822,7 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
         if (b.right <= b.left || b.bottom <= b.top || dx >= dst_t.w || dy >= dst_t.h) continue;
         b.right = std::min<UINT>(b.right, b.left + dst_t.w - dx);
         b.bottom = std::min<UINT>(b.bottom, b.top + dst_t.h - dy);
-        cl_->CopyTextureRegion(&dl, dx, dy, 0, &sl, &b);
+        CopyRegion(&dl, dx, dy, &sl, &b);
     }
     dst_t.drawn = true;
     bound_rt_ = bound_ds_ = nullptr;
@@ -2922,7 +2948,7 @@ void D3D12Backend::UploadGammaRamp() {
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     sl.PlacedFootprint.Offset = a.off;
     sl.PlacedFootprint.Footprint = {DXGI_FORMAT_B8G8R8A8_UNORM, 256, 1, 1, kRampBytes};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
 }
 
 void D3D12Backend::BlitFrame(Target& t) {
@@ -3052,6 +3078,29 @@ void LogPerf() {
     }
 }
 
+// CopyTextureRegion, noted for a lost device's report: the resources by their names, the source's footprint or
+// subresource, the box
+void D3D12Backend::CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, const D3D12_TEXTURE_COPY_LOCATION* src,
+                              const D3D12_BOX* box) {
+    auto where = [](const D3D12_TEXTURE_COPY_LOCATION* l) {
+        char b[160];
+        if (l->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
+            const auto& f = l->PlacedFootprint;
+            snprintf(b, sizeof(b), "%s at %llu, %ux%u format %u pitch %u", NameOf(l->pResource).c_str(),
+                     (unsigned long long)f.Offset, f.Footprint.Width, f.Footprint.Height, unsigned(f.Footprint.Format),
+                     f.Footprint.RowPitch);
+        } else {
+            snprintf(b, sizeof(b), "%s subresource %u", NameOf(l->pResource).c_str(), l->SubresourceIndex);
+        }
+        return std::string(b);
+    };
+    char bx[64] = "";
+    if (box) snprintf(bx, sizeof(bx), ", box %u,%u-%u,%u", box->left, box->top, box->right, box->bottom);
+    list_copies_.push_back({list_draws_, "copy to " + where(dst) + " at " + std::to_string(x) + "," + std::to_string(y) +
+                                             " from " + where(src) + bx});
+    cl_->CopyTextureRegion(dst, x, y, 0, src, box);
+}
+
 // DRED's output, declared here with the Windows SDK's layout (the MinGW headers the Linux check uses lack it):
 // ID3D12DeviceRemovedExtendedData, D3D12_AUTO_BREADCRUMB_NODE, D3D12_DRED_ALLOCATION_NODE, D3D12_DRED_PAGE_FAULT_OUTPUT
 namespace dred {
@@ -3131,6 +3180,12 @@ void D3D12Backend::ReportRemoved(const char* where) {
                     found = true;
                     for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < v->size() && i <= draws + 4; i++)
                         LogDrawNote((*v)[i], i == draws ? "  <- stopped here" : "");
+                    // the copies recorded just before the stop (the GPU's copies come before the draw they precede)
+                    const auto& copies = sent_copies_[size_t(sent_notes_.rend() - v - 1)];
+                    int shown_copies = 0;
+                    for (const CopyNote& c : copies)
+                        if (c.before + 2 >= draws && c.before <= draws + 1 && shown_copies++ < 12)
+                            LOGR("d3d12:   before draw %u: %s", c.before, c.text.c_str());
                     // the GPU works on many draws at once: the stopped one may wait on a later one. Those after it
                     // that stand out (another target, big, another primitive), and the targets they draw to
                     std::unordered_map<uint32_t, uint32_t> per_target;
@@ -3673,7 +3728,7 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
     D3D12_TEXTURE_COPY_LOCATION dl{l.rb[slot].Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     dl.PlacedFootprint = fp;
     D3D12_TEXTURE_COPY_LOCATION sl{src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
     l.row_pitch = fp.Footprint.RowPitch;
     l.fence[slot] = fence_value_ + 1;  // the next Submit carries it
     l.frame[slot] = presents_;
@@ -3754,7 +3809,7 @@ bool D3D12Backend::ReadBack(ID3D12Resource* res, uint32_t w, uint32_t h, std::ve
     D3D12_TEXTURE_COPY_LOCATION dl{rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     dl.PlacedFootprint = fp;
     D3D12_TEXTURE_COPY_LOCATION sl{res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
     Flush();
     uint8_t* p = nullptr;
     rb->Map(0, nullptr, reinterpret_cast<void**>(&p));
