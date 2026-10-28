@@ -382,7 +382,11 @@ KERNEL_EXPORT(176, MmLockUnlockPhysicalPage, 2) { return 0; }
 KERNEL_EXPORT(180, MmQueryAllocationSize, 1) { return mem::AllocationSize(a[0]); }
 KERNEL_EXPORT(182, MmSetAddressProtect, 3) { return 0; }
 KERNEL_EXPORT(179, MmQueryAddressProtect, 1) { return 4; }  // PAGE_READWRITE
-KERNEL_EXPORT(167, MmAllocateSystemMemory, 2) { return mem::AllocSystem(a[0], 0x1000); }
+KERNEL_EXPORT(167, MmAllocateSystemMemory, 2) {
+    uint32_t va = mem::AllocSystem(a[0], 0x1000);
+    if (mem::MemLogLevel() >= 2) LOGI("memory: MmAllocateSystemMemory %X from %08X at %08X", a[0], R32(ctx.esp), va);
+    return va;
+}
 KERNEL_EXPORT(172, MmFreeSystemMemory, 2) {
     mem::FreeSystem(a[0]);
     return a[1];
@@ -397,8 +401,16 @@ KERNEL_EXPORT(170, MmDeleteKernelStack, 2) {
     mem::FreeStack(a[0]);
     return 0;
 }
-KERNEL_EXPORT(15, ExAllocatePoolWithTag, 2) { return mem::AllocSystem(a[0]); }
-KERNEL_EXPORT(14, ExAllocatePool, 1) { return mem::AllocSystem(a[0]); }
+KERNEL_EXPORT(15, ExAllocatePoolWithTag, 2) {
+    uint32_t va = mem::AllocSystem(a[0]);
+    if (mem::MemLogLevel() >= 2) LOGI("memory: ExAllocatePoolWithTag %X from %08X at %08X", a[0], R32(ctx.esp), va);
+    return va;
+}
+KERNEL_EXPORT(14, ExAllocatePool, 1) {
+    uint32_t va = mem::AllocSystem(a[0]);
+    if (mem::MemLogLevel() >= 2) LOGI("memory: ExAllocatePool %X from %08X at %08X", a[0], R32(ctx.esp), va);
+    return va;
+}
 KERNEL_EXPORT(174, MmIsAddressValid, 1) { return mem::IsCommitted(a[0]); }
 // every page stays read write
 KERNEL_EXPORT(204, NtProtectVirtualMemory, 4) {
