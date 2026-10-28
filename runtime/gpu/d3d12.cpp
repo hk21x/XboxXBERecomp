@@ -3487,6 +3487,23 @@ void D3D12Backend::Present(const Surface& front) {
     g_perf.swap += PerfMs(perf_swap);
 
     presents_++;
+    // every 5 seconds, kept in release builds: video memory and what the renderer holds (a build-up before a hang)
+    static auto next_mem = std::chrono::steady_clock::now();
+    if (auto now = std::chrono::steady_clock::now(); now >= next_mem) {
+        next_mem = now + std::chrono::seconds(5);
+        DXGI_QUERY_VIDEO_MEMORY_INFO vm{}, sys{};
+        if (adapter3_) {
+            adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
+            adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &sys);
+        }
+        size_t garbage = 0;
+        for (const Frame& f : frames_) garbage += f.garbage.size();
+        LOGR("d3d12: memory at present %llu: video %llu of %llu MB, shared %llu MB; %zu textures, %zu targets, %zu "
+             "pipelines, %zu waiting release, %llu lists", (unsigned long long)presents_,
+             (unsigned long long)(vm.CurrentUsage >> 20), (unsigned long long)(vm.Budget >> 20),
+             (unsigned long long)(sys.CurrentUsage >> 20), textures_.size(), targets_.size(), psos_.size(), garbage,
+             (unsigned long long)lists_);
+    }
     presents_seen_.store(presents_);
     frame_++;
     ReleaseOldTextures();
