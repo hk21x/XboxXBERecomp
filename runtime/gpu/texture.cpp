@@ -270,6 +270,12 @@ uint64_t g_epoch = 1;
 
 }  // namespace
 
+uint32_t SwizzledOffset(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    uint32_t mx, my, mz;
+    SwizzleMasks(w, h, 1, mx, my, mz);
+    return Deposit(x, mx) | Deposit(y, my);
+}
+
 const FormatInfo& Format(uint32_t f) {
     for (auto& e : kFormats)
         if (e.id == f) return e.info;

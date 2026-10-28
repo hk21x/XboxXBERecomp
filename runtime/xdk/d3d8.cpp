@@ -276,6 +276,11 @@ void SyncDeferred() {
     for (int s = 0; s < 4; s++)
         for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++)
             g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + n.tss[i]) * 4);
+    // a vertex stream over a target the GPU drew is read back first, as the console's vertices read that memory
+    // (NightFire's scope colours 16384 points from a 128x128 swizzled target a pass before drew)
+    if (g_backend)
+        for (const auto& st : g_state.streams)
+            if (st.vb) g_backend->Sync(mem::VirtualFromPhysical(R32(st.vb + 4)), 0);
 }
 
 float ZScale(const gpu::Surface& zs) {

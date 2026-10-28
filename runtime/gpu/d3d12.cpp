@@ -1016,6 +1016,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     t.data = slot.data;
     TextureDesc d;
     t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
+    t.swizzled32 = !depth && !t.linear32 && Describe(s.header, d) && Format(d.format).swizzled &&
+                   !Format(d.format).compressed && Format(d.format).bits == 32;
     t.bytes = GuestPitch(slot.gw) * slot.gh;
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
@@ -3039,6 +3041,7 @@ void D3D12Backend::RescaleTargets() {
         t.sig = old.sig;
         t.drawn = old.drawn;
         t.linear32 = old.linear32;
+        t.swizzled32 = old.swizzled32;
         t.read = std::move(old.read);
         t.range = old.range;
         t.tag = old.tag;
@@ -3218,9 +3221,9 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
     if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
-    // pixels written back are 32 bit linear rows: over a narrower or swizzled surface they would run past it
-    if (!it->second.linear32) {
-        LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit linear surface", data);
+    // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
+    if (!it->second.linear32 && !it->second.swizzled32) {
+        LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit surface", data);
         return;
     }
     PerfScope perf_sync{g_perf.sync};
@@ -3238,7 +3241,13 @@ void D3D12Backend::Sync(uint32_t data, uint32_t) {
     // color targets are 32 bit linear in guest memory, the pitch rounds to 64 bytes
     uint32_t pitch = GuestPitch(t.gw);
     uint8_t* guest = static_cast<uint8_t*>(kernel::HostPtr(data));
-    for (uint32_t y = 0; y < t.gh; y++) std::memcpy(guest + size_t(y) * pitch, &px[size_t(y) * t.gw * 4], t.gw * 4);
+    if (t.swizzled32) {
+        for (uint32_t y = 0; y < t.gh; y++)
+            for (uint32_t x = 0; x < t.gw; x++)
+                std::memcpy(guest + size_t(SwizzledOffset(x, y, t.gw, t.gh)) * 4, &px[(size_t(y) * t.gw + x) * 4], 4);
+    } else {
+        for (uint32_t y = 0; y < t.gh; y++) std::memcpy(guest + size_t(y) * pitch, &px[size_t(y) * t.gw * 4], t.gw * 4);
+    }
     t.read = std::move(px);
     t.drawn = false;
     t.sig = MemSig(t.data, t.bytes);

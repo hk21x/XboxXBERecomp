@@ -92,5 +92,7 @@ void ParseDeclaration(VertexShader& vs);
 // SetPixelShaderConstant: the stages of the current shader mapped to these registers take the values
 void ApplyPixelConstants(State& s, uint32_t first, uint32_t count);
 uint32_t PackColor(const std::array<float, 4>& c);
+// the texel index of (x, y) in a swizzled (Morton order) w x h surface
+uint32_t SwizzledOffset(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
 }  // namespace gpu
