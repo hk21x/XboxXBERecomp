@@ -18,6 +18,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -119,6 +120,19 @@ bool CaptureOn() {
 
 // rows of a texture upload start D3D12_TEXTURE_DATA_PITCH_ALIGNMENT apart
 uint32_t UploadPitch(uint32_t row_bytes) { return (row_bytes + 255) & ~255u; }
+
+// a resource's debug name, shown by DRED and NVIDIA's Aftermath when the GPU faults on it
+void Name(ID3D12Object* o, const char* fmt, ...) {
+    if (!o) return;
+    char b[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    wchar_t w[96];
+    for (size_t i = 0; i < sizeof(b); i++) w[i] = wchar_t(uint8_t(b[i]));
+    o->SetName(w);
+}
 
 D3D12_RESOURCE_DESC BufferDesc(uint64_t bytes) {
     D3D12_RESOURCE_DESC bd{};
@@ -813,6 +827,7 @@ void D3D12Backend::CreateFrames() {
         D3D12_RESOURCE_DESC bd = BufferDesc(kUploadSize);
         dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                       IID_PPV_ARGS(&f.upload));
+        Name(f.upload.Get(), "upload ring %u", unsigned(&f - &frames_[0]));
         f.upload->Map(0, nullptr, reinterpret_cast<void**>(&f.map));
     }
     dev_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
@@ -925,6 +940,7 @@ D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
     D3D12_RESOURCE_DESC bd = BufferDesc((size + kOwnAlign - 1) & ~(kOwnAlign - 1));
     dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                   IID_PPV_ARGS(&r));
+    Name(r.Get(), "upload of its own, %llu bytes (present %llu)", (unsigned long long)size, (unsigned long long)presents_);
     uint8_t* p = nullptr;
     r->Map(0, nullptr, reinterpret_cast<void**>(&p));
     f.garbage.push_back(r);
@@ -1010,8 +1026,11 @@ bool D3D12Backend::CreateTargetResource(Target& t, const Surface& s) {
         cv.Format = td.Format;
         t.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
-    return SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.state, &cv,
-                                                   IID_PPV_ARGS(&t.res)));
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.state, &cv, IID_PPV_ARGS(&t.res))))
+        return false;
+    Name(t.res.Get(), "%s target %08X %ux%u (present %llu)", t.depth ? "depth" : "colour", mem::VirtualFromPhysical(s.data),
+         t.gw, t.gh, (unsigned long long)presents_);
+    return true;
 }
 
 // a view from the free pool, cleared; false when the pool is empty
@@ -1523,6 +1542,8 @@ ID3D12Resource* D3D12Backend::Feedback(Target& t) {
         if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.fb_state, nullptr,
                                                  IID_PPV_ARGS(&t.fb)))) {
             return nullptr;
+        } else {
+            Name(t.fb.Get(), "feedback copy of %08X (present %llu)", t.data, (unsigned long long)presents_);
         }
     }
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1723,8 +1744,11 @@ bool D3D12Backend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo
     td.MipLevels = UINT16(tx.levels);
     td.Format = tx.fmt;
     td.SampleDesc.Count = 1;
-    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                             IID_PPV_ARGS(&tx.res)))) {
+    if (SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&tx.res)))) {
+        Name(tx.res.Get(), "texture %08X %ux%u format %X (present %llu)", d.data, d.width, d.height, d.format,
+             (unsigned long long)presents_);
+    } else {
         textures_.erase(key);
         return false;
     }
@@ -3320,6 +3344,10 @@ void D3D12Backend::RescaleTargets() {
             ReleaseTarget(it++);
             continue;
         }
+        {
+            Name(t.res.Get(), "colour target %08X %ux%u, rescaled (present %llu)", t.data, t.gw, t.gh,
+                 (unsigned long long)presents_);
+        }
         t.view = old.view;  // the same descriptor slot, now viewing the new resource
         D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), t.view, rtv_inc_);
         dev_->CreateRenderTargetView(t.res.Get(), nullptr, rh);
@@ -3378,7 +3406,9 @@ bool D3D12Backend::EnsureMs(Target& t) {
         td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         t.ms_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
-    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.ms_state, &cv, IID_PPV_ARGS(&t.ms)))) {
+    if (SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.ms_state, &cv, IID_PPV_ARGS(&t.ms))))
+        Name(t.ms.Get(), "MSAA twin of %08X %ux%u (present %llu)", t.data, t.gw, t.gh, (unsigned long long)presents_);
+    if (!t.ms) {
         LOG_FIRST(4, "d3d12: MSAA twin of %08X %ux%u could not be made", t.data, t.w, t.h);
         return false;
     }
@@ -3625,6 +3655,8 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
                                                  nullptr, IID_PPV_ARGS(&l.rb[slot])))) {
             return;
         }
+        Name(l.rb[slot].Get(), "late read-back %u, %llu bytes (present %llu)", slot, (unsigned long long)bytes,
+             (unsigned long long)presents_);
     }
     D3D12_TEXTURE_COPY_LOCATION dl{l.rb[slot].Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     dl.PlacedFootprint = fp;
@@ -3676,6 +3708,8 @@ ComPtr<ID3D12Resource> D3D12Backend::Shrink(ID3D12Resource* src, D3D12_RESOURCE_
     } else if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
                                                     D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&down)))) {
         return nullptr;
+    } else {
+        Name(down.Get(), "shrunk copy %ux%u (present %llu)", w, h, (unsigned long long)presents_);
     }
     // borrows the next free view without taking it, only for this recording
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), free_rtv_.back(), rtv_inc_);
@@ -3702,6 +3736,8 @@ bool D3D12Backend::ReadBack(ID3D12Resource* res, uint32_t w, uint32_t h, std::ve
     if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                              IID_PPV_ARGS(&rb)))) {
         return false;
+    } else {
+        Name(rb.Get(), "read-back, %llu bytes (present %llu)", (unsigned long long)bytes, (unsigned long long)presents_);
     }
     D3D12_TEXTURE_COPY_LOCATION dl{rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     dl.PlacedFootprint = fp;
