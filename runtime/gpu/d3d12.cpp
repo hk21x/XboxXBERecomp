@@ -250,6 +250,8 @@ struct Tex {
     uint64_t palette = 0;  // hash of the colours a P8 texture was decoded with
     uint64_t faces = 0;    // a cube's frame its faces drawn on the GPU were last copied in
     uint8_t flags = 0;  // Extension::Decoded's
+    uint64_t made = 0;     // the present it was made at
+    uint32_t uploads = 0;  // times its bytes were uploaded
 };
 
 // Blit's settings past the source and its rectangle
@@ -641,8 +643,13 @@ private:
         float v0[4] = {};  // the first buffer's first vertex, its first four floats
         uint32_t lo = 0, hi = 0;  // an indexed draw's lowest and highest index, with the base added
         bool counted = false;      // drawn while the title counts its pixels (an occlusion query)
+        // stage 0: a guest texture's resource (width, height, levels, DXGI format, made at, uploads) and the sampler
+        uint32_t tw = 0, th = 0, tl = 0, tf = 0, tu = 0;
+        uint64_t tmade = 0;
+        D3D12_SAMPLER_DESC sd{};
     };
     std::array<DrawNote, 128> draw_notes_{};
+    DrawNote stage0_;  // stage 0's texture and sampler for the next note
     std::vector<DrawNote> list_notes_;               // every draw of the list being recorded
     std::deque<std::vector<DrawNote>> sent_notes_;   // and of the last lists sent (several may be on the GPU at once)
     // the copies recorded into the same lists: the draw they came before, what they copied
@@ -1973,6 +1980,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     uint32_t total = TotalSize(d);
     bool same = SameTexture(tx, d);
     if (!same && !CreateTexture(tx, d, fi, key)) return nullptr;
+    if (!same) tx.made = presents_;
     // cheap change check once per frame: lock epochs plus a sample of the bytes
     if (tx.frame != presents_ + 1 || !same || tx.palette != palette.hash) {
         tx.frame = presents_ + 1;
@@ -1986,10 +1994,16 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             g_perf.texups++;
             g_perf.texup_bytes += total;
             tx.sig = sig;
+            tx.uploads++;
             UploadTexture(tx, d, fi, p, palette.va ? palette.colours : nullptr, same);
         }
     }
     if (d.cube && !fi.depth) CopyCubeTargets(tx, d);
+    if (stage == 0) {
+        D3D12_RESOURCE_DESC rd = tx.res->GetDesc();
+        stage0_.tw = uint32_t(rd.Width), stage0_.th = rd.Height, stage0_.tl = rd.MipLevels, stage0_.tf = rd.Format;
+        stage0_.tmade = tx.made, stage0_.tu = tx.uploads;
+    }
     FillTextureView(tx, d, stages.sv[stage]);
     // XBE_NO_SHADOW=1 (experiment): a depth texture read as a plain float texture, no comparison sampler
     static const bool no_shadow = [] {
@@ -2080,6 +2094,7 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
 }
 
 ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTextures& stages) {
+    if (stage == 0) stage0_ = {};
     TexInfo& info = stages.info[stage];
     D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[stage];
     info = {};
@@ -2178,6 +2193,7 @@ uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& s
     uint32_t aniso = app::Get().aniso;
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso,
                                                    stages.replaced[i]);
+    stage0_.sd = sd[0];
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return it->second;
@@ -2780,6 +2796,8 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
             a.index_count != 0, uint32_t(a.base_vertex), mem::VirtualFromPhysical(s.rt.data), s.textures[0],
             s.textures[1], s.vs ? s.vs->handle : 0, s.ps ? s.ps->handle : 0};
+    note.tw = stage0_.tw, note.th = stage0_.th, note.tl = stage0_.tl, note.tf = stage0_.tf, note.tu = stage0_.tu;
+    note.tmade = stage0_.tmade, note.sd = stage0_.sd;
     note.counted = s.simple[kMCountEnable >> 2] != 0;
     note.buffers = a.buffer_count;
     if (a.buffer_count) {
@@ -3275,8 +3293,8 @@ void D3D12Backend::ReportRemoved(const char* where) {
     reported = true;
     LogDebugMessages();
     uint64_t marker = nvmark::Report();
-    LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one",
-         where, unsigned(reason), (unsigned long long)lists_, list_draws_);
+    LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one, "
+         "present %llu", where, unsigned(reason), (unsigned long long)lists_, list_draws_, (unsigned long long)presents_);
     ComPtr<dred::Data> data;
     if (FAILED(dev_->QueryInterface(dred::kIid, reinterpret_cast<void**>(data.GetAddressOf())))) {
         LOGR("d3d12:   no DRED");
@@ -3407,6 +3425,11 @@ void D3D12Backend::LogDrawNote(const DrawNote& d, const char* mark) {
          (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", int(d.base), d.rt,
          tex(d.t0).c_str(), tex(d.t1).c_str(), (unsigned long long)d.vs, (unsigned long long)d.ps, d.buffers, d.bytes,
          d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], d.lo, d.hi, d.counted ? ", visibility-tested" : "", mark);
+    const D3D12_SAMPLER_DESC& sd = d.sd;
+    LOGR("d3d12:     stage 0: %ux%u, %u levels, DXGI format %u, made at present %llu, %u uploads; sampler filter %X "
+         "anisotropy %u address %u %u %u, bias %g, LOD %g..%g, compare %u", d.tw, d.th, d.tl, d.tf,
+         (unsigned long long)d.tmade, d.tu, unsigned(sd.Filter), sd.MaxAnisotropy, unsigned(sd.AddressU),
+         unsigned(sd.AddressV), unsigned(sd.AddressW), sd.MipLODBias, sd.MinLOD, sd.MaxLOD, unsigned(sd.ComparisonFunc));
 }
 
 // the debug layer's messages since the last call: each kind three times, 400 in all
