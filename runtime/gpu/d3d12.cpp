@@ -2789,7 +2789,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // XBE_SKIP_STRIDES=28,32 (experiment): draws whose first vertex buffer has one of these strides are left out
     static const std::vector<uint32_t> skip_strides = [] {
         std::vector<uint32_t> v;
-        if (const char* e = std::getenv("XBE_SKIP_STRIDES"))
+        const char* e = std::getenv("XBE_SKIP_STRIDES");
+        if (e && std::strncmp(e, "all", 3) == 0) {
+            LOGR("d3d12: XBE_SKIP_STRIDES=all leaves out every draw");
+            return std::vector<uint32_t>{~0u};
+        }
+        if (e)
             for (const char* p = e; *p;) {
                 char* end;
                 unsigned long n = std::strtoul(p, &end, 10);
@@ -2805,8 +2810,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         const char* e = std::getenv("XBE_SKIP_AFTER");
         return std::chrono::steady_clock::now() + std::chrono::seconds(e ? std::atoi(e) : 0);
     }();
-    if (!skip_strides.empty() && a.buffer_count && std::chrono::steady_clock::now() >= skip_from &&
-        std::find(skip_strides.begin(), skip_strides.end(), a.buffers[0].stride) != skip_strides.end())
+    if (!skip_strides.empty() && std::chrono::steady_clock::now() >= skip_from &&
+        (skip_strides[0] == ~0u || (a.buffer_count && std::find(skip_strides.begin(), skip_strides.end(),
+                                                                a.buffers[0].stride) != skip_strides.end())))
         return;
     // XBE_SKIP_PS=handle,handle (hex, experiment): draws with those pixel shaders left out
     static const std::vector<uint64_t> skip_ps = [] {
