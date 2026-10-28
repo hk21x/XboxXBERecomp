@@ -939,6 +939,14 @@ void D3D12Backend::Submit(bool wait) {
     queue_->Signal(fence_.Get(), ++fence_value_);
     Frame& f = CurrentFrame();
     f.fence = fence_value_;
+    // XBE_SYNC_GPU=1 (experiment): every list waited for once sent, so the GPU never runs alongside the CPU
+    static const bool sync = [] {
+        const char* e = std::getenv("XBE_SYNC_GPU");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_SYNC_GPU=1, every command list waited for");
+        return v;
+    }();
+    if (sync && !wait) WaitFence(fence_value_);
     if (wait) {
         WaitFence(fence_value_);
         f.alloc->Reset();
