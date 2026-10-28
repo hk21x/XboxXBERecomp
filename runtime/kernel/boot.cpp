@@ -181,24 +181,28 @@ void Relaunch(const char* exe) {
     size_t args = line[0] == L'"' ? line.find(L'"', 1) + 1 : line.find(L' ');
     line = L"\"" + path + L"\"" + (args == std::wstring::npos ? L"" : line.substr(args));
     if (line.find(L"--relaunched") == std::wstring::npos) line += L" --relaunched";  // no boot splash again
+    // the handover event is named after this process, given to the new one on its command line (an earlier
+    // --handover is replaced). The new process is not started suspended: Microsoft Defender took a suspended start
+    // then resumed for process hollowing and quarantined the exe (Behavior:Win32/DefenseEvasion.A!ml)
+    if (size_t h = line.find(L" --handover="); h != std::wstring::npos) line.erase(h, line.find(L' ', h + 1) - h);
+    line += L" --handover=" + std::to_wstring(GetCurrentProcessId());
     // this process lives on through the handover: the new one binds the same ports
     xnet::CloseSockets();
+    // this window stays up until the new instance shows its first frames (HandoverEvent), so no gap shows
+    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, HandoverEvent(GetCurrentProcessId()).c_str());
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
-    if (CreateProcessW(path.c_str(), line.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
-        // this window stays up until the new instance shows its first frames (HandoverEvent), so no gap shows
-        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, HandoverEvent(pi.dwProcessId).c_str());
+    g_relaunching = true;
+    if (CreateProcessW(path.c_str(), line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
         AllowSetForegroundWindow(pi.dwProcessId);
-        g_relaunching = true;
-        ResumeThread(pi.hThread);
         HANDLE wait[] = {ready, pi.hProcess};
         if (ready) WaitForMultipleObjects(2, wait, FALSE, 15000);
-        if (ready) ::CloseHandle(ready);
         ::CloseHandle(pi.hThread);
         ::CloseHandle(pi.hProcess);
     } else {
         LOGE("relaunch: cannot start %s.exe (%lu)", exe, GetLastError());
     }
+    if (ready) ::CloseHandle(ready);
     std::_Exit(0);
 #else
     char self[4096] = {};

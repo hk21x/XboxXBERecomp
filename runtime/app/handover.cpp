@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cwchar>
 
 #include "app/app.h"
 #include "core/log.h"
@@ -23,7 +24,11 @@ std::atomic<bool> g_handing{false};
 }  // namespace
 
 bool StartHandover() {
-    g_ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, kernel::HandoverEvent(GetCurrentProcessId()).c_str());
+    // the previous instance's process id, on the command line (kernel::Relaunch)
+    const wchar_t* h = std::wcsstr(GetCommandLineW(), L"--handover=");
+    if (!h) return false;
+    unsigned long previous = std::wcstoul(h + 11, nullptr, 10);
+    g_ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, kernel::HandoverEvent(previous).c_str());
     g_handing = g_ready != nullptr;
     if (g_handing) LOGI("handover: the previous instance waits for the first frames");
     return g_handing;
