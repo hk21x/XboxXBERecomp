@@ -134,6 +134,27 @@ std::string NameOf(const void* o) {
     return b;
 }
 
+// NVIDIA Aftermath event markers, XBE_NV_MARKERS=1 on a test PC with the DLL: one per draw, its list and draw number
+// in the marker's value (list << 20 | draw), so a crash dump names the draw each GPU context had reached
+namespace nvmark {
+using SetMarker = int(__cdecl*)(void*, const void*, uint32_t);
+SetMarker set = nullptr;
+void* ctx = nullptr;
+void Init(ID3D12GraphicsCommandList* cl) {
+    const char* e = std::getenv("XBE_NV_MARKERS");
+    if (!e || *e != '1') return;
+    HMODULE nv = GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll");
+    using Create = int(__cdecl*)(IUnknown*, void**);
+    auto create = nv ? reinterpret_cast<Create>(GetProcAddress(nv, "GFSDK_Aftermath_DX12_CreateContextHandle")) : nullptr;
+    int r = create ? create(cl, &ctx) : -1;
+    if (r == 0x1) set = reinterpret_cast<SetMarker>(GetProcAddress(nv, "GFSDK_Aftermath_SetEventMarker"));
+    LOGR("d3d12: NVIDIA Aftermath event markers %s (result %08X)", set ? "on, one per draw" : "failed", unsigned(r));
+}
+inline void Mark(uint64_t list, uint32_t draw) {
+    if (set) set(ctx, reinterpret_cast<const void*>(uintptr_t((list << 20) | (draw & 0xFFFFF))), 0);
+}
+}  // namespace nvmark
+
 // a resource's debug name, shown by DRED and NVIDIA's Aftermath when the GPU faults on it
 void Name(ID3D12Object* o, const char* fmt, ...) {
     if (!o) return;
@@ -890,6 +911,7 @@ void D3D12Backend::CreateFrames() {
     dev_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, frames_[0].alloc.Get(), nullptr, IID_PPV_ARGS(&cl_));
+    nvmark::Init(cl_.Get());
 }
 
 // gamma ramp as a 256 x 1 lookup
@@ -917,6 +939,7 @@ void D3D12Backend::Begin() {
     std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
     ForgetDrawState();
     list_draws_ = 0;
+    nvmark::Mark(lists_, 0xFFFFF);  // the list's start
 }
 
 void D3D12Backend::Submit(bool wait) {
@@ -2701,6 +2724,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (!skip_strides.empty() && a.buffer_count && std::chrono::steady_clock::now() >= skip_from &&
         std::find(skip_strides.begin(), skip_strides.end(), a.buffers[0].stride) != skip_strides.end())
         return;
+    nvmark::Mark(lists_, list_draws_);
     uint32_t query = BeginCountedDraw(s);
     DrawNote& note = draw_notes_[draw_note_++ % draw_notes_.size()];
     note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
