@@ -1166,6 +1166,8 @@ bool D3D12Backend::CreateTargetResource(Target& t, const Surface& s) {
         return false;
     Name(t.res.Get(), "%s target %08X %ux%u (present %llu)", t.depth ? "depth" : "colour", mem::VirtualFromPhysical(s.data),
          t.gw, t.gh, (unsigned long long)presents_);
+    LOGR("d3d12: %s target made at present %llu: %08X %ux%u (%ux%u here), DXGI format %u", t.depth ? "depth" : "colour",
+         (unsigned long long)presents_, mem::VirtualFromPhysical(s.data), t.gw, t.gh, t.w, t.h, unsigned(td.Format));
     return true;
 }
 
@@ -1800,6 +1802,12 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
              unsigned(d.DSVFormat), k.topo, k.fill, (unsigned long long)(vm.CurrentUsage >> 20),
              (unsigned long long)(vm.Budget >> 20));
     }
+    // every pipeline made, kept in release builds: what a moment of play brings in that the frames before had not
+    LOGR("d3d12: pipeline %zu at present %llu: topology %u, colour %u format %u samples %u, depth %u (test %u write %u "
+         "func %u), stencil %u, blend %u %u/%u op %u mask %X, cull %u fill %u, bias %d slope %g, vs %016llX ps %016llX",
+         psos_.size() + 1, (unsigned long long)presents_, k.topo, k.has_rt, k.rtfmt, k.samples, k.has_ds, k.zen,
+         k.zwrite, k.zfunc, k.sten, k.blend, k.src, k.dst, k.op, k.wmask, k.cull, k.fill, k.zbias, k.zslope,
+         (unsigned long long)k.vs, (unsigned long long)k.ps);
     psos_[h] = pso;
     return pso.Get();
 }
@@ -2010,7 +2018,13 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     uint32_t total = TotalSize(d);
     bool same = SameTexture(tx, d);
     if (!same && !CreateTexture(tx, d, fi, key)) return nullptr;
-    if (!same) tx.made = presents_;
+    if (!same) {
+        tx.made = presents_;
+        // every texture made, kept in release builds (as the pipelines)
+        LOGR("d3d12: texture %zu made at present %llu: data %08X format %X %ux%ux%u, %u levels%s%s, pitch %u",
+             textures_.size(), (unsigned long long)presents_, d.data, d.format, d.width, d.height, d.depth, d.levels,
+             d.cube ? ", cube" : "", d.linear ? ", linear" : "", d.pitch);
+    }
     // cheap change check once per frame: lock epochs plus a sample of the bytes
     if (tx.frame != presents_ + 1 || !same || tx.palette != palette.hash) {
         tx.frame = presents_ + 1;
@@ -3158,6 +3172,10 @@ void D3D12Backend::UploadGammaRamp() {
         identity &= ramp_[kRampRed + i] == i && ramp_[kRampGreen + i] == i && ramp_[kRampBlue + i] == i;
     }
     gamma_ = !identity;
+    static int told = 0;
+    if (told++ < 200)
+        LOGR("d3d12: gamma ramp at present %llu: %s, red %u %u %u", (unsigned long long)presents_,
+             identity ? "identity" : "changed", ramp_[kRampRed + 0], ramp_[kRampRed + 128], ramp_[kRampRed + 255]);
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION dl{lut_.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
