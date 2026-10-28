@@ -332,7 +332,26 @@ uint32_t MinVertices(uint32_t prim) {
 bool DrawNative(const DrawRange& d, bool dense, Assembled& out) {
     out.strip = d.prim == 4 || d.prim == 6;
     out.topology = NativeTopology(d.prim);
-    if (d.ip && dense) {
+    // XBE_REBASE_INDICES=1 (experiment): the indices copied with the lowest taken off, 32 bit, base vertex 0, in place of
+    // the title's 16 bit ones with a negative base vertex
+    static const bool rebase = [] {
+        const char* e = std::getenv("XBE_REBASE_INDICES");
+        bool v = e && *e == '1';
+        if (v) LOGR("gpu: XBE_REBASE_INDICES=1, indices rebased on the CPU (base vertex 0)");
+        return v;
+    }();
+    if (d.ip && dense && rebase) {
+        out.indices.resize(d.count);
+        for (uint32_t i = 0; i < d.count; i++) {
+            uint16_t v;
+            std::memcpy(&v, d.ip + size_t(i) * 2, 2);
+            out.indices[i] = uint32_t(v) - d.first;
+        }
+        out.index_src = out.indices.data();
+        out.index16 = false;
+        out.index_count = d.count;
+        out.base_vertex = 0;
+    } else if (d.ip && dense) {
         out.index_src = d.ip;
         out.index16 = true;
         out.index_count = d.count;
