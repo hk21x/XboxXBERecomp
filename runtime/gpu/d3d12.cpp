@@ -1991,7 +1991,14 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     }
     if (d.cube && !fi.depth) CopyCubeTargets(tx, d);
     FillTextureView(tx, d, stages.sv[stage]);
-    if (fi.depth) info.shadow = ShadowDepthKind(d.format);
+    // XBE_NO_SHADOW=1 (experiment): a depth texture read as a plain float texture, no comparison sampler
+    static const bool no_shadow = [] {
+        const char* e = std::getenv("XBE_NO_SHADOW");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_NO_SHADOW=1, depth textures sampled without comparison");
+        return v;
+    }();
+    if (fi.depth && !no_shadow) info.shadow = ShadowDepthKind(d.format);
     if (ext_) ext_->Sampled(d, nullptr, tx.flags, info);
     return tx.res.Get();
 }
@@ -2752,6 +2759,21 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (!skip_strides.empty() && a.buffer_count && std::chrono::steady_clock::now() >= skip_from &&
         std::find(skip_strides.begin(), skip_strides.end(), a.buffers[0].stride) != skip_strides.end())
         return;
+    // XBE_SKIP_PS=handle,handle (hex, experiment): draws with those pixel shaders left out
+    static const std::vector<uint64_t> skip_ps = [] {
+        std::vector<uint64_t> v;
+        if (const char* e = std::getenv("XBE_SKIP_PS"))
+            for (const char* p = e; *p;) {
+                char* end;
+                uint64_t h = std::strtoull(p, &end, 16);
+                if (end == p) break;
+                v.push_back(h);
+                p = *end ? end + 1 : end;
+            }
+        if (!v.empty()) LOGR("d3d12: XBE_SKIP_PS: %zu pixel shaders left out", v.size());
+        return v;
+    }();
+    if (!skip_ps.empty() && s.ps && std::find(skip_ps.begin(), skip_ps.end(), s.ps->handle) != skip_ps.end()) return;
     nvmark::Mark(lists_, list_draws_);
     uint32_t query = BeginCountedDraw(s);
     DrawNote& note = draw_notes_[draw_note_++ % draw_notes_.size()];
