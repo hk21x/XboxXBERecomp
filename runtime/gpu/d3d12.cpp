@@ -479,6 +479,8 @@ private:
         D3D12_SHADER_RESOURCE_VIEW_DESC sv;
         TexInfo info;
         bool replaced;
+        uint32_t tw, th, tl, tf, tu;  // stage 0's for the draw notes
+        uint64_t tmade;
     };
     std::unordered_map<uint64_t, StageMemo> stage_memo_;
     uint64_t stage_memo_key_ = 0;  // frame and targets_gen_ the memo holds for
@@ -1532,7 +1534,20 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
 
 ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash) {
     // one source can hold several entry points
+    // XBE_SHADER_FLAGS (experiment): skip (no optimisation), o3, ieee (strict), comma separated; keyed apart in the cache
+    static const UINT flags = [] {
+        UINT f = D3DCOMPILE_OPTIMIZATION_LEVEL1;
+        const char* e = std::getenv("XBE_SHADER_FLAGS");
+        if (!e || !*e) return f;
+        std::string v = e;
+        if (v.find("skip") != std::string::npos) f = D3DCOMPILE_SKIP_OPTIMIZATION;
+        if (v.find("o3") != std::string::npos) f = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+        if (v.find("ieee") != std::string::npos) f |= D3DCOMPILE_IEEE_STRICTNESS;
+        LOGR("d3d12: XBE_SHADER_FLAGS=%s, shaders compiled with flags %X", e, f);
+        return f;
+    }();
     uint64_t profile_seed = Hash(profile, std::strlen(profile));
+    if (flags != D3DCOMPILE_OPTIMIZATION_LEVEL1) profile_seed = Hash(&flags, sizeof flags, profile_seed);
     uint64_t entry_seed = Hash(entry, std::strlen(entry), profile_seed);
     hash = Hash(src.data(), src.size(), entry_seed);
     auto it = blobs_.find(hash);
@@ -1545,8 +1560,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     ComPtr<ID3DBlob> err;
     PerfScope perf_compile{g_perf.compile};
     g_perf.shaders++;
-    HRESULT hr = D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, entry, profile,
-                            D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &err);
+    HRESULT hr = D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, entry, profile, flags, 0, &code, &err);
     if (FAILED(hr)) {
         LOGE("d3d12: %s compile failed: %s", profile, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
         LOGE("%s", src.c_str());
@@ -2126,6 +2140,11 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
             info = m->second.info;
             sv = m->second.sv;
             stages.replaced[stage] = m->second.replaced;
+            if (stage == 0) {
+                const StageMemo& h = m->second;
+                stage0_.tw = h.tw, stage0_.th = h.th, stage0_.tl = h.tl, stage0_.tf = h.tf, stage0_.tu = h.tu;
+                stage0_.tmade = h.tmade;
+            }
             return m->second.res;
         }
     }
@@ -2184,7 +2203,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
     ID3D12Resource* res = BindGuestTexture(s, stage, d, fi, stages);
-    if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage]};
+    if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage], stage0_.tw, stage0_.th, stage0_.tl, stage0_.tf, stage0_.tu, stage0_.tmade};
     return res;
 }
 
