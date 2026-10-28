@@ -151,7 +151,22 @@ void Init(ID3D12GraphicsCommandList* cl) {
     LOGR("d3d12: NVIDIA Aftermath event markers %s (result %08X)", set ? "on, one per draw" : "failed", unsigned(r));
 }
 inline void Mark(uint64_t list, uint32_t draw) {
-    if (set) set(ctx, reinterpret_cast<const void*>(uintptr_t((list << 20) | (draw & 0xFFFFF))), 0);
+    uint64_t v = (list << 20) | (draw & 0xFFFFF);
+    if (set) set(ctx, &v, sizeof v);  // copied by Aftermath, so the dump carries it
+}
+// at a lost device: the last marker the GPU reached, read in the process (GFSDK_Aftermath_GetData)
+void Report() {
+    if (!set) return;
+    struct Data { union { void* data; uint64_t align; }; uint32_t size; int status; } d{};
+    using GetData = int(__cdecl*)(uint32_t, void* const*, Data*);
+    auto get = reinterpret_cast<GetData>(GetProcAddress(GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll"), "GFSDK_Aftermath_GetData"));
+    int r = get ? get(1, &ctx, &d) : -1;
+    uint64_t v = 0;
+    if (d.data && d.size >= sizeof v) std::memcpy(&v, d.data, sizeof v);
+    static const char* kStatus[] = {"not started", "executing", "finished", "invalid"};
+    LOGR("d3d12: Aftermath's last marker: list %llu draw %llu%s, context %s (result %08X)", (unsigned long long)(v >> 20),
+         (unsigned long long)(v & 0xFFFFF), (v & 0xFFFFF) == 0xFFFFF ? " (its start)" : "",
+         unsigned(d.status) < 4 ? kStatus[d.status] : "?", unsigned(r));
 }
 }  // namespace nvmark
 
@@ -3223,6 +3238,7 @@ void D3D12Backend::ReportRemoved(const char* where) {
     if (reason == S_OK) return;
     reported = true;
     LogDebugMessages();
+    nvmark::Report();
     LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one",
          where, unsigned(reason), (unsigned long long)lists_, list_draws_);
     ComPtr<dred::Data> data;
