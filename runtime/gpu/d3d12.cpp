@@ -2685,7 +2685,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (!v.empty()) LOGR("d3d12: XBE_SKIP_STRIDES leaves out draws of %zu vertex strides", v.size());
         return v;
     }();
-    if (!skip_strides.empty() && a.buffer_count &&
+    // XBE_SKIP_AFTER=seconds: the strides are left out only from that long after the start (the menus drawn whole)
+    static const auto skip_from = [] {
+        const char* e = std::getenv("XBE_SKIP_AFTER");
+        return std::chrono::steady_clock::now() + std::chrono::seconds(e ? std::atoi(e) : 0);
+    }();
+    if (!skip_strides.empty() && a.buffer_count && std::chrono::steady_clock::now() >= skip_from &&
         std::find(skip_strides.begin(), skip_strides.end(), a.buffers[0].stride) != skip_strides.end())
         return;
     uint32_t query = BeginCountedDraw(s);
