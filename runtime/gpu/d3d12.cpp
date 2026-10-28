@@ -2300,6 +2300,7 @@ void D3D12Backend::EnsureVertexShader(const State& s, const Assembled& a, DrawSh
         };
         if (vs_edit.find("noprecise") != std::string::npos) replace_all("precise ", "");
         if (vs_edit.find("noinf") != std::string::npos) replace_all("1.#INF", "3.402823e38");
+        if (vs_edit.find("noskin") != std::string::npos) replace_all("a0 = mac_arl(", "a0 = 0 * mac_arl(");
         if (vs_edit.find("rcpclamp") != std::string::npos)
             replace_all("float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }", "float4 ilu_rcp(float v) { return magclamp(1.0 / v).xxxx; }");
     }
@@ -2954,6 +2955,23 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         note.hi = hi + uint32_t(a.base_vertex);
     }
     list_notes_.push_back(note);
+    // kept in release builds: the first two draws of each vertex shader, their geometry and input layout
+    {
+        static std::unordered_map<uint64_t, int> told;
+        if (told[sh.vh]++ < 2) {
+            std::string el, bufs;
+            for (uint32_t r = 0; r < 16; r++)
+                if ((k.regs >> r) & 1)
+                    el += " " + std::to_string(r) + ":" + std::to_string(k.elements[r] & 0xFF) + "/" +
+                          std::to_string((k.elements[r] >> 8) & 0xFF) + "+" + std::to_string(k.elements[r] >> 16);
+            for (uint32_t b = 0; b < a.buffer_count; b++)
+                bufs += " " + std::to_string(a.buffers[b].bytes) + "B/" + std::to_string(a.buffers[b].stride);
+            LOGR("d3d12: vertex shader %016llX draw at present %llu: topology %u, %u %s from %d, indices %u..%u, "
+                 "%u vertices assembled, buffers%s; inputs (register:DXGI/buffer+offset)%s", (unsigned long long)sh.vh,
+                 (unsigned long long)presents_, note.topo, note.count, note.indexed ? "indices" : "vertices",
+                 int(note.base), note.lo, note.hi, a.vertex_count, bufs.c_str(), el.c_str());
+        }
+    }
     DrawGeometry(a);
     EndCountedDraw(query);
     g_perf.geometry += PerfMs(perf_step);
