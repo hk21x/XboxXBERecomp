@@ -220,6 +220,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_KEYDOWN:
             if (wp == VK_F3) DumpThreads();
+            if (wp == VK_F8 && !diag::g_f8_pressed) {
+                LOGR("F8: experiments set to start now begin");
+                diag::g_f8_pressed = true;
+            }
             if (wp == VK_F4) {
                 LOGR("F4: frame log requested");
                 diag::g_framelog_request = true;

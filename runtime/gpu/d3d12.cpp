@@ -2815,12 +2815,19 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (!v.empty()) LOGR("d3d12: XBE_SKIP_STRIDES leaves out draws of %zu vertex strides", v.size());
         return v;
     }();
-    // XBE_SKIP_AFTER=seconds: the strides are left out only from that long after the start (the menus drawn whole)
-    static const auto skip_from = [] {
+    // XBE_SKIP_AFTER=seconds: the strides are left out only from that long after the start (the menus drawn whole);
+    // XBE_SKIP_AFTER=f8 from the first press of F8
+    static const bool skip_on_f8 = [] {
+        const char* e = std::getenv("XBE_SKIP_AFTER");
+        return e && (e[0] == 'f' || e[0] == 'F') && e[1] == '8';
+    }();
+    static const auto skip_time = [] {
         const char* e = std::getenv("XBE_SKIP_AFTER");
         return std::chrono::steady_clock::now() + std::chrono::seconds(e ? std::atoi(e) : 0);
     }();
-    if (!skip_strides.empty() && std::chrono::steady_clock::now() >= skip_from &&
+    const bool skipping = skip_on_f8 ? diag::g_f8_pressed.load(std::memory_order_relaxed)
+                                     : std::chrono::steady_clock::now() >= skip_time;
+    if (!skip_strides.empty() && skipping &&
         (skip_strides[0] == ~0u || (a.buffer_count && std::find(skip_strides.begin(), skip_strides.end(),
                                                                 a.buffers[0].stride) != skip_strides.end())))
         return;
@@ -2837,7 +2844,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         return std::make_pair(lo, hi);
     }();
     uint32_t seen = list_seen_++;
-    if ((seen < range.first || seen >= range.second) && std::chrono::steady_clock::now() >= skip_from) return;
+    if ((seen < range.first || seen >= range.second) && skipping) return;
     // XBE_SKIP_PS=handle,handle (hex, experiment): draws with those pixel shaders left out
     static const std::vector<uint64_t> skip_ps = [] {
         std::vector<uint64_t> v;

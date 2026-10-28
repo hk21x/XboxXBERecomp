@@ -14,6 +14,8 @@ namespace diag {
 
 // XBE_FRAMELOG: F4 (or a file named framelog beside the exe) starts the frame log
 inline std::atomic<bool> g_framelog_request{false};
+// F8 pressed: the renderer's experiments set to start then (XBE_SKIP_AFTER=f8) begin
+inline std::atomic<bool> g_f8_pressed{false};
 
 // XBE_PERF set: perf log lines once a second and the read-backs named
 inline bool Perf() {
