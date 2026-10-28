@@ -498,6 +498,13 @@ bool MakeFrameBuffers(uint32_t pp) {
 }
 }  // namespace
 
+// the ramp in the device's two slots too, where the library's own GetGammaRamp copies it from (NightFire saves it
+// once and scales it for every fade: a ramp never put there made every fade black on the GPU renderers)
+void StoreGammaRamp(const uint8_t* ramp) {
+    if (XDK_CDevice_GammaRamps == xdk::kUnknown) return;
+    for (uint32_t i = 0; i < 2; i++) std::memcpy(HostPtr(kDevice + XDK_CDevice_GammaRamps + i * 0x300), ramp, 768);
+}
+
 HLE_STDCALL(Direct3D_CreateDevice, 6) {
     XDK_REQUIRE("d3d", XDK_DATA(D3D_Device), XDK_DATA(D3D_pDevice), XDK_DATA(D3D_DirtyFlags),
                 XDK_DATA(D3D_DeferredTextureState), XDK_DATA(D3D_RenderState), XDK_DATA(D3D_Streams),
@@ -533,6 +540,12 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
             std::memcpy(HostPtr(kDevice + XDK_CDevice_AutoDepthSurface), auto_depth_surface, sizeof auto_depth_surface);
     }
     W32(kDevicePtr, kDevice);
+    // the console starts with a linear gamma ramp, which a title reads back (GetGammaRamp) before it sets its own
+    {
+        uint8_t ramp[768];
+        for (uint32_t i = 0; i < 768; i++) ramp[i] = uint8_t(i & 0xFF);
+        StoreGammaRamp(ramp);
+    }
     ScratchPush();
 
     if (!g_backend) {
@@ -759,6 +772,7 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
     WalkBeforeState();
     uint8_t ramp[768];
     std::memcpy(ramp, HostPtr(a[1]), 768);
+    StoreGammaRamp(ramp);
     if (g_backend) g_backend->SetGamma(ramp);
     return 0;
 }
