@@ -2287,6 +2287,22 @@ void D3D12Backend::EnsureVertexShader(const State& s, const Assembled& a, DrawSh
         return;
     }
     std::string src = VertexHlsl(s, a, sh);
+    // XBE_VS_EDIT=noprecise,noinf,rcpclamp (experiment): vertex shaders without precise, without infinite
+    // literals, or with reciprocals clamped as rcc's (a driver test: which construct an NVIDIA GPU hangs on)
+    static const std::string vs_edit = [] {
+        const char* e = std::getenv("XBE_VS_EDIT");
+        if (e && *e) LOGR("d3d12: XBE_VS_EDIT=%s", e);
+        return std::string(e ? e : "");
+    }();
+    if (!vs_edit.empty()) {
+        auto replace_all = [&src](const std::string& from, const std::string& to) {
+            for (size_t at = 0; (at = src.find(from, at)) != std::string::npos; at += to.size()) src.replace(at, from.size(), to);
+        };
+        if (vs_edit.find("noprecise") != std::string::npos) replace_all("precise ", "");
+        if (vs_edit.find("noinf") != std::string::npos) replace_all("1.#INF", "3.402823e38");
+        if (vs_edit.find("rcpclamp") != std::string::npos)
+            replace_all("float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }", "float4 ilu_rcp(float v) { return magclamp(1.0 / v).xxxx; }");
+    }
     sh.vs_code = Compile(sh.quad ? QuadHlsl(std::move(src)) : src, "main", "vs_5_0", sh.vh);
     shader_src_[sh.vkey] = sh.vh;
     // kept in release builds: which title program each vertex shader was made for
