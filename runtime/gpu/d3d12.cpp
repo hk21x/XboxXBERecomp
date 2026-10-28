@@ -155,8 +155,8 @@ inline void Mark(uint64_t list, uint32_t draw) {
     if (set) set(ctx, &v, sizeof v);  // copied by Aftermath, so the dump carries it
 }
 // at a lost device: the last marker the GPU reached, read in the process (GFSDK_Aftermath_GetData)
-void Report() {
-    if (!set) return;
+uint64_t Report() {
+    if (!set) return ~0ull;
     struct Data { union { void* data; uint64_t align; }; uint32_t size; int status; } d{};
     using GetData = int(__cdecl*)(uint32_t, void* const*, Data*);
     auto get = reinterpret_cast<GetData>(GetProcAddress(GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll"), "GFSDK_Aftermath_GetData"));
@@ -167,6 +167,7 @@ void Report() {
     LOGR("d3d12: Aftermath's last marker: list %llu draw %llu%s, context %s (result %08X)", (unsigned long long)(v >> 20),
          (unsigned long long)(v & 0xFFFFF), (v & 0xFFFFF) == 0xFFFFF ? " (its start)" : "",
          unsigned(d.status) < 4 ? kStatus[d.status] : "?", unsigned(r));
+    return r == 0x1 && d.data ? v : ~0ull;
 }
 }  // namespace nvmark
 
@@ -3251,7 +3252,7 @@ void D3D12Backend::ReportRemoved(const char* where) {
     if (reason == S_OK) return;
     reported = true;
     LogDebugMessages();
-    nvmark::Report();
+    uint64_t marker = nvmark::Report();
     LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one",
          where, unsigned(reason), (unsigned long long)lists_, list_draws_);
     ComPtr<dred::Data> data;
@@ -3276,6 +3277,18 @@ void D3D12Backend::ReportRemoved(const char* where) {
                     all += n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
                 LOGR("d3d12:   unfinished command list: %u of %u operations done, %u of %u draws done; operations:%s",
                      done, count, draws, all, ops.c_str());
+                // the operations around Aftermath's marker draw (barriers 15, copies 8, clears 14), when there is one
+                if (marker != ~0ull && (marker & 0xFFFFF) < all) {
+                    uint32_t want = uint32_t(marker & 0xFFFFF), seen = 0, i = 0;
+                    for (; i < count; i++) {
+                        bool draw = n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
+                        if (draw && seen++ == want) break;
+                    }
+                    std::string around;
+                    for (uint32_t j = i >= 12 ? i - 12 : 0; j < count && j <= i + 6; j++)
+                        around += (j == i ? " [" : " ") + std::to_string(n->history[j]) + (j == i ? "]" : "");
+                    LOGR("d3d12:   operations around the marker's draw %u (operation %u):%s", want, i, around.c_str());
+                }
                 // the draws recorded into it (found by its number of draws) around the one it stopped at
                 bool found = false;
                 // DRED counts the settings window's draws too, after the frame's: a list kept with as many or a
@@ -3335,6 +3348,23 @@ void D3D12Backend::ReportRemoved(const char* where) {
             for (const dred::Allocation* a = pf.freed; a && k < 6; a = a->next, k++)
                 LOGR("d3d12:     freed just before: %s (type %d)", a->name_a ? a->name_a : "unnamed", a->type);
         }
+    }
+    // the draws around the one Aftermath's marker says the GPU's front end had reached, and the copies before them
+    if (marker != ~0ull && (marker & 0xFFFFF) != 0xFFFFF) {
+        uint64_t list = marker >> 20;
+        uint32_t at = uint32_t(marker & 0xFFFFF);
+        bool found = false;
+        for (size_t k = 0; k < sent_notes_.size() && !found; k++) {
+            const auto& v = sent_notes_[k];
+            if (v.empty() || v[0].list != list) continue;
+            found = true;
+            LOGR("d3d12:   the draws around Aftermath's marker (list %llu draw %u):", (unsigned long long)list, at);
+            for (uint32_t i = at >= 10 ? at - 10 : 0; i < v.size() && i <= at + 10; i++)
+                LogDrawNote(v[i], i == at ? "  <- the marker" : "");
+            for (const CopyNote& c : sent_copies_[k])
+                if (c.before + 10 >= at && c.before <= at + 1) LOGR("d3d12:   before draw %u: %s", c.before, c.text.c_str());
+        }
+        if (!found) LOGR("d3d12:   (list %llu of the marker not kept)", (unsigned long long)list);
     }
     uint32_t total = std::min<uint32_t>(draw_note_, uint32_t(draw_notes_.size()));
     LOGR("d3d12:   the last draws recorded:");
