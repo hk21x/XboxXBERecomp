@@ -2674,6 +2674,14 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         return v;
     }();
     if (skip_target && s.rt.data && (s.rt.data & 0x0FFFFFFF) == skip_target) return;
+    // XBE_SPLIT_DRAWS=N (experiment): the list is sent, and the GPU finishes it, every N draws
+    static const uint32_t split = [] {
+        const char* e = std::getenv("XBE_SPLIT_DRAWS");
+        uint32_t v = e ? uint32_t(std::strtoul(e, nullptr, 10)) : 0;
+        if (v) LOGR("d3d12: XBE_SPLIT_DRAWS=%u, a command list holds at most that many draws", v);
+        return v;
+    }();
+    if (split && list_draws_ >= split) Flush();
     MakeDescriptorRoom();
     if (DepthCopy(s)) return;
     if (diag::SkippedDraw(s.vs_handle)) {
