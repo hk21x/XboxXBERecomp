@@ -2671,6 +2671,23 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
     // geometry, counted while the title runs a visibility test
     perf_step = PerfNow();
+    // XBE_SKIP_STRIDES=28,32 (experiment): draws whose first vertex buffer has one of these strides are left out
+    static const std::vector<uint32_t> skip_strides = [] {
+        std::vector<uint32_t> v;
+        if (const char* e = std::getenv("XBE_SKIP_STRIDES"))
+            for (const char* p = e; *p;) {
+                char* end;
+                unsigned long n = std::strtoul(p, &end, 10);
+                if (end == p) break;
+                v.push_back(uint32_t(n));
+                p = *end ? end + 1 : end;
+            }
+        if (!v.empty()) LOGR("d3d12: XBE_SKIP_STRIDES leaves out draws of %zu vertex strides", v.size());
+        return v;
+    }();
+    if (!skip_strides.empty() && a.buffer_count &&
+        std::find(skip_strides.begin(), skip_strides.end(), a.buffers[0].stride) != skip_strides.end())
+        return;
     uint32_t query = BeginCountedDraw(s);
     DrawNote& note = draw_notes_[draw_note_++ % draw_notes_.size()];
     note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
