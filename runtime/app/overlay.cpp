@@ -317,7 +317,8 @@ void Wheel(Settings& s) {
         input::WheelSetup();
     }
     if (ImGui::BeginTable("wheel_buttons", 2, ImGuiTableFlags_RowBg)) {
-        for (int c = input::kStart; c <= input::kWhite; c++) {
+        // the d-pad first (a wheel without a hat binds it to buttons), then the buttons
+        for (int c = input::kUp; c <= input::kWhite; c++) {
             if (c == input::kLT || c == input::kRT) continue;
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -327,7 +328,7 @@ void Wheel(Settings& s) {
         }
         ImGui::EndTable();
     }
-    ImGui::TextDisabled("The steering device's hat is the d-pad.");
+    ImGui::TextDisabled("The steering device's hat is the d-pad too, with any d-pad buttons bound here.");
 
     ImGui::SeparatorText("H-pattern shifter");
     for (int i = 0; i < kGears; i++) {
