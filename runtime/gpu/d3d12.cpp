@@ -723,6 +723,28 @@ bool D3D12Backend::CreateDevice() {
                  "System, Optional features)");
         }
     }
+    // NVIDIA Aftermath's crash dumps, before the device is made as NVIDIA asks (a test PC: its DLL beside the exe, see
+    // below): the dump written beside the log, logs\eon-<time>.nv-gpudmp. Declared here:
+    // GFSDK_Aftermath_EnableGpuCrashDumps(version, watched APIs (1 DX), flags, dump callback, 3 more callbacks, user)
+    if (HMODULE nv = LoadLibraryW((app::ExeDir() / L"GFSDK_Aftermath_Lib.x64.dll").c_str())) {
+        using DumpCb = void(__cdecl*)(const void*, uint32_t, void*);
+        using Enable = int(__cdecl*)(uint32_t, uint32_t, uint32_t, DumpCb, void*, void*, void*, void*);
+        DumpCb write = [](const void* dump, uint32_t size, void*) {
+            SYSTEMTIME tm;
+            GetLocalTime(&tm);
+            wchar_t name[64];
+            swprintf(name, 64, L"eon-%02u%02u%02u.nv-gpudmp", tm.wHour, tm.wMinute, tm.wSecond);
+            std::filesystem::path p = app::ExeDir() / L"logs" / name;
+            if (FILE* f = _wfopen(p.c_str(), L"wb")) {
+                fwrite(dump, 1, size, f);
+                fclose(f);
+            }
+            LOGR("d3d12: NVIDIA Aftermath crash dump written, %u bytes: %s", size, p.string().c_str());
+        };
+        auto enable = reinterpret_cast<Enable>(GetProcAddress(nv, "GFSDK_Aftermath_EnableGpuCrashDumps"));
+        int r = enable ? enable(0x21B, 0x1, 0, write, nullptr, nullptr, nullptr, nullptr) : -1;
+        LOGR("d3d12: NVIDIA Aftermath crash dumps %s (result %08X)", r == 0x1 ? "on" : "failed", unsigned(r));
+    }
     // Device Removed Extended Data: what the GPU last finished and where it faulted, for the report of a lost device
     {
         ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
