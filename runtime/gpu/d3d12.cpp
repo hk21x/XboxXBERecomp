@@ -352,6 +352,20 @@ private:
     void Begin();
     void Submit(bool wait);
     void WaitFence(uint64_t value);
+    // the frame's resources let go once the GPU is done with them; XBE_KEEP_RELEASED=1 (experiment) keeps every one
+    uint64_t released_ = 0;
+    std::vector<ComPtr<ID3D12Resource>> kept_;
+    void DropGarbage(Frame& f) {
+        static const bool keep = [] {
+            const char* e = std::getenv("XBE_KEEP_RELEASED");
+            bool v = e && *e == '1';
+            if (v) LOGR("d3d12: XBE_KEEP_RELEASED=1, no resource is ever released");
+            return v;
+        }();
+        released_ += f.garbage.size();
+        if (keep) for (auto& r : f.garbage) kept_.push_back(std::move(r));
+        f.garbage.clear();
+    }
     void SetFullViewport(uint32_t w, uint32_t h);
     void SetBlitTarget(D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, uint32_t h);
     void Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], bool gamma, bool alpha, uint32_t taps = 1,
@@ -1002,7 +1016,7 @@ void D3D12Backend::Submit(bool wait) {
     if (wait) {
         WaitFence(fence_value_);
         f.alloc->Reset();
-        f.garbage.clear();
+        DropGarbage(f);
         f.used = 0;
         f.srv = 0;
         ring_gen_++;
@@ -3184,7 +3198,7 @@ void D3D12Backend::ResetFrame() {
         g_perf.wait += PerfMs(perf_wait);
     }
     f.alloc->Reset();
-    f.garbage.clear();
+    DropGarbage(f);
     f.used = 0;
     f.srv = 0;
     ring_gen_++;
@@ -3541,10 +3555,10 @@ void D3D12Backend::Present(const Surface& front) {
         size_t garbage = 0;
         for (const Frame& f : frames_) garbage += f.garbage.size();
         LOGR("d3d12: memory at present %llu: video %llu of %llu MB, shared %llu MB; %zu textures, %zu targets, %zu "
-             "pipelines, %zu waiting release, %llu lists", (unsigned long long)presents_,
+             "pipelines, %zu waiting release, %llu released in all, %llu lists", (unsigned long long)presents_,
              (unsigned long long)(vm.CurrentUsage >> 20), (unsigned long long)(vm.Budget >> 20),
              (unsigned long long)(sys.CurrentUsage >> 20), textures_.size(), targets_.size(), psos_.size(), garbage,
-             (unsigned long long)lists_);
+             (unsigned long long)released_, (unsigned long long)lists_);
     }
     presents_seen_.store(presents_);
     frame_++;
