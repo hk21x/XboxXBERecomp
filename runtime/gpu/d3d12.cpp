@@ -639,6 +639,7 @@ private:
         uint32_t buffers = 0, bytes = 0, stride = 0;
         float v0[4] = {};  // the first buffer's first vertex, its first four floats
         uint32_t lo = 0, hi = 0;  // an indexed draw's lowest and highest index, with the base added
+        bool counted = false;      // drawn while the title counts its pixels (an occlusion query)
     };
     std::array<DrawNote, 128> draw_notes_{};
     std::vector<DrawNote> list_notes_;               // every draw of the list being recorded
@@ -984,7 +985,10 @@ void D3D12Backend::Submit(bool wait) {
         if (v) LOGR("d3d12: XBE_SYNC_GPU=1, every command list waited for");
         return v;
     }();
-    if (sync && !wait) WaitFence(fence_value_);
+    if (sync && !wait) {
+        WaitFence(fence_value_);
+        ReportRemoved("a list waited for");  // before the next list records markers over Aftermath's last ones
+    }
     if (wait) {
         WaitFence(fence_value_);
         f.alloc->Reset();
@@ -2535,7 +2539,15 @@ bool D3D12Backend::EnsureQueries() {
 
 // a draw while the title counts visible pixels gets an occlusion query of its own, kNoQuery otherwise
 uint32_t D3D12Backend::BeginCountedDraw(const State& s) {
-    if (!s.simple[kMCountEnable >> 2] || !EnsureQueries()) return kNoQuery;
+    if (!s.simple[kMCountEnable >> 2]) return kNoQuery;
+    // XBE_NO_QUERIES=1 (experiment): no occlusion queries, every visibility test reports 0 pixels
+    static const bool none = [] {
+        const char* e = std::getenv("XBE_NO_QUERIES");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_NO_QUERIES=1, visibility tests report 0 pixels");
+        return v;
+    }();
+    if (none || !EnsureQueries()) return kNoQuery;
     uint32_t query = query_next_++ % kQueries;
     cl_->BeginQuery(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
     return query;
@@ -2745,6 +2757,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
             a.index_count != 0, uint32_t(a.base_vertex), mem::VirtualFromPhysical(s.rt.data), s.textures[0],
             s.textures[1], s.vs ? s.vs->handle : 0, s.ps ? s.ps->handle : 0};
+    note.counted = s.simple[kMCountEnable >> 2] != 0;
     note.buffers = a.buffer_count;
     if (a.buffer_count) {
         note.bytes = a.buffers[0].bytes;
@@ -3290,6 +3303,16 @@ void D3D12Backend::ReportRemoved(const char* where) {
                                    (d.indexed && d.hi - d.lo >= 0x10000);
                         if (odd && shown++ < 30) LogDrawNote(d, "  (after)");
                     }
+                    // visibility tests: how many in the list, the nearest to the stop
+                    uint32_t counted = 0, before = ~0u, after = ~0u;
+                    for (uint32_t i = 0; i < v->size(); i++) {
+                        if (!(*v)[i].counted) continue;
+                        counted++;
+                        if (i < draws) before = i;
+                        else if (after == ~0u) after = i;
+                    }
+                    LOGR("d3d12:   visibility-tested draws in the list: %u; the last before the stop %d, the first from it %d",
+                         counted, before == ~0u ? -1 : int(before), after == ~0u ? -1 : int(after));
                     std::string tg;
                     for (auto& [rt, n] : per_target) tg += " " + std::to_string(n) + "x" + std::to_string(rt);
                     LOGR("d3d12:   the 1500 draws after it by target (data, decimal):%s", tg.c_str());
@@ -3328,10 +3351,10 @@ void D3D12Backend::LogDrawNote(const DrawNote& d, const char* mark) {
         return std::string(b);
     };
     LOGR("d3d12:   draw %llu.%u: topology %u, %u %s from %d, target %08X, textures %s %s, vs %08llX ps %08llX, "
-         "%u buffers, the first %u bytes stride %u starting %g %g %g %g, indices %u..%u%s",
+         "%u buffers, the first %u bytes stride %u starting %g %g %g %g, indices %u..%u%s%s",
          (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", int(d.base), d.rt,
          tex(d.t0).c_str(), tex(d.t1).c_str(), (unsigned long long)d.vs, (unsigned long long)d.ps, d.buffers, d.bytes,
-         d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], d.lo, d.hi, mark);
+         d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], d.lo, d.hi, d.counted ? ", visibility-tested" : "", mark);
 }
 
 // the debug layer's messages since the last call: each kind three times, 400 in all
