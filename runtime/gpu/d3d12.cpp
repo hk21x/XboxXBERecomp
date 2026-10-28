@@ -1568,6 +1568,27 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     if (flags != D3DCOMPILE_OPTIMIZATION_LEVEL1) profile_seed = Hash(&flags, sizeof flags, profile_seed);
     uint64_t entry_seed = Hash(entry, std::strlen(entry), profile_seed);
     hash = Hash(src.data(), src.size(), entry_seed);
+    // XBE_DUMP_SHADERS=1: each shader's HLSL in logs\shaders\<hash>_<profile>.hlsl
+    static const bool dump = [] {
+        const char* e = std::getenv("XBE_DUMP_SHADERS");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_DUMP_SHADERS=1, shader sources in logs\\shaders");
+        return v;
+    }();
+    if (dump) {
+        static std::unordered_set<uint64_t> written;
+        if (written.insert(hash).second) {
+            std::filesystem::path dir = app::ExeDir() / L"logs" / L"shaders";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            char name[64];
+            snprintf(name, sizeof(name), "%016llX_%s.hlsl", (unsigned long long)hash, profile);
+            if (FILE* f = _wfopen((dir / name).c_str(), L"wb")) {
+                fwrite(src.data(), 1, src.size(), f);
+                fclose(f);
+            }
+        }
+    }
     auto it = blobs_.find(hash);
     if (it != blobs_.end()) return it->second.Get();
     if (ComPtr<ID3DBlob> kept; CachedShader(hash, kept.GetAddressOf())) {
@@ -2268,6 +2289,9 @@ void D3D12Backend::EnsureVertexShader(const State& s, const Assembled& a, DrawSh
     std::string src = VertexHlsl(s, a, sh);
     sh.vs_code = Compile(sh.quad ? QuadHlsl(std::move(src)) : src, "main", "vs_5_0", sh.vh);
     shader_src_[sh.vkey] = sh.vh;
+    // kept in release builds: which title program each vertex shader was made for
+    LOGR("d3d12: vertex shader %016llX at present %llu: program handle %08X, %s", (unsigned long long)sh.vh,
+         (unsigned long long)presents_, s.vs_handle, sh.prog ? "a vertex program" : "fixed function");
 }
 
 bool D3D12Backend::BindStageTexturesAndTargets(const State& s, DrawTextures& stages) {
@@ -2722,6 +2746,21 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (sh.prog) EnsureProgramHash(s);
     sh.vkey = VertexKey(s, a, sh);
     EnsureVertexShader(s, a, sh);
+    // XBE_SKIP_VS=hash,hash (hex, experiment): draws with those vertex shaders (the pipeline log's vs) left out
+    static const std::vector<uint64_t> skip_vs = [] {
+        std::vector<uint64_t> v;
+        if (const char* e = std::getenv("XBE_SKIP_VS"))
+            for (const char* p = e; *p;) {
+                char* end;
+                uint64_t h = std::strtoull(p, &end, 16);
+                if (end == p) break;
+                v.push_back(h);
+                p = *end ? end + 1 : end;
+            }
+        if (!v.empty()) LOGR("d3d12: XBE_SKIP_VS: %zu vertex shaders left out", v.size());
+        return v;
+    }();
+    if (!skip_vs.empty() && std::find(skip_vs.begin(), skip_vs.end(), sh.vh) != skip_vs.end()) return;
 
     g_perf.t_shaders += PerfMs(perf_shaders);
     // stage textures, then the pixel shader made for them
