@@ -721,6 +721,18 @@ bool D3D12Backend::CreateDevice() {
         return false;
     }
     if (debug_ && SUCCEEDED(dev_.As(&info_))) info_->SetMessageCountLimit(4096);
+    // NVIDIA Aftermath, on a test PC only: with NVIDIA's GFSDK_Aftermath_Lib.x64.dll beside the exe (not shipped: its
+    // licence), markers, resource tracking, shader debug info and call stacks on, so the Aftermath Monitor's crash
+    // dump names the resource at a page fault. Declared here: GFSDK_Aftermath_DX12_Initialize(version, flags, device)
+    if (HMODULE nv = LoadLibraryW((app::ExeDir() / L"GFSDK_Aftermath_Lib.x64.dll").c_str())) {
+        using Init = int(__cdecl*)(uint32_t, uint32_t, ID3D12Device*);
+        constexpr uint32_t kVersion = 0x21B;  // GFSDK_Aftermath_Version_API, SDK 2026.3
+        constexpr uint32_t kFlags = 0x1 | 0x2 | 0x8 | 0x10 | 0x40000000;  // markers, resources, debug info, errors, stacks
+        auto init = reinterpret_cast<Init>(GetProcAddress(nv, "GFSDK_Aftermath_DX12_Initialize"));
+        int r = init ? init(kVersion, kFlags, dev_.Get()) : -1;
+        LOGR("d3d12: NVIDIA Aftermath %s (result %08X)", r == 0x1 ? "on: markers, resource tracking, call stacks" : "failed",
+             unsigned(r));
+    }
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     if (adapter) adapter.As(&adapter3_);
