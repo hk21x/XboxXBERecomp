@@ -38,6 +38,22 @@ Under `<short>\` beside itself:
 The build runs with the environment Visual Studio's developer prompt would set (INCLUDE, LIB, PATH) and links with
 lld. Downloads resume and every step can run again: what is done is kept.
 
+## Updates
+
+A launcher knows its version: a release's tag when GitHub Actions builds it for one (`GITHUB_REF_TYPE` tag, so the
+game's release workflow needs nothing), else `dev` (`-DLAUNCHER_VERSION=` overrides).
+
+- A release launcher asks GitHub's API at start for the repository's latest release. When it is newer, the window
+  offers it at the top (**Update the launcher**, **What's new**, **Later**): the release's `<short>Launcher.exe` is
+  downloaded beside this one, checked by the SHA-256 GitHub lists for it (else its size), and swapped in; this one is
+  renamed `.old` (a running exe can be renamed, not overwritten) and the new one starts. The next start removes the
+  `.old`. Offline, or for a private repository, nothing is offered.
+- A release launcher builds its own tag, not the branch, and launcher.json records the version each build came from
+  (`built`). A game built by another version (or before versions were recorded) shows **Version vX of the game is
+  ready to build** and the button says Update: the rebuild keeps the saves, settings and the player's copy.
+- A `dev` launcher (an artifact of a push to main) builds the branch's head and offers an update when the branch has
+  moved on, as before.
+
 ## Music (game.json `music`)
 
 Section 4 of the window: the player chooses a folder of their music. Each subfolder becomes a soundtrack (everything
@@ -54,3 +70,6 @@ Xbox's, copied over) is left alone.
 `launcher_cli` (built on Linux from the same CMakeLists) runs the steps from a terminal: `plan` (resolves the tools
 from the manifests), `tool <id>` (downloads and unpacks one; not the SDK, which needs msiexec), `game <iso|folder>`,
 `source`, `env`, `music <folder>` (with the ffmpeg on the PATH), and `hash`/`untar` for the pieces. With a toolchain.json beside game.json it uses that one.
+
+`launcher_cli <game.json> <root> latest [version]` prints the latest release and whether a launcher of that version
+would be offered it; `LAUNCHER_VERSION=v1.0.1` makes any command act as that release's launcher.

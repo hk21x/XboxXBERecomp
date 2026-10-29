@@ -50,7 +50,10 @@ public:
     // the SDK's deepest headers lie about 130 below tools\; message: what to do
     static constexpr size_t kMaxRootLength = 80;
     bool PathTooLong(std::string& message) const;
-    bool UpdateAvailable(bool& available, std::string& error);  // the source behind its branch's head
+    // a build of another version is in play: a release launcher's own tag not built yet (no network asked), a dev
+    // launcher's source behind its branch's head
+    bool UpdateAvailable(bool& available, std::string& error);
+    std::string BuiltVersion() const;  // the launcher version the game in play was built by, empty if not known
     bool Launch(std::string& error);
     uint64_t BuildFilesBytes() const;  // source\out, removable once built
     bool RemoveBuildFiles(std::string& error);

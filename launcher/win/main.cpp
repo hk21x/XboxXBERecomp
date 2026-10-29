@@ -21,6 +21,7 @@
 #include <thread>
 
 #include "core/builder.h"
+#include "core/update.h"
 #include "core/util.h"
 #include "embedded.h"
 #include "imgui.h"
@@ -156,6 +157,10 @@ struct App {
     GameCheck copy;
     bool agreed = false;
     std::atomic<bool> busy{false}, update{false}, checked_update{false};
+    // a newer release's launcher (core/update.h): offered at the top until updated or put off
+    std::mutex release_lock;
+    Release release;
+    std::atomic<bool> launcher_update{false}, later{false}, restart{false};
     std::thread worker;
     std::mutex lock;
     Status status;
@@ -189,6 +194,47 @@ struct App {
     }
 };
 
+// this exe's path, and the names an update uses beside it
+fs::path SelfPath() {
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    return self;
+}
+fs::path Beside(const fs::path& exe, const wchar_t* ext) {
+    fs::path p = exe;
+    p += ext;
+    return p;
+}
+
+// The release's launcher downloaded beside this one (checked by its SHA-256 where GitHub lists it, else its size),
+// then swapped in: Windows lets a running exe be renamed, not overwritten, so this one becomes <exe>.old, which the
+// next start removes. The new one starts when this window closes (App::restart).
+bool UpdateLauncher(App& app, const Release& r, std::string& error) {
+    fs::path exe = SelfPath(), fresh = Beside(exe, L".new"), old = Beside(exe, L".old");
+    app.builder->cancel = false;
+    Progress progress = [&app](uint64_t done, uint64_t total) {
+        std::lock_guard l(app.lock);
+        app.status = {"Downloading the new launcher", Megabytes(done) + " of " + Megabytes(total),
+                      total ? double(done) / double(total) : -1};
+    };
+    if (!Download(*app.http, r.launcher_url, fresh, r.launcher_sha256, r.launcher_size, progress, &app.builder->cancel,
+                  error))
+        return false;
+    std::error_code ec;
+    fs::remove(old, ec);
+    if (!MoveFileExW(exe.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        error = "The launcher could not be updated (it could not rename itself). The new one is " + U8(fresh) + ".";
+        return false;
+    }
+    if (!MoveFileExW(fresh.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        MoveFileExW(old.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);
+        error = "The launcher could not be updated (the new one could not take its place). It is " + U8(fresh) + ".";
+        return false;
+    }
+    app.restart = true;
+    return true;
+}
+
 void Section(const char* title) {
     ImGui::Spacing();
     ImGui::Spacing();
@@ -210,6 +256,29 @@ void Draw(App& app, HWND hwnd, ImFont* big) {
 
     bool busy = app.busy;
     bool built = app.builder->Built();
+
+    if (app.launcher_update && !app.later) {
+        Release r;
+        {
+            std::lock_guard l(app.release_lock);
+            r = app.release;
+        }
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "Version %s is out (this launcher is %s).", r.tag.c_str(),
+                           app.game.version.c_str());
+        ImGui::TextWrapped("Update the launcher, then build the game again with the new version. Your saves and "
+                           "settings are kept.");
+        ImGui::BeginDisabled(busy || r.launcher_url.empty());
+        if (ImGui::Button("Update the launcher")) {
+            app.music_job = false;
+            app.Start([&app, r](std::string& e) { return UpdateLauncher(app, r, e); }, "");
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("What's new") && !r.page.empty()) OpenUrl(r.page);
+        ImGui::SameLine();
+        if (ImGui::Button("Later")) app.later = true;
+    }
 
     Section("1  Your game");
     if (app.copy.ok) {
@@ -265,7 +334,12 @@ void Draw(App& app, HWND hwnd, ImFont* big) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Read them")) OpenUrl(kLicenseUrl);
         } else if (app.update) {
-            ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "A new version is available.");
+            std::string was = app.builder->BuiltVersion();
+            if (IsReleaseVersion(app.game.version))
+                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "Version %s of the game is ready to build (yours: %s).",
+                                   app.game.version.c_str(), was.empty() ? "an earlier one" : was.c_str());
+            else
+                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "A new version is available.");
         } else {
             ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "Built and ready.");
         }
@@ -410,6 +484,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         MessageBoxW(nullptr, Wide(e).c_str(), L"Launcher", MB_ICONERROR);
         return 1;
     }
+    app.game.version = kLauncherVersion;
+    // what an update left: the launcher it replaced (still running then, so removed now)
+    {
+        std::error_code rm;
+        fs::remove(Beside(SelfPath(), L".old"), rm);
+    }
     // the work folder beside the launcher, named after the game
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
@@ -431,14 +511,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (!saved.empty()) app.copy = CheckGame(app.game, saved);
     app.music = app.builder->SavedMusic();
     app.build_bytes = app.builder->BuildFilesBytes();
-    // a new version: looked for once at start when the game was built before
-    if (app.builder->Built())
-        app.Start([&app](std::string& err) {
-            bool available = false;
-            if (!app.builder->UpdateAvailable(available, err)) return true;  // offline: no news is fine
-            app.update = available;
-            return true;
-        }, "");
+    // a new version: a newer release's launcher looked for once at start (a release launcher only), and the game
+    // when it was built before
+    app.Start([&app](std::string& err) {
+        if (IsReleaseVersion(app.game.version)) {
+            Release r;
+            std::string e;
+            if (LatestRelease(*app.http, app.game, r, e) && CompareVersions(r.tag, app.game.version) > 0) {
+                std::lock_guard l(app.release_lock);
+                app.release = r;
+                app.launcher_update = true;
+            }
+        }
+        bool available = false;
+        if (app.builder->Built() && app.builder->UpdateAvailable(available, err)) app.update = available;
+        err.clear();  // offline: no news is fine
+        return true;
+    }, "");
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.style = CS_CLASSDC;
@@ -512,6 +601,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         g_context->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_swap->Present(1, 0);
+        // the launcher updated itself: the new one starts, this one closes
+        if (app.restart && !app.busy) {
+            fs::path exe = SelfPath();
+            std::string err;
+            if (app.platform->Start(exe, exe.parent_path(), err)) break;
+            app.restart = false;
+            std::lock_guard l(app.lock);
+            app.error = "The new launcher is in place but did not start: " + err + " Start it again.";
+        }
         if (!app.busy && !IsWindowVisible(hwnd)) Sleep(50);
     }
     // closing during a build stops it

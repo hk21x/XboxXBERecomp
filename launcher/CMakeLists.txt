@@ -42,7 +42,7 @@ configure_file(${nlohmann_json_SOURCE_DIR}/json.hpp ${CMAKE_BINARY_DIR}/include/
 
 set(XZ ${xz_embedded_SOURCE_DIR}/linux/lib/xz)
 add_library(launcher_core STATIC
-    core/archive.cpp core/builder.cpp core/game.cpp core/hash.cpp core/music.cpp core/net.cpp core/plan.cpp
+    core/archive.cpp core/builder.cpp core/game.cpp core/hash.cpp core/music.cpp core/net.cpp core/plan.cpp core/update.cpp
     ${SDK_ROOT}/runtime/kernel/disc.cpp
     ${miniz_SOURCE_DIR}/miniz.c
     ${XZ}/xz_crc32.c ${XZ}/xz_crc64.c ${XZ}/xz_dec_lzma2.c ${XZ}/xz_dec_stream.c ${XZ}/xz_dec_bcj.c)
@@ -57,6 +57,16 @@ if(WIN32)
     # the launcher itself: a window (Dear ImGui on Direct3D 11), WinHTTP, the game's json built in
     FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.0 GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(imgui)
+    # the launcher's version: a release's tag when GitHub Actions builds one (GITHUB_REF_TYPE tag), else "dev"; set
+    # LAUNCHER_VERSION to override. A release launcher offers newer releases and builds its own tag (core/update.h)
+    if(NOT LAUNCHER_VERSION)
+        if("$ENV{GITHUB_REF_TYPE}" STREQUAL "tag")
+            set(LAUNCHER_VERSION "$ENV{GITHUB_REF_NAME}")
+        else()
+            set(LAUNCHER_VERSION "dev")
+        endif()
+    endif()
+    message(STATUS "launcher version: ${LAUNCHER_VERSION}")
     file(READ ${LAUNCHER_GAME}/game.json GAME_JSON)
     file(READ ${LAUNCHER_GAME}/toolchain.json TOOLCHAIN_JSON)
     configure_file(win/embedded.h.in ${CMAKE_BINARY_DIR}/include/embedded.h @ONLY)

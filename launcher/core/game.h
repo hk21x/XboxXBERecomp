@@ -15,6 +15,9 @@ struct GameConfig {
     std::string xbe;         // "default.xbe"
     std::map<std::string, std::string> releases;  // xbe SHA-1 -> release name; a copy must be one of them
     std::string repo, branch;  // the game's source (git)
+    // the launcher's own version, set by the launcher (not game.json): a release's tag ("v1.0.2"), whose source it
+    // builds, or "dev" for one built from a branch, which builds the branch
+    std::string version = "dev";
     std::string toolchain;     // toolchain.json's address
     bool music = false;        // the game plays Xbox custom soundtracks: the launcher makes them from a music folder
 };
