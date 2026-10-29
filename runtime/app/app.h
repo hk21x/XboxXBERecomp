@@ -177,6 +177,10 @@ struct GameInfo {
     // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form), or that multiplies it by a 2D
     // orthographic matrix (gpu::MatrixProgram, OrthoConstants: EoN's driving HUD)
     bool squeeze_screen_programs = false;
+    // ultrawide: a textured bar the frame's full height ending on its left or right edge (NightFire's sniper scope: a
+    // black 32x32 texture from x 0 to 81 and 559 to 640 beside the sight) keeps that edge, as an untextured one always
+    // does (gpu::DrawSpan), so the bars reach the screen's sides; off, they are squeezed with the rest of the 2D
+    bool edge_bars = false;
     // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)

@@ -827,7 +827,7 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
     if (program && s.vs->screen != 1 && k < 0) return kSpanFrame;
-    float lo = 1e30f, hi = -1e30f;
+    float lo = 1e30f, hi = -1e30f, top = 1e30f, bottom = -1e30f;  // top and bottom: screen y, without a matrix
     count = std::min<uint32_t>(count, 4096);
     for (uint32_t i = 0; i < count; i++) {
         float p[4] = {0, 0, 0, 1};
@@ -845,12 +845,18 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
         }
         lo = std::min(lo, x);
         hi = std::max(hi, x);
+        top = std::min(top, p[1]);
+        bottom = std::max(bottom, p[1]);
     }
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
     // radar's tiles) do not
     if (!s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
+        return kSpanFrame;
+    // a textured bar the viewport's full height so (GameInfo::edge_bars)
+    if (app::kGame.edge_bars && s.textures[0] && k < 0 && lo >= -kEdgeSlack && hi <= width + kEdgeSlack &&
+        (lo <= 0.5f || hi >= width - 0.5f) && top <= s.viewport.y + 0.5f && bottom >= s.viewport.y + s.viewport.h - 0.5f)
         return kSpanFrame;
     const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
     if (right - left < width - 1 && lo <= left + 0.5f && hi >= right - 0.5f) return kSpanViewport;
