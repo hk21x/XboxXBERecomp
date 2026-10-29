@@ -64,6 +64,10 @@ using namespace kernel;
 #define SYM_D3DDevice_GetRasterStatus FFFFFE13
 #define HAS_D3DDevice_GetRasterStatus 0
 #endif
+#ifndef SYM_D3D_BlockOnNonSurfaceResource
+#define SYM_D3D_BlockOnNonSurfaceResource FFFFFE14
+#define HAS_D3D_BlockOnNonSurfaceResource 0
+#endif
 #ifndef SYM_D3DDevice_BeginPushBuffer
 #define SYM_D3DDevice_BeginPushBuffer FFFFFE11
 #define HAS_D3DDevice_BeginPushBuffer 0
@@ -659,6 +663,15 @@ HLE_WRAP(Lock2DSurface, 6) {
     }
 }
 HLE_STDCALL(D3DResource_BlockUntilNotBusy, 1) {
+    if (a[0] && g_backend) {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        g_backend->WaitResource(a[0]);
+    }
+    gpu::MarkDirty(a[0]);
+    return 0;
+}
+// the lock of a vertex or index buffer (no NOOVERWRITE) waits here: for the renderer to be done with it, as above
+HLE_STDCALL(D3D_BlockOnNonSurfaceResource, 1) {
     if (a[0] && g_backend) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         g_backend->WaitResource(a[0]);
