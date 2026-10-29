@@ -4,14 +4,17 @@
 //   launcher_cli <game.json> <root> game <iso|folder>  check a copy and link it into play/assets
 //   launcher_cli <game.json> <root> source             clone or update the source, put the xbe in it
 //   launcher_cli <game.json> <root> env                the build's environment
+//   launcher_cli <game.json> <root> latest [version]   the newest release, and whether a launcher of version is behind
 //   launcher_cli hash <file>                           SHA-256 and SHA-1
 //   launcher_cli untar <file.tar.xz> <dest> [keep...]  unpack with keep rules (strip 1)
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 
 #include "core/builder.h"
 #include "core/hash.h"
+#include "core/update.h"
 
 using namespace launcher;
 namespace fs = std::filesystem;
@@ -59,6 +62,8 @@ int main(int argc, char** argv) {
     // a local toolchain.json beside game.json stands in for the published one
     fs::path local = fs::path(argv[1]).parent_path() / "toolchain.json";
     if (fs::exists(local)) game.toolchain = "file://" + fs::absolute(local).string();
+    // LAUNCHER_VERSION: the version this run acts as (a release tag builds that tag; default dev, the branch)
+    if (const char* v = std::getenv("LAUNCHER_VERSION")) game.version = v;
     auto http = MakeHttp();
     auto platform = MakePlatform();
     Builder b(game, argv[2], *http, *platform);
@@ -71,6 +76,21 @@ int main(int argc, char** argv) {
     };
     b.on_log = [](const std::string& l) { std::printf("log: %s\n", l.c_str()); };
     std::string cmd = argv[3];
+    if (cmd == "latest") {
+        Release r;
+        if (!LatestRelease(*http, game, r, error)) {
+            std::fprintf(stderr, "latest: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("%s \"%s\" %s\n  launcher %s (%llu bytes, sha256 %s)\n", r.tag.c_str(), r.name.c_str(), r.page.c_str(),
+                    r.launcher_url.empty() ? "none" : r.launcher_url.c_str(), (unsigned long long)r.launcher_size,
+                    r.launcher_sha256.empty() ? "not listed" : r.launcher_sha256.c_str());
+        if (argc > 4)
+            std::printf("  a launcher of %s: %s\n", argv[4],
+                        !IsReleaseVersion(argv[4]) ? "dev, offered nothing"
+                        : CompareVersions(r.tag, argv[4]) > 0 ? "behind: offered the update" : "up to date");
+        return 0;
+    }
     Plan plan;
     if (cmd == "plan" || cmd == "tool" || cmd == "env") {
         if (!b.LoadToolchain(plan, error)) {

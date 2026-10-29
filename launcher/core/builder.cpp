@@ -11,6 +11,7 @@
 #include "core/archive.h"
 #include "core/hash.h"
 #include "core/music.h"
+#include "core/update.h"
 #include "nlohmann/json.hpp"
 
 #include "core/util.h"
@@ -247,13 +248,22 @@ bool Builder::GetSource(std::string& error) {
     Say("Downloading the game's source");
     std::error_code ec;
     fs::path src = root_ / "source";
+    // a release launcher builds its own release (its tag), a dev launcher the branch's head
+    bool release = IsReleaseVersion(game_.version);
+    std::string ref = release ? game_.version : game_.branch;
     if (fs::exists(src / ".git", ec)) {
-        if (Git({"-C", U8(src), "fetch", "--progress", "origin", game_.branch}, nullptr, error) != 0) return false;
-        // the launcher's own checkout: whatever it holds becomes the branch's head
-        if (Git({"-C", U8(src), "reset", "--hard", "origin/" + game_.branch}, nullptr, error) != 0) return false;
+        if (release) {
+            std::string tag = "refs/tags/" + ref;
+            if (Git({"-C", U8(src), "fetch", "--progress", "--force", "origin", tag + ":" + tag}, nullptr, error) != 0)
+                return false;
+        } else if (Git({"-C", U8(src), "fetch", "--progress", "origin", ref}, nullptr, error) != 0) {
+            return false;
+        }
+        // the launcher's own checkout: whatever it holds becomes the release, or the branch's head
+        if (Git({"-C", U8(src), "reset", "--hard", release ? ref : "origin/" + ref}, nullptr, error) != 0) return false;
     } else {
         fs::remove_all(src, ec);  // a clone that did not finish
-        if (Git({"clone", "--progress", "--branch", game_.branch, game_.repo, U8(src)}, nullptr, error) != 0) return false;
+        if (Git({"clone", "--progress", "--branch", ref, game_.repo, U8(src)}, nullptr, error) != 0) return false;
     }
     return Git({"-C", U8(src), "submodule", "update", "--init", "--recursive", "--progress"}, nullptr, error) == 0;
 }
@@ -393,12 +403,18 @@ bool Builder::BuildAll(std::string& error) {
     for (const Tool& t : plan_.tools)
         if (!t.optional && !InstallTool(t, error)) return false;
     if (!GetSource(error) || !PutXbe(error) || !Compile(error) || !Install(error)) return false;
+    Remember("built", game_.version);
     Say("Ready", "", 1);
     return true;
 }
 
 bool Builder::UpdateAvailable(bool& available, std::string& error) {
     available = false;
+    if (IsReleaseVersion(game_.version)) {
+        // a game built before versions were kept counts as older
+        available = Built() && BuiltVersion() != game_.version;
+        return true;
+    }
     fs::path src = root_ / "source";
     std::error_code ec;
     if (!fs::exists(src / ".git", ec)) return true;
@@ -428,6 +444,14 @@ void Builder::Remember(const std::string& key, const std::string& value) {
     if (j.is_discarded() || !j.is_object()) j = json::object();
     j[key] = value;
     std::ofstream(root_ / "launcher.json") << j.dump(2);
+}
+
+std::string Builder::BuiltVersion() const {
+    std::string text;
+    if (!ReadAll(root_ / "launcher.json", text)) return {};
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("built") || !j["built"].is_string()) return {};
+    return j["built"].get<std::string>();
 }
 
 fs::path Builder::SavedMusic() const {

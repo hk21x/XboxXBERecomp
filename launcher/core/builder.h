@@ -46,7 +46,10 @@ public:
 
     // the whole build: tools, source, xbe, compile, install. Returns false with the reason
     bool BuildAll(std::string& error);
-    bool UpdateAvailable(bool& available, std::string& error);  // the source behind its branch's head
+    // a build of another version is in play: a release launcher's own tag not built yet (no network asked), a dev
+    // launcher's source behind its branch's head
+    bool UpdateAvailable(bool& available, std::string& error);
+    std::string BuiltVersion() const;  // the launcher version the game in play was built by, empty if not known
     bool Launch(std::string& error);
     uint64_t BuildFilesBytes() const;  // source\out, removable once built
     bool RemoveBuildFiles(std::string& error);
