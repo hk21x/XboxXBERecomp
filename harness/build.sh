@@ -4,7 +4,7 @@
 #   -n exe name (default: the generated folder's name)
 #   -x regex of sources to leave out (repeatable)   -e extra source file (repeatable)
 #   -G folder for the generated objects (default <out>/gen), shared between builds of the same generated code
-# env: CXX (clang++), JOBS (nproc)
+# env: CXX (clang++), JOBS (nproc), HOST_FLAGS (more flags for the host sources: a game's release define)
 # Leaves out the window, SDL input, XAudio2 and D3D12 parts of the runtime and the sources of the repo's other images
 # (src/<name> for each other folder beside the generated one); the harness supplies their stand ins.
 set -e
@@ -22,7 +22,7 @@ EXE=${EXE:-$(basename "$GEN")}; GEN_OBJ=${GEN_OBJ:-$OUT/gen}; mkdir -p "$GEN_OBJ
 H=$(dirname "$(realpath "$0")"); RT=$REPO/sdk/runtime
 CXX=${CXX:-clang++}; JOBS=${JOBS:-$(nproc)}
 BASE="-std=c++20 -march=x86-64-v2 -fno-strict-aliasing"
-HOST="$BASE -O1 -g -I$REPO/src -I$RT -I$GEN -I$H -I$H/compat -DXBE_RAW_VERTICES=${RAW:-0} -DXBE_RENDER_THREAD=${RT_THREAD:-0}"
+HOST="$BASE -O1 -g -I$REPO/src -I$RT -I$GEN -I$H -I$H/compat -DXBE_RAW_VERTICES=${RAW:-0} -DXBE_RENDER_THREAD=${RT_THREAD:-0} ${HOST_FLAGS:-}"
 
 # generated code, an object rebuilt only when its partition is newer
 export CXX BASE RT GEN GEN_OBJ GEN_OPT
