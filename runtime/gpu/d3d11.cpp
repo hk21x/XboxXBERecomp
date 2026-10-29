@@ -1361,7 +1361,8 @@ bool SameTexture(const Tex& tx, const TextureDesc& d) {
 // a texture in guest memory: made again when its layout changed, uploaded again when its bytes did
 ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d,
                                                          const FormatInfo& fi, DrawTextures& stages) {
-    if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
+    // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
+    if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
         if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {

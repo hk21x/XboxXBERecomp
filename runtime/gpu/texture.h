@@ -54,9 +54,9 @@ void MarkDirty(uint32_t resource);
 uint64_t DirtyEpoch(uint32_t data_va);
 
 // A title's own picture for a texture (GameInfo hooks, e.g. a sharper redraw of a HUD atlas): the hardware renderers
-// sample it instead of the guest bytes at data, whatever its size, for a swizzled or compressed texture (a linear
-// one's coordinates are in its own texels), while those guest_bytes stay as they were when it was set (the memory
-// given to something else drops it). B8G8R8A8 rows, width x height; version is new for each SetReplacement.
+// sample it instead of the guest bytes at data, whatever its size (a linear texture's texel coordinates are taken over
+// the guest's size, so a larger picture reads the same; NightFire's driving font is LIN_A8), while those guest_bytes
+// stay as they were when it was set (the memory given to something else drops it). B8G8R8A8 rows, width x height; version is new for each SetReplacement.
 struct Replacement {
     uint32_t data = 0, guest_bytes = 0;
     uint64_t guest_hash = 0;
