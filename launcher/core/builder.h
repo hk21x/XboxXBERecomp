@@ -73,8 +73,10 @@ public:
     bool Install(std::string& error);
     std::map<std::string, std::string> BuildEnv(const Plan& plan) const;
 
-private:
+    // a line in launcher.log and the window's log (thread safe)
     void Log(const std::string& line);
+
+private:
     void Remember(const std::string& key, const std::string& value);  // an entry of launcher.json, the others kept
     void Say(const std::string& step, const std::string& detail = {}, double fraction = -1);
     int Git(const std::vector<std::string>& args, std::string* out, std::string& error);

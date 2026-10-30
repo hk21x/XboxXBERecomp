@@ -517,10 +517,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (IsReleaseVersion(app.game.version)) {
             Release r;
             std::string e;
-            if (LatestRelease(*app.http, app.game, r, e) && CompareVersions(r.tag, app.game.version) > 0) {
+            // what the check found, in launcher.log: a launcher that offers nothing says why
+            if (!LatestRelease(*app.http, app.game, r, e)) {
+                app.builder->Log("update check: " + (e.empty() ? std::string("no answer") : e));
+            } else if (CompareVersions(r.tag, app.game.version) > 0) {
+                app.builder->Log("update check: " + r.tag + " is out, this launcher is " + app.game.version + ": offered");
                 std::lock_guard l(app.release_lock);
                 app.release = r;
                 app.launcher_update = true;
+            } else {
+                app.builder->Log("update check: the latest release is " + r.tag + ", this launcher is " + app.game.version);
             }
         }
         bool available = false;
