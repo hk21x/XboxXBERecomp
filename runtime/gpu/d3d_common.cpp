@@ -608,6 +608,16 @@ void FillTransformConstants(const State& s, GuestExtent size, DrawConstants& c) 
     float n[16] = {};
     InverseTranspose3x3(wv, n);
     Transpose(n, c.wvn);
+    for (int m = 0; m < 3; m++) {
+        float bv[16], bn[16] = {};
+        MatMul(s.transforms[kTsWorld + 1 + size_t(m)].data(), s.transforms[kTsView].data(), bv);
+        Transpose(bv, c.bwv[m]);
+        InverseTranspose3x3(bv, bn);
+        Transpose(bn, c.bwvn[m]);
+    }
+    float pv[16];
+    MatMul(s.transforms[kTsProjection].data(), vpm, pv);
+    Transpose(pv, c.vpj);
     for (int t = 0; t < 4; t++) Transpose(s.transforms[kTsTexture0 + size_t(t)].data(), c.tm[t]);
 }
 

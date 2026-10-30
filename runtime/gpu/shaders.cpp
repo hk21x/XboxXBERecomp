@@ -53,6 +53,9 @@ cbuffer DC : register(b1) {
 const char* kCommonTail = R"(    float4 spread[4];
     float4x4 wv;
     float4x4 wvn;
+    float4x4 bwv[3];
+    float4x4 bwvn[3];
+    float4x4 vpj;
     float4x4 tm[4];
     float4 mat[5];
     float4 amb;
@@ -743,6 +746,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
 
 FixedKey MakeFixedKey(const State& s) {
     FixedKey f;
+    f.blend = s.rs[kRsVertexBlend];
     if (s.rs[kRsLighting]) {
         f.light = 1 | (s.rs[kRsSpecularEnable] ? 2 : 0) | (s.rs[kRsLocalViewer] ? 4 : 0) | (s.rs[kRsNormalizeNormals] ? 8 : 0);
         if (s.rs[kRsColorVertex])
@@ -792,6 +796,24 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    float4 cp = mul(ip, wvp);\n";
         s += "    float3 vp = mul(ip, wv).xyz;\n";
         s += "    float3 vn = mul(float4(" + v(2, "float4(0,0,0,0)") + ".xyz, 0), wvn).xyz;\n";
+        if (f.blend && ((regs >> 1) & 1)) {
+            // vertex blending: the position and normal through each world matrix by its weight, in view space
+            uint32_t matrices = f.blend > 6 ? 1 : (f.blend + 3) / 2;
+            bool last_left = f.blend & 1;
+            s += "    float4 bw = i.v1;\n";
+            if (last_left) {
+                s += F("    bw[%u] = 1", matrices - 1);
+                for (uint32_t m = 0; m + 1 < matrices; m++) s += F(" - bw[%u]", m);
+                s += ";\n";
+            }
+            s += "    float3 ln = " + v(2, "float4(0,0,0,0)") + ".xyz;\n";
+            s += "    vp = vp * bw[0];\n    vn = vn * bw[0];\n";
+            for (uint32_t m = 1; m < matrices; m++) {
+                s += F("    vp += mul(ip, bwv[%u]).xyz * bw[%u];\n", m - 1, m);
+                s += F("    vn += mul(float4(ln, 0), bwvn[%u]).xyz * bw[%u];\n", m - 1, m);
+            }
+            s += "    cp = mul(float4(vp, 1), vpj);\n";
+        }
         if (f.light & 8) s += "    vn = dot(vn, vn) > 0 ? normalize(vn) : vn;\n";
     }
     if (lit) {

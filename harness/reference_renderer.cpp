@@ -1279,6 +1279,24 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                 mul(s.transforms[256].data(), s.transforms[2].data(), wv);
                 mul(wv, s.transforms[3].data(), wvp);
                 for (int j = 0; j < 4; j++) cp[j] = q[0] * wvp[j] + q[1] * wvp[4 + j] + q[2] * wvp[8 + j] + wvp[12 + j];
+                if (uint32_t blend = s.rs[kRsVertexBlend]; blend && blend <= 6 && slot[1] >= 0) {
+                    // vertex blending, as FixedVertexHlsl: in view space, each world matrix by its weight
+                    uint32_t matrices = (blend + 3) / 2;
+                    Vec bw = vp.in[1];
+                    if (blend & 1) {
+                        bw[matrices - 1] = 1;
+                        for (uint32_t m = 0; m + 1 < matrices; m++) bw[matrices - 1] -= bw[m];
+                    }
+                    float e[3] = {};
+                    for (uint32_t m = 0; m < matrices; m++) {
+                        float bv[16];
+                        mul(s.transforms[256 + m].data(), s.transforms[2].data(), bv);
+                        for (int j = 0; j < 3; j++)
+                            e[j] += bw[m] * (q[0] * bv[j] + q[1] * bv[4 + j] + q[2] * bv[8 + j] + bv[12 + j]);
+                    }
+                    const float* pm = s.transforms[3].data();
+                    for (int j = 0; j < 4; j++) cp[j] = e[0] * pm[j] + e[1] * pm[4 + j] + e[2] * pm[8 + j] + pm[12 + j];
+                }
                 float w = MagClamp(cp[3]);
                 const Viewport& v = s.viewport;
                 o.pos = V(v.x + (cp[0] / w + 1) * 0.5f * v.w, v.y + (1 - cp[1] / w) * 0.5f * v.h,
