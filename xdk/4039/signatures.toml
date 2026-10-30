@@ -62,6 +62,7 @@ D3DDevice_GetDepthStencilSurface = {sec = "D3D", len = 0x28, hash = "0xA00BAC804
 D3DDevice_GetDepthStencilSurface2 = {}
 D3DDevice_GetRenderTarget2 = {}
 D3DDevice_GetVertexShaderFunction = {}
+D3DDevice_GetVisibilityTestResult = {sec = "D3D", len = 0x53, hash = "0x43C306E38BB28B8F", k = [0xFF, 0x514, 0x88760828], ret = 12, regs = []}
 D3DDevice_InsertFence = {sec = "D3D", len = 0x8, hash = "0x31725F12AA8374B9", calls = [[0xA7, "0xF3D22631B86267A7", [[0x1BC, "0xB0962DE8BE2AC9B0"], [0xE4, "0x8750F7ACD2BAEFEA"]]]], ret = 0, regs = []}
 D3DDevice_IsFencePending = {}
 D3DDevice_LightEnable = {sec = "D3D", len = 0xE4, hash = "0xB4A14CAED9320335", calls = [[0x1DE, "0x1166D9A785D170CA", [[0x1D, "0x345B18AE6CE600A0"], [0x1E, "0x25794508EBC6E332"], [0x42, "0xEB5E0CBAE8F0DBA4"], [0xD6, "0x3711298C2AF127AE"], [0x9, "0x9977EB4A884FFE82"], [0x9, "0x9977EB4A884FFE82"], [0x31, "0xBB242DE1AB777DA2"]]]], k = [0x68, 0x68, 0x68, 0x8C, 0x8C, 0x8C, 0x8C, 0x484, 0x508, 0x508, 0x50C, 0x510, 0x510, 0x510, 0x1000], ret = 8, regs = []}

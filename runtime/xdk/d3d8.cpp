@@ -68,6 +68,10 @@ using namespace kernel;
 #define SYM_D3D_BlockOnNonSurfaceResource FFFFFE14
 #define HAS_D3D_BlockOnNonSurfaceResource 0
 #endif
+#ifndef SYM_D3DDevice_GetVisibilityTestResult
+#define SYM_D3DDevice_GetVisibilityTestResult FFFFFE15
+#define HAS_D3DDevice_GetVisibilityTestResult 0
+#endif
 #ifndef SYM_D3DDevice_BeginPushBuffer
 #define SYM_D3DDevice_BeginPushBuffer FFFFFE11
 #define HAS_D3DDevice_BeginPushBuffer 0
@@ -726,6 +730,23 @@ HLE_STDCALL(D3D_SetFence, 1) {
     }
     return g_backend ? g_backend->Fence() : 0;
 }
+// XDK 4039's GetVisibilityTestResult only reads the report, without the fence above: a title polling it in a loop would
+// never see a report still waiting for the render thread (Agent Under Fire's driving levels froze). Only an image whose
+// library needs this names the function.
+#if HAS_D3DDevice_GetVisibilityTestResult
+X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_GetVisibilityTestResult));
+X86_FUNC(GUEST(D3DDevice_GetVisibilityTestResult)) {
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        Walk(Dev(kDevPush));
+        if (g_backend && g_report_asked) {
+            g_report_asked = false;
+            g_backend->Kick();
+        }
+    }
+    GUEST_ORIG(D3DDevice_GetVisibilityTestResult)(ctx, base);
+}
+#endif
 HLE_STDCALL(D3D_KickOffAndWaitForIdle, 0) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_backend) g_backend->Flush();
