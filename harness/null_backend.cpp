@@ -102,11 +102,20 @@ public:
     }
     void Sync(uint32_t, uint32_t) override {}
     void SyncLate(uint32_t) override {}
-    void Flush() override {}
+    void Flush() override {
+        for (uint32_t report : held_) WriteReport(report);
+        held_.clear();
+    }
     void SetGamma(const uint8_t*) override {}
     // visibility reports are written at once as the console's GPU writes them: time, count, then 0 for done. Nothing
     // is rasterised here between reference frames, so no pixel is counted.
+    // HOLD_REPORTS=1: held until a flush, as a GPU backend delivers them: a title polling a report without one hangs
     void GetReport(uint32_t report) override {
+        static const bool hold = std::getenv("HOLD_REPORTS") != nullptr;
+        if (hold) held_.push_back(report);
+        else WriteReport(report);
+    }
+    void WriteReport(uint32_t report) {
         constexpr uint32_t kTime = 0, kTimeHigh = 4, kCount = 8, kStatus = 12;
         kernel::W32(report + kTime, uint32_t(frames_));
         kernel::W32(report + kTimeHigh, 0);
@@ -115,6 +124,7 @@ public:
     }
 
 private:
+    std::vector<uint32_t> held_;
     // the user space's first 128 MB to mem_<frame>.bin, the contiguous mapping of physical memory (0x80000000, 64 MB)
     // to mem_<frame>_phys.bin
     void DumpMemory() {

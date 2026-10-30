@@ -64,6 +64,8 @@ Environment:
   `audio: output started` line is the time of its first sample
 - `OUTPUT=WxH` the display size the game is told about, 1280x720 by default: narrower than 3:2 the console reports
   a 4:3 TV instead of a widescreen one
+- `HOLD_REPORTS=1` visibility reports held until a flush, as a GPU backend delivers them (by default written at once, which
+  hides a title polling a report nothing kicks)
 - `XBE_PERF`, `XBE_FRAMELOG` (a `framelog` file in the run folder starts it), `XBE_WBUFFER`, `XNET_TRACE` as on
   Windows
 - Debugging: start the exe inside gdb (attaching may be refused); recompiled functions are
