@@ -75,7 +75,7 @@ std::vector<Range> StateRanges() {
         {At(s, &s.scissor_count), At(s, &s.transforms) - At(s, &s.scissor_count)},
         {At(s, &s.transforms[2]), 2 * sizeof(s.transforms[0])},
         {At(s, &s.transforms[16]), 4 * sizeof(s.transforms[0])},
-        {At(s, &s.transforms[256]), sizeof(s.transforms[0])},
+        {At(s, &s.transforms[256]), 4 * sizeof(s.transforms[0])},  // WORLD to WORLD3: vertex blending
         {At(s, &s.material), sizeof(State) - At(s, &s.material)},
     };
 }
