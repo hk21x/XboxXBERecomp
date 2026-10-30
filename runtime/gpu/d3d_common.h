@@ -173,6 +173,9 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
 bool DepthTested(const State& s);
 bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture of a draw that leaves it alone
 bool ScreenDraw(const State& s);
+// a draw squeezed whole (hud[0] negative) inside its own viewport or scissor (Agent Under Fire's driving radar): where an x of
+// those moves to, so the clip goes with the picture
+inline float SqueezedX(const float hud[4], float x) { return hud[0] < 0 ? hud[1] + (x - hud[1]) * -hud[0] : x; }
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
 // how a squeezed 2D draw is squeezed, by where its vertices reach (kSpanFrame where its positions cannot be read):
 // kSpanFrame reaches both the left and right edge of a frame `width` wide (a full screen quad), or is an untextured

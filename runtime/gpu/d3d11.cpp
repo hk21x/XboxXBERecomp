@@ -333,7 +333,7 @@ private:
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                          GuestExtent size, DrawConstants& c);
     void SetTexturesAndSamplers(const State& s, const Assembled& a, const DrawTextures& stages);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc);
     void DrawGeometry(const Assembled& a);
     uint32_t Reserve(Ring& r, uint32_t bytes);
     uint32_t Push(Ring& r, uint32_t at, const void* p, uint32_t bytes);
@@ -1638,19 +1638,19 @@ void D3D11Backend::SetTexturesAndSamplers(const State& s, const Assembled& a, co
 }
 
 // the viewport covers the target, the guest viewport is in the shader; the scissor clips to it
-void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw) {
+void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc) {
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
     float W = float(b->w), H = float(b->h);
     D3D11_VIEWPORT vp{0, 0, W, H, 0, 1};
     float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
-    LONG x0 = LONG(s.viewport.x * sx);
+    LONG x0 = LONG(SqueezedX(dc.hud, s.viewport.x) * sx);
     LONG y0 = LONG(s.viewport.y * sy);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
+    LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sx));
+        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
         y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(s.scissors[2] * sx));
+        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
         y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
     D3D11_RECT sc{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)), std::clamp<LONG>(x1, 0, LONG(W)),
@@ -1831,7 +1831,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     SqueezeBeyond(s, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, c);
 
     // geometry, counted while the title runs a visibility test
     ComPtr<ID3D11Query> query;

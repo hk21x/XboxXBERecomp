@@ -1236,7 +1236,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             TextureDesc sd;
             if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], sd) && !FindReplacement(sd.data)) Sharpen2D(sd);
         }
-    if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
+    if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
     std::vector<uint8_t> squeezable(as.vertex_count, 0);  // squeezed below, once the draw's extent is known
@@ -1319,6 +1319,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     // as the renderers: a draw spanning the frame's width (a full screen quad) keeps the vertices on or past its edges
     // where they are; any other is squeezed whole (EoN's driving radar: big tiles past the left edge only)
     // (positions here are already in aa_x pixels; the squeeze works in the draw's own, as it did per vertex)
+    float clip_squeeze = 1;  // squeezed whole: the viewport and scissor go with the picture (gpu::SqueezedX)
     if (squeeze != 1) {
         const float ax = float(s.aa_x), w = float(rt.w);
         float lo = 1e30f, hi = -1e30f;
@@ -1332,6 +1333,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
         const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
         if (!s.squeeze_beyond && !spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
+        if (!spans) clip_squeeze = squeeze;
         for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
             float x = verts[vi].pos[0] / ax;
             if (squeezable[vi] && !(spans && AtFrameEdge(x, w)))
@@ -1436,6 +1438,11 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         top = std::max(top, int(s.scissors[1]));
         right = std::min(right, int(s.scissors[2]));
         bottom = std::min(bottom, int(s.scissors[3]));
+    }
+    if (clip_squeeze != 1) {
+        const float c = float(rt.w) * 0.5f;
+        left = int(c + (float(left) - c) * clip_squeeze);
+        right = int(c + (float(right) - c) * clip_squeeze + 0.999f);
     }
     left *= int(s.aa_x);
     right *= int(s.aa_x);

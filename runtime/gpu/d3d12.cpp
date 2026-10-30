@@ -343,7 +343,7 @@ private:
     void CaptureShader(const char* kind, uint64_t key, const std::string& src);
     void SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages);
     uint32_t EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc);
     void SetBlendFactorStencilRef(const State& s);
     void DrawGeometry(const Assembled& a);
     void UploadVertexBuffers(const Assembled& a);
@@ -2213,7 +2213,7 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
 }
 
 // viewport covers the target, the guest viewport is in the shader; scissor clips to it
-void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
+void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc) {
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
     float W = float(b->w);
     float H = float(b->h);
@@ -2221,14 +2221,14 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     DrawStateCache& c = ds_cache_;
     if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) cl_->RSSetViewports(1, &vp);
     float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
-    LONG x0 = LONG(s.viewport.x * sx);
+    LONG x0 = LONG(SqueezedX(dc.hud, s.viewport.x) * sx);
     LONG y0 = LONG(s.viewport.y * sy);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
+    LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sx));
+        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
         y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(s.scissors[2] * sx));
+        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
         y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
     D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
@@ -2486,7 +2486,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     SetTextureViewsAndSamplers(s, a, stages);
     g_perf.tables += PerfMs(perf_step);
     perf_step = PerfNow();
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, c);
     SetBlendFactorStencilRef(s);
     g_perf.setup += PerfMs(perf_step);
 
