@@ -156,7 +156,23 @@ void General(Settings& s) {
     ImGui::TextDisabled("The game and its sound stop while another window is in front, and carry on when you return.");
 }
 
+void Language(Settings& s) {
+    if (kGame.languages.empty()) return;
+    static const char* kNames[] = {"", "English", "Japanese", "Deutsch", "Francais", "Espanol", "Italiano", "Korean", "Chinese", "Portugues"};
+    auto name = [](uint32_t l) { return l < std::size(kNames) ? kNames[l] : "?"; };
+    if (ImGui::BeginCombo("Language", name(s.language))) {
+        for (uint32_t l : kGame.languages)
+            if (ImGui::Selectable(name(l), l == s.language)) {
+                s.language = l;
+                Save();
+            }
+        ImGui::EndCombo();
+    }
+    ImGui::TextDisabled("At the next start.");
+}
+
 void GameOptions() {
+    Language(Get());
     if (kGame.options.empty()) {
         ImGui::TextDisabled("No options for this game.");
         return;

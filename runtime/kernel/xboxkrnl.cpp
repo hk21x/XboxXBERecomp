@@ -1276,13 +1276,19 @@ static uint32_t VideoFlags() {
     return (app::Widescreen() ? 0x00010000 : 0) | 0x00080000 | (PalConsole() ? 0x00400000 : 0);
 }
 // XC_FACTORY_AV_REGION: NTSC-M (standard 1 in bits 8 to 15), or PAL-I (3)
+// XC_LANGUAGE: the language setting, for a title offering it; XBE_LANGUAGE (the setting's numbers) to test one
+static uint32_t Language() {
+    if (const char* e = std::getenv("XBE_LANGUAGE")) return uint32_t(std::atoi(e));
+    return app::kGame.languages.empty() ? 1 : app::Get().language;
+}
+
 static uint32_t AvRegion() { return PalConsole() ? 0x00800300 : 0x00400100; }
 
 KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
     uint32_t index = a[0], type_out = a[1], value = a[2], len = a[3], result_len = a[4];
     uint32_t v = 0;
     switch (index) {
-        case 7: v = 1; break;                      // XC_LANGUAGE english
+        case 7: v = Language(); break;             // XC_LANGUAGE
         case 8: v = VideoFlags(); break;          // XC_VIDEO_FLAGS
         case 9: v = 0x00010001; break;             // XC_AUDIO_FLAGS stereo
         case 0x103: v = AvRegion(); break;         // XC_FACTORY_AV_REGION
@@ -1295,7 +1301,7 @@ KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
         // the whole EEPROM image: user settings live at 0xC0 onwards
         if (type_out) W32(type_out, 3);  // REG_BINARY
         if (value && len >= 0x100) {
-            W32(value + 0xE8, 1);                     // language
+            W32(value + 0xE8, Language());            // language
             W32(value + 0xEC, VideoFlags());          // video flags
             W32(value + 0xF0, 0x00010001);            // audio flags
             W32(value + 0x58, AvRegion());            // factory video standard

@@ -46,6 +46,7 @@ struct Settings {
     bool sharp_2d = true;            // GameInfo::sharpen_2d: the HUD's, menus' and text's pictures enlarged sharp
     uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
+    uint32_t language = 1;           // the console's language (XC_LANGUAGE, GameInfo::languages), at the next start
     // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,
     // named by the device (and its instance, telling two of the same apart), then an axis (0-7: X Y Z Rx Ry Rz,
     // slider 1, slider 2) or a button (0-127). No device: the wheel found by itself (the first driving device; other
@@ -185,6 +186,9 @@ struct GameInfo {
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)
     bool sharpen_2d = false;
+    // the languages a title has on its disc, as the console's setting numbers them (1 English, 2 Japanese, 3 German,
+    // 4 French, 5 Spanish, 6 Italian, 7 Korean, 8 Chinese, 9 Portuguese): the settings window offers them; none, English
+    std::vector<uint32_t> languages;
     // a PAL release (the certificate's game regions without North America) runs on a PAL console with PAL 60 Hz on:
     // a title naming its files by the video standard finds the disc's (EoN's movies are _pal and _palw only)
     bool pal_console = false;
