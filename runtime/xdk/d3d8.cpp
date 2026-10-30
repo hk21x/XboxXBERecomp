@@ -260,8 +260,10 @@ uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t
         if (had >= pitch * h) phys = R32(hdr + 4) & 0x0FFFFFFF;
     }
     if (!phys)
-        phys = mem::PhysicalFromVirtual(host ? mem::AllocHostContiguous(pitch * h, 0x1000)
-                                             : mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000));
+        // a row to spare: Agent Under Fire's driving levels write one row past the back buffer while loading, which
+        // reached the game's heap when the heap lay right above it
+        phys = mem::PhysicalFromVirtual(host ? mem::AllocHostContiguous(pitch * (h + 1), 0x1000)
+                                             : mem::AllocContiguous(pitch * (h + 1), 0, 0xFFFFFFFF, 0x1000));
     if (!hdr) hdr = mem::AllocSystem(24);
     W32(hdr + 0, 0x000D0001);  // surface, one reference, one internal reference held by the device
     W32(hdr + 4, phys);
