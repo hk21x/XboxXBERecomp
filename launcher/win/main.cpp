@@ -328,7 +328,7 @@ void Draw(App& app, HWND hwnd, ImFont* big) {
             ImGui::TextWrapped("The game is built on this PC from your disc. This downloads about 1.4 GB of build tools "
                                "(Clang, CMake, Git and Microsoft's C++ libraries and Windows SDK) into the tools folder; "
                                "nothing is installed in Windows. The first build takes 30 to 90 minutes and needs about "
-                               "15 GB free.");
+                               "3 GB free, plus room for your copy of the game.");
             ImGui::TextDisabled("Free on this drive: %s", Megabytes(FreeBytes(app.root)).c_str());
             ImGui::Checkbox("I accept the license terms for Microsoft's C++ libraries and Windows SDK", &app.agreed);
             ImGui::SameLine();
