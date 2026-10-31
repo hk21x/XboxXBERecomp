@@ -336,6 +336,8 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
     for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3 && (!v.nbins || v.bin_mb[bin[s]] > -10000);
     const bool sends_stereo = !speakers && channels == 2;
     const float send_level = !speakers && app::kGame.send_level ? std::clamp(app::kGame.send_level(), 0.0f, 1.0f) : 1.0f;
+    float (*const level_of)() = v.stream && v.tag == 1 ? app::kGame.pcm_stream_level : app::kGame.other_voice_level;
+    const float stream_level = level_of ? level_of() : 1.0f;
     for (uint32_t c = 0; c < kMixChannels; c++) {
         g[c][0] = g[c][1] = 0;
         if (c >= channels) continue;
@@ -346,7 +348,7 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
             if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
             // the centre and the back pair folded into left and right 3 dB down, as a stereo downmix of 5.1 does
             const float fold = b == 2 || (speakers && (b == 4 || b == 5)) ? 0.707f : 1.0f;
-            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * fold * kMixBinGain * send_level;
+            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * fold * kMixBinGain * send_level * stream_level;
             // even bins are left, odd right, 2 is the centre; effect sends standing in: each channel on its own side
             if (sends_stereo) {
                 g[c][c] = std::max(g[c][c], x);

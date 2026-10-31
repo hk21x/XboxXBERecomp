@@ -1441,8 +1441,9 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     }
     if (clip_squeeze != 1) {
         const float c = float(rt.w) * 0.5f;
-        left = int(c + (float(left) - c) * clip_squeeze);
-        right = int(c + (float(right) - c) * clip_squeeze + 0.999f);
+        const float moved = s.squeeze_beyond ? s.squeeze_shift : 0.0f;  // the clip goes with the moved picture
+        left = int(c + (float(left) + moved - c) * clip_squeeze);
+        right = int(c + (float(right) + moved - c) * clip_squeeze + 0.999f);
     }
     left *= int(s.aa_x);
     right *= int(s.aa_x);

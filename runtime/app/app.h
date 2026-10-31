@@ -209,6 +209,12 @@ struct GameInfo {
     // title may change its texels in guest memory (EoN's button pictures), true when it did, and may give the
     // renderers a larger picture of its own for it (gpu::SetReplacement)
     bool (*texture_bound)(uint32_t header, uint32_t palette) = nullptr;
+    // the aspect setting's "from the screen's shape" follows an ultrawide screen instead of stopping at 16:9
+    bool auto_fills_screen = false;
+    // a title's music decoded to PCM streams against its other sounds, read on the audio thread at each mix (effects the
+    // DSP image would have balanced drown it out): the level of PCM streams and of every other voice; none is full level
+    float (*pcm_stream_level)() = nullptr;
+    float (*other_voice_level)() = nullptr;
 };
 extern const GameInfo kGame;
 
