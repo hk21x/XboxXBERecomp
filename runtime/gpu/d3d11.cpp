@@ -126,8 +126,6 @@ struct BlitOptions {
     uint32_t taps = 1;     // n x n box filter per pixel
     bool over = false;     // premultiplied over the target, which keeps its alpha
     bool fxaa = false;     // fast approximate antialiasing (the finished frame)
-    ID3D11ShaderResourceView* mix = nullptr;  // the last frame, the source over it at the weight mul (psmix)
-    float mul = 1;
 };
 
 // a full screen triangle that writes a colour or a depth, for clears of part of a target
@@ -267,7 +265,6 @@ private:
     bool CreateDevice();
     bool CreateSwapChain(HWND hwnd);
     void CreateBackBufferView();
-    void HoldFrame(Target& t, const Surface& front);
     bool CreateFixed();
     // Present's steps
     void ResizeSwap();
@@ -374,14 +371,6 @@ private:
     ComPtr<ID3D11RasterizerState> pass_raster_;
     ComPtr<ID3D11DepthStencilState> no_depth_, depth_always_;
     ComPtr<ID3D11BlendState> opaque_, over_;
-    // HoldFrame: the last two images of a title blending its frames
-    ComPtr<ID3D11Texture2D> hold_[2];
-    ComPtr<ID3D11ShaderResourceView> hold_srv_[2];
-    uint32_t hold_gw_ = 0, hold_gh_ = 0;
-    DXGI_FORMAT hold_fmt_ = DXGI_FORMAT_UNKNOWN;
-    int hold_last_ = 0;
-    bool hold_live_ = false;
-    float hold_w_ = 1;
     ComPtr<ID3D11SamplerState> pass_samplers_[4];  // linear, then point; all clamp
     ComPtr<ID3D11Buffer> vsc_cb_, dc_cb_, pass_cb_;
     ComPtr<ID3D11Texture2D> lut_;
@@ -1026,12 +1015,12 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
-    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, o.mix ? "psmix" : o.fxaa ? "psfxaa" : "psmain", "ps_5_0", h), h);
+    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, o.fxaa ? "psfxaa" : "psmain", "ps_5_0", h), h);
     if (!ps && o.fxaa) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
-                  float(o.taps), o.mul};
-    ID3D11ShaderResourceView* srv[3] = {src, lut_srv_.Get(), o.mix};
-    FullScreen(vs, ps, c, 8, srv, o.mix ? 3 : 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
+                  float(o.taps), 1.0f};
+    ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
+    FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
 
 // a depth buffer drawn as colour into another depth buffer's memory: copied as depth
@@ -1940,53 +1929,7 @@ void D3D11Backend::BlitFrame(Target& t) {
     ctx_->RSSetViewports(1, &vp);
     ctx_->RSSetScissorRects(1, &sc);
     float uv[4] = {0, 0, 1, 1};
-    if (hold_live_ && hold_w_ < 1) {
-        Blit(hold_srv_[hold_last_].Get(), uv, {.gamma = gamma_, .mix = hold_srv_[!hold_last_].Get(), .mul = hold_w_});
-        return;
-    }
     Blit(t.srv.Get(), uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
-}
-
-// a title blending its frames: the last two images kept, the newest copied when it changes
-void D3D11Backend::HoldFrame(Target& t, const Surface& front) {
-    hold_w_ = front.blend;
-    if (front.blend >= 1) {
-        hold_live_ = false;
-        return;
-    }
-    D3D11_TEXTURE2D_DESC td;
-    t.res->GetDesc(&td);
-    if (!hold_[0] || hold_gw_ != td.Width || hold_gh_ != td.Height || hold_fmt_ != td.Format) {
-        hold_live_ = false;
-        hold_gw_ = td.Width;
-        hold_gh_ = td.Height;
-        hold_fmt_ = td.Format;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.MiscFlags = 0;
-        td.CPUAccessFlags = 0;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        for (int i = 0; i < 2; i++) {
-            hold_srv_[i].Reset();
-            hold_[i].Reset();
-            if (FAILED(dev_->CreateTexture2D(&td, nullptr, &hold_[i])) ||
-                FAILED(dev_->CreateShaderResourceView(hold_[i].Get(), nullptr, &hold_srv_[i]))) {
-                hold_[0].Reset();
-                hold_w_ = 1;
-                return;
-            }
-        }
-    }
-    if (!hold_live_) {
-        ctx_->CopyResource(hold_[0].Get(), t.res.Get());
-        ctx_->CopyResource(hold_[1].Get(), t.res.Get());
-        hold_live_ = true;
-        static bool told = false;
-        if (!told) LOGR("d3d11: frames blended, %ux%u format %u, weight %.2f", hold_gw_, hold_gh_, unsigned(hold_fmt_), hold_w_);
-        told = true;
-    } else if (front.blend_new) {
-        hold_last_ = !hold_last_;
-        ctx_->CopyResource(hold_[hold_last_].Get(), t.res.Get());
-    }
 }
 
 void D3D11Backend::RenderUi() {
@@ -2031,7 +1974,6 @@ void D3D11Backend::Present(const Surface& front) {
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Settle(*t);
-    if (t) HoldFrame(*t, front);
     if (ramp_dirty_) UploadGammaRamp();
     float black[4] = {0, 0, 0, 1};
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
