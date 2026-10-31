@@ -311,6 +311,12 @@ std::map<std::string, std::string> Builder::BuildEnv(const Plan& plan) const {
                                   ToolPath("git") / "cmd", kits / "bin" / ver / "x64"};
     std::string inherited = platform_.GetEnv("PATH");
     env["PATH"] = join(path) + (inherited.empty() ? "" : std::string(1, sep) + inherited);
+    // a drive that records no owners (exFAT, FAT32, some network shares): git refuses its repositories as of "dubious
+    // ownership". These are the launcher's own clones; for its git, submodules and CMake's FetchContent alike, and the
+    // player's git settings stay as they are
+    env["GIT_CONFIG_COUNT"] = "1";
+    env["GIT_CONFIG_KEY_0"] = "safe.directory";
+    env["GIT_CONFIG_VALUE_0"] = "*";
     if (!msvc.empty()) {
         fs::path inc = kits / "Include" / ver, lib = kits / "Lib" / ver;
         env["INCLUDE"] = join({msvc / "include", inc / "ucrt", inc / "shared", inc / "um", inc / "winrt", inc / "cppwinrt"});
