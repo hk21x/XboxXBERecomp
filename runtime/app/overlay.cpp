@@ -167,7 +167,14 @@ void GameOptions() {
             if (ImGui::Checkbox(name, o.flag)) Save();
         } else if (o.value) {
             int v = int(*o.value);
-            if (ImGui::InputInt(name, &v)) {
+            if (o.choices) {
+                int n = 0;
+                while (o.choices[n]) n++;
+                if (ImGui::Combo(name, &v, o.choices, n)) {
+                    *o.value = uint32_t(v);
+                    Save();
+                }
+            } else if (ImGui::InputInt(name, &v)) {
                 *o.value = uint32_t(std::max(v, 0));
                 Save();
             }
