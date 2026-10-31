@@ -1900,8 +1900,12 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         stage_memo_key_ = memo_now;
     }
     uint32_t pal = s.palettes[size_t(stage)];
-    uint32_t words[8] = {header, kernel::R32(header), kernel::R32(header + 4), kernel::R32(header + 12),
-                         kernel::R32(header + 16), pal, pal ? kernel::R32(pal + 4) : 0, uint32_t(stage)};
+    // what the header says, not where it is: a title pointing one header at each material in turn gets a new copy in the
+    // render thread's header ring for each, and the Common word's low bits are its reference count. 2D draws apart:
+    // BindGuestTexture asks for their sharpened pictures
+    uint32_t words[8] = {kernel::R32(header) & 0xFFFF0000u, kernel::R32(header + 4), kernel::R32(header + 12),
+                         kernel::R32(header + 16), pal, pal ? kernel::R32(pal + 4) : 0, uint32_t(stage),
+                         uint32_t(draw_2d_)};
     bool memo_ok = !ext_ && !pal;  // a palette's colours may change without its header: checked every time
     uint64_t memo_key = 0;
     if (memo_ok) {
