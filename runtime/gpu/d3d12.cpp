@@ -86,6 +86,9 @@ struct Perf {
     // counts and bytes
     uint64_t draws = 0;
     uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
+    uint64_t stage_last = 0, stage_memo = 0, stage_target = 0, stage_full = 0;  // bound stages, by how they were found
+    uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
+    double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
     uint64_t upload = 0;
     uint64_t overflow = 0;
@@ -412,6 +415,27 @@ private:
         bool replaced;
     };
     std::unordered_map<uint64_t, StageMemo> stage_memo_;
+    // each stage's last memo entry, and what it was asked for: most draws bind what the draw before them did
+    struct StageLast {
+        uint32_t words[8];
+        uint64_t valid = ~0ull;
+        StageMemo memo;
+    } stage_last_[4];
+    // the last draw's sampler table and what it was made from
+    struct SamplerInputs {
+        std::array<std::array<uint32_t, kTssCount>, 4> tss;
+        uint32_t mips[4], aniso, shadow_func;
+        uint8_t shadow[4], replaced[4];
+        uint8_t clamp, pad[3];
+    } samplers_last_{};
+    uint32_t samplers_last_slot_ = ~0u;
+    // the last draw's view table
+    struct ViewKey {
+        ID3D12Resource* res[4];
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv[4];
+    } views_last_{};
+    uint32_t views_last_slot_ = ~0u;
+    uint64_t views_last_gen_ = 0;
     uint64_t stage_memo_key_ = 0;  // frame and targets_gen_ the memo holds for
     bool draw_2d_ = false;  // the draw is 2D: its textures are sharpened (Sharpen2D)
     struct TargetMemo {
@@ -1253,6 +1277,7 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
     if (it == samplers_.end()) {
         if (smp_used_ + 4 > kSamplerCount) {
             samplers_.clear();
+            samplers_last_slot_ = ~0u;
             smp_used_ = 0;
         }
         si = smp_used_;
@@ -1877,11 +1902,24 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     uint32_t pal = s.palettes[size_t(stage)];
     uint32_t words[8] = {header, kernel::R32(header), kernel::R32(header + 4), kernel::R32(header + 12),
                          kernel::R32(header + 16), pal, pal ? kernel::R32(pal + 4) : 0, uint32_t(stage)};
-    uint64_t memo_key = Hash(words, sizeof(words));
     bool memo_ok = !ext_ && !pal;  // a palette's colours may change without its header: checked every time
+    uint64_t memo_key = 0;
     if (memo_ok) {
+        StageLast& last = stage_last_[stage];
+        if (last.valid == memo_now && !std::memcmp(last.words, words, sizeof(words))) {
+            g_perf.stage_last++;
+            info = last.memo.info;
+            sv = last.memo.sv;
+            stages.replaced[stage] = last.memo.replaced;
+            return last.memo.res;
+        }
+        memo_key = Hash(words, sizeof(words));
         auto m = stage_memo_.find(memo_key);
         if (m != stage_memo_.end()) {
+            g_perf.stage_memo++;
+            std::memcpy(last.words, words, sizeof(words));
+            last.valid = memo_now;
+            last.memo = m->second;
             info = m->second.info;
             sv = m->second.sv;
             stages.replaced[stage] = m->second.replaced;
@@ -1940,30 +1978,50 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
                  d.height, d.pitch, tit->second.gw, tit->second.gh);
     }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
+        g_perf.stage_target++;
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
+    g_perf.stage_full++;
     ID3D12Resource* res = BindGuestTexture(s, stage, d, fi, stages);
     if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage]};
     return res;
 }
 
 uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp) {
-    D3D12_SAMPLER_DESC sd[4];
     uint32_t aniso = app::Get().aniso;
+    // what StageSampler reads, against the last draw's
+    SamplerInputs in;
+    std::memset(&in, 0, sizeof(in));
+    in.tss = s.tss;
+    in.aniso = aniso;
+    in.shadow_func = s.rs[kRsShadowFunc];
+    in.clamp = clamp;
+    for (int i = 0; i < 4; i++) {
+        in.mips[i] = stages.sv[i].Texture2D.MipLevels;
+        in.shadow[i] = stages.info[i].shadow;
+        in.replaced[i] = stages.replaced[i];
+    }
+    if (samplers_last_slot_ != ~0u && !std::memcmp(&in, &samplers_last_, sizeof(in))) {
+        g_perf.same_samplers++;
+        return samplers_last_slot_;
+    }
+    samplers_last_ = in;
+    D3D12_SAMPLER_DESC sd[4];
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso,
                                                    stages.replaced[i]);
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
-    if (it != samplers_.end()) return it->second;
+    if (it != samplers_.end()) return samplers_last_slot_ = it->second;
     if (smp_used_ + 4 > kSamplerCount) {
         samplers_.clear();
+        samplers_last_slot_ = ~0u;
         smp_used_ = 0;
     }
     uint32_t base = smp_used_;
     smp_used_ += 4;
     for (int i = 0; i < 4; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
     samplers_[key] = base;
-    return base;
+    return samplers_last_slot_ = base;
 }
 
 // sets sh.vh and sh.vs_code, compiling the shader on a cache miss
@@ -1986,7 +2044,10 @@ bool D3D12Backend::BindStageTexturesAndTargets(const State& s, DrawTextures& sta
     for (int i = 0; i < 4; i++) stages.res[i] = BindTexture(s, i, stages);
     g_perf.bind += PerfMs(perf_t);
     // textures may have recorded copies that unbound the targets
-    return BindTargets(s);
+    perf_t = PerfNow();
+    bool bound = BindTargets(s);
+    g_perf.t_targets += PerfMs(perf_t);
+    return bound;
 }
 
 // sets sh.ph and sh.ps_code, compiling the shader on a cache miss
@@ -2180,10 +2241,7 @@ D3D12_SRV_DIMENSION NullViewDimension(uint8_t kind) {
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
     // the four views, and a table made for the same four earlier in this ring generation
-    struct ViewKey {
-        ID3D12Resource* res[4];
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv[4];
-    } key;
+    ViewKey key;
     std::memset(&key, 0, sizeof(key));
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[i];
@@ -2198,17 +2256,25 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
         tables_.clear();
         tables_gen_ = ring_gen_;
     }
-    uint64_t h = Hash(&key, sizeof(key));
-    auto found = tables_.find(h);
     uint32_t slot;
-    if (found != tables_.end()) {
-        slot = found->second;
-        g_perf.reused_tables++;
+    if (views_last_slot_ != ~0u && views_last_gen_ == ring_gen_ && !std::memcmp(&key, &views_last_, sizeof(key))) {
+        slot = views_last_slot_;
+        g_perf.same_views++;
     } else {
-        slot = AllocSrvSlots(4);
-        for (int i = 0; i < 4; i++)
-            dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
-        if (tables_gen_ == ring_gen_) tables_[h] = slot;  // a wrap while allocating started a new generation
+        uint64_t h = Hash(&key, sizeof(key));
+        auto found = tables_.find(h);
+        if (found != tables_.end()) {
+            slot = found->second;
+            g_perf.reused_tables++;
+        } else {
+            slot = AllocSrvSlots(4);
+            for (int i = 0; i < 4; i++)
+                dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+            if (tables_gen_ == ring_gen_) tables_[h] = slot;  // a wrap while allocating started a new generation
+        }
+        views_last_ = key;
+        views_last_slot_ = slot;
+        views_last_gen_ = ring_gen_;
     }
     SetRootTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
     uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
@@ -2898,11 +2964,14 @@ void LogPerf() {
              g_perf_sync_late.exchange(0) / n);
         LOGR("perf: per frame %.0f draws (%.0f raw) %.0fk verts %.1f MB upload %.1f overflow | %.0f checks %.2f MB "
              "hashed | %.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f shrinks, "
-             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables",
+             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables | "
+             "stages: %.0f last %.0f memo %.0f target %.0f full | same as last draw: %.0f samplers %.0f views | targets %.2f ms",
              p.draws / n, p.raw / n, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n, p.sigs / n,
              p.sig_bytes / n / 1048576.0, p.texups / n, p.texup_bytes / n / 1048576.0, p.newtex / n,
              p.targets / n, p.rtups / n, p.shrinks / n, p.syncs / n, p.lates / n,
-             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n);
+             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
+             p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
+             p.same_views / n, p.t_targets / n);
         g_perf = Perf{};
         perf_start = PerfClock::now();
         perf_frames = 0;
