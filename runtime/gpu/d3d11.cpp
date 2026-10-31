@@ -126,7 +126,7 @@ struct BlitOptions {
     bool alpha = false;    // the source's alpha, else 1
     uint32_t taps = 1;     // n x n box filter per pixel
     bool over = false;     // premultiplied over the target, which keeps its alpha
-    bool fxaa = false;     // fast approximate antialiasing (the finished frame)
+    bool final = false;    // the finished frame: psfinal with the settings' FXAA and sharpening (taps, alpha unused)
 };
 
 // a full screen triangle that writes a colour or a depth, for clears of part of a target
@@ -1023,11 +1023,14 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 // src over the bound viewport and scissor
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
+    const app::Settings& st = app::Get();
+    const bool final = o.final && (st.fxaa || st.sharpen);
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
-    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, o.fxaa ? "psfxaa" : "psmain", "ps_5_0", h), h);
-    if (!ps && o.fxaa) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
+    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h), h);
+    if (!ps && final) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), 1.0f};
+    if (final) c[5] = st.fxaa ? 1.0f : 0.0f, c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
     FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
@@ -1940,7 +1943,7 @@ void D3D11Backend::BlitFrame(Target& t) {
     ctx_->RSSetViewports(1, &vp);
     ctx_->RSSetScissorRects(1, &sc);
     float uv[4] = {0, 0, 1, 1};
-    Blit(t.srv.Get(), uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
+    Blit(t.srv.Get(), uv, {.gamma = gamma_, .final = true});
 }
 
 void D3D11Backend::RenderUi() {
@@ -2006,9 +2009,9 @@ void D3D11Backend::Present(const Surface& front) {
 }
 
 void D3D11Backend::ApplySettings() {
-    // antialiasing 2, 3, 4: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
-    static const uint32_t kSamples[] = {1, 1, 2, 4, 8};
-    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().antialiasing, 4)];
+    // the msaa setting 1, 2, 3: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
+    static const uint32_t kSamples[] = {1, 2, 4, 8};
+    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().msaa, 3)];
     if (want_ms != msaa_) {
         for (auto& [key, t] : targets_) DropMs(t);
         msaa_ = want_ms;
