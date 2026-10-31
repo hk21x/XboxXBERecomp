@@ -194,7 +194,7 @@ struct BlitOptions {
     float mul = 1;            // colour scale
     DXGI_FORMAT rtv = kBgra;  // the target's format
     bool over = false;        // premultiplied over the target, which keeps its alpha
-    bool fxaa = false;        // fast approximate antialiasing (the finished frame; taps and alpha unused)
+    bool final = false;       // the finished frame: psfinal with the settings' FXAA and sharpening (taps, alpha unused)
     uint32_t samples = 1;     // the target's (an MSAA twin's)
 };
 
@@ -356,7 +356,7 @@ private:
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
     // Blit's pipeline
-    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool fxaa = false, uint32_t samples = 1);
+    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool final = false, uint32_t samples = 1);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC FullScreenPipelineDesc(ID3DBlob* vs, ID3DBlob* ps, DXGI_FORMAT rtv) const;
     // Init, in order, each callee right after its caller
     bool CreateDevice();
@@ -1300,9 +1300,12 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     Alloc cb = Upload(256, 256);
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
+    const app::Settings& st = app::Get();
+    const bool final = o.final && (st.fxaa || st.sharpen);
+    if (final) c[5] = st.fxaa ? 1.0f : 0.0f, c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     std::memcpy(cb.cpu, c, sizeof(c));
-    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, o.fxaa, o.samples);
-    if (!pso && o.fxaa) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
+    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples);
+    if (!pso && final) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
     if (pso) DrawFullScreen(pso, cb.gpu, slot, si);
 }
 
@@ -1353,12 +1356,12 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC D3D12Backend::FullScreenPipelineDesc(ID3DBlob
     return d;
 }
 
-ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool fxaa, uint32_t samples) {
-    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(fxaa) << 33 | uint64_t(samples) << 40];
+ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool final, uint32_t samples) {
+    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(final) << 33 | uint64_t(samples) << 40];
     if (pso) return pso.Get();
     uint64_t h;
     ID3DBlob* vs = Compile(kBlitHlsl, "vs", "vs_5_0", h);
-    ID3DBlob* ps = Compile(kBlitHlsl, fxaa ? "psfxaa" : "psmain", "ps_5_0", h);
+    ID3DBlob* ps = Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h);
     if (!vs || !ps) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, rtv);
     d.SampleDesc.Count = samples;
@@ -2788,7 +2791,7 @@ void D3D12Backend::BlitFrame(Target& t) {
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
+    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .final = true});
 }
 
 void D3D12Backend::RenderUi() {
@@ -2947,9 +2950,9 @@ void D3D12Backend::Present(const Surface& front) {
 }
 
 void D3D12Backend::ApplySettings() {
-    // antialiasing 2, 3, 4: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
-    static const uint32_t kSamples[] = {1, 1, 2, 4, 8};
-    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().antialiasing, 4)];
+    // the msaa setting 1, 2, 3: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
+    static const uint32_t kSamples[] = {1, 2, 4, 8};
+    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().msaa, 3)];
     if (want_ms != msaa_) {
         for (auto& [key, t] : targets_) DropMs(t);
         msaa_ = want_ms;

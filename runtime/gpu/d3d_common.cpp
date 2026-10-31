@@ -121,31 +121,46 @@ float4 psmain(O i) : SV_Target {
     if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c.rgb, opts.y > 0 ? c.a : 1);
 }
-// the finished frame with fast approximate antialiasing: where the luma of a pixel and its four neighbours differs
-// enough to be an edge, the colour is averaged along the edge's direction, found from the diagonal neighbours
+// the finished frame, the settings' passes in one (the plain blit without them): opts.y 1 for FXAA, opts.z the
+// sharpening 0 to 1. FXAA: where the luma of a pixel and its four neighbours differs enough to be an edge, the colour is
+// averaged along the edge's direction, found from the diagonal neighbours. Sharpening, contrast adaptive (as AMD's CAS):
+// the pixel less its neighbours, weighted down where they already span much of the range, so strong edges get no halos;
+// a source pixel or an output pixel apart, whichever is larger, so it still shows on a frame rendered above the screen's
 float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
 float3 tap(float2 uv) { return img.SampleLevel(ls, uv, 0).rgb; }
-float4 psfxaa(O i) : SV_Target {
+float3 fxaa(float2 uv, float2 t) {
+    float3 m = tap(uv);
+    float lm = luma(m);
+    float ln = luma(tap(uv + float2(0, -t.y))), ls_ = luma(tap(uv + float2(0, t.y)));
+    float le = luma(tap(uv + float2(t.x, 0))), lw = luma(tap(uv + float2(-t.x, 0)));
+    float lo = min(lm, min(min(ln, ls_), min(le, lw))), hi = max(lm, max(max(ln, ls_), max(le, lw)));
+    if (hi - lo < max(0.0312, hi * 0.125)) return m;
+    float lnw = luma(tap(uv + float2(-t.x, -t.y))), lne = luma(tap(uv + float2(t.x, -t.y)));
+    float lsw = luma(tap(uv + float2(-t.x, t.y))), lse = luma(tap(uv + float2(t.x, t.y)));
+    float2 dir = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
+    float reduce = max((lnw + lne + lsw + lse) * (0.25 / 8), 1.0 / 128);
+    dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8, 8) * t;
+    float3 a = 0.5 * (tap(uv + dir * (1.0 / 3 - 0.5)) + tap(uv + dir * (2.0 / 3 - 0.5)));
+    float3 b = a * 0.5 + 0.25 * (tap(uv - dir * 0.5) + tap(uv + dir * 0.5));
+    float lb = luma(b);
+    return lb < lo || lb > hi ? a : b;
+}
+float3 sharpen(float3 c, float2 uv, float2 t, float amount) {
+    float3 n = tap(uv + float2(0, -t.y)), s = tap(uv + float2(0, t.y));
+    float3 e = tap(uv + float2(t.x, 0)), w = tap(uv + float2(-t.x, 0));
+    float3 m = tap(uv);
+    float3 lo = min(m, min(min(n, s), min(e, w))), hi = max(m, max(max(n, s), max(e, w)));
+    float3 amp = sqrt(saturate(min(lo, 1 - hi) / max(hi, 1e-4)));
+    float3 k = amp * amount * -0.2;  // from nothing: CAS's own scale starts at -0.125, grainy on the road textures
+    return saturate(((n + s + e + w) * k + c) / (1 + 4 * k));
+}
+float4 psfinal(O i) : SV_Target {
     float2 size;
     img.GetDimensions(size.x, size.y);
     float2 t = 1 / size;
-    float3 m = tap(i.uv);
-    float lm = luma(m);
-    float ln = luma(tap(i.uv + float2(0, -t.y))), ls_ = luma(tap(i.uv + float2(0, t.y)));
-    float le = luma(tap(i.uv + float2(t.x, 0))), lw = luma(tap(i.uv + float2(-t.x, 0)));
-    float lo = min(lm, min(min(ln, ls_), min(le, lw))), hi = max(lm, max(max(ln, ls_), max(le, lw)));
-    float3 c = m;
-    if (hi - lo >= max(0.0312, hi * 0.125)) {
-        float lnw = luma(tap(i.uv + float2(-t.x, -t.y))), lne = luma(tap(i.uv + float2(t.x, -t.y)));
-        float lsw = luma(tap(i.uv + float2(-t.x, t.y))), lse = luma(tap(i.uv + float2(t.x, t.y)));
-        float2 dir = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
-        float reduce = max((lnw + lne + lsw + lse) * (0.25 / 8), 1.0 / 128);
-        dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8, 8) * t;
-        float3 a = 0.5 * (tap(i.uv + dir * (1.0 / 3 - 0.5)) + tap(i.uv + dir * (2.0 / 3 - 0.5)));
-        float3 b = a * 0.5 + 0.25 * (tap(i.uv - dir * 0.5) + tap(i.uv + dir * 0.5));
-        float lb = luma(b);
-        c = lb < lo || lb > hi ? a : b;
-    }
+    float2 px = max(t, fwidth(i.uv));
+    float3 c = opts.y > 0 ? fxaa(i.uv, t) : tap(i.uv);
+    if (opts.z > 0) c = sharpen(c, i.uv, px, opts.z);
     c *= opts.w;
     if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c, 1);

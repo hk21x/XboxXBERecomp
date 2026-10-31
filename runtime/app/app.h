@@ -44,7 +44,9 @@ struct Settings {
     bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
     bool show_fps = false;           // frames a second in a corner
     bool sharp_2d = true;            // GameInfo::sharpen_2d: the HUD's, menus' and text's pictures enlarged sharp
-    uint32_t antialiasing = 0;       // 0 none, 1 FXAA on the finished frame, 2 3 4 MSAA 2x 4x 8x on the scene
+    uint32_t msaa = 0;               // 0 none, 1 2 3 MSAA 2x 4x 8x on the scene
+    bool fxaa = false;               // FXAA on the finished frame
+    uint32_t sharpen = 0;            // percent, contrast adaptive sharpening of the finished frame
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
     uint32_t language = 1;           // the console's language (XC_LANGUAGE, GameInfo::languages), at the next start
     // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,
