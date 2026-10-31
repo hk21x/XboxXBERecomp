@@ -1445,6 +1445,11 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         left = int(c + (float(left) + moved - c) * clip_squeeze);
         right = int(c + (float(right) + moved - c) * clip_squeeze + 0.999f);
     }
+    if (s.squeeze_margin && squeeze != 1) {  // only the margin the squeezed picture leaves on that side
+        const float c = float(rt.w) * 0.5f, edge = c + (s.squeeze_margin < 0 ? -c : c) * squeeze;
+        left = s.squeeze_margin < 0 ? 0 : int(edge);
+        right = s.squeeze_margin < 0 ? int(edge + 0.999f) : int(rt.w);
+    }
     left *= int(s.aa_x);
     right *= int(s.aa_x);
     top *= int(s.aa_y);

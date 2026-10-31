@@ -2234,6 +2234,11 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawCon
         x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
         y1 = std::min(y1, LONG(s.scissors[3] * sy));
     }
+    if (s.squeeze_margin) {  // only the margin the squeezed picture leaves on that side
+        const LONG edge = LONG(SqueezedX(dc.hud, s.squeeze_margin < 0 ? 0.0f : dc.hud[1] * 2) * sx);
+        x0 = s.squeeze_margin < 0 ? 0 : edge;
+        x1 = s.squeeze_margin < 0 ? edge : LONG(W);
+    }
     D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
                     std::clamp<LONG>(x1, 0, LONG(W)), std::clamp<LONG>(y1, 0, LONG(H))};
     if (!c.vp_ok || std::memcmp(&c.sc, &rect, sizeof(rect))) cl_->RSSetScissorRects(1, &rect);
