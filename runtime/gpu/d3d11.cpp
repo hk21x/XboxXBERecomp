@@ -126,7 +126,7 @@ struct BlitOptions {
     uint32_t taps = 1;     // n x n box filter per pixel
     bool over = false;     // premultiplied over the target, which keeps its alpha
     bool fxaa = false;     // fast approximate antialiasing (the finished frame)
-    bool fade = false;     // at the weight mul over what is drawn (psfade; needs over)
+    ID3D11ShaderResourceView* mix = nullptr;  // the last frame, the source over it at the weight mul (psmix)
     float mul = 1;
 };
 
@@ -1026,12 +1026,12 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
-    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, o.fade ? "psfade" : o.fxaa ? "psfxaa" : "psmain", "ps_5_0", h), h);
+    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, o.mix ? "psmix" : o.fxaa ? "psfxaa" : "psmain", "ps_5_0", h), h);
     if (!ps && o.fxaa) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), o.mul};
-    ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
-    FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
+    ID3D11ShaderResourceView* srv[3] = {src, lut_srv_.Get(), o.mix};
+    FullScreen(vs, ps, c, 8, srv, o.mix ? 3 : 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
 
 // a depth buffer drawn as colour into another depth buffer's memory: copied as depth
@@ -1941,8 +1941,7 @@ void D3D11Backend::BlitFrame(Target& t) {
     ctx_->RSSetScissorRects(1, &sc);
     float uv[4] = {0, 0, 1, 1};
     if (hold_live_ && hold_w_ < 1) {
-        Blit(hold_srv_[!hold_last_].Get(), uv, {.gamma = gamma_});
-        Blit(hold_srv_[hold_last_].Get(), uv, {.gamma = gamma_, .over = true, .fade = true, .mul = hold_w_});
+        Blit(hold_srv_[hold_last_].Get(), uv, {.gamma = gamma_, .mix = hold_srv_[!hold_last_].Get(), .mul = hold_w_});
         return;
     }
     Blit(t.srv.Get(), uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
@@ -1981,6 +1980,9 @@ void D3D11Backend::HoldFrame(Target& t, const Surface& front) {
         ctx_->CopyResource(hold_[0].Get(), t.res.Get());
         ctx_->CopyResource(hold_[1].Get(), t.res.Get());
         hold_live_ = true;
+        static bool told = false;
+        if (!told) LOGR("d3d11: frames blended, %ux%u format %u, weight %.2f", hold_gw_, hold_gh_, unsigned(hold_fmt_), hold_w_);
+        told = true;
     } else if (front.blend_new) {
         hold_last_ = !hold_last_;
         ctx_->CopyResource(hold_[hold_last_].Get(), t.res.Get());
