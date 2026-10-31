@@ -26,6 +26,14 @@ X86Func* Find(uint32_t guest);
 }
 
 // configs written before the SDK knew the name
+#ifndef SYM_CDirectSoundStream_SetMode
+#define SYM_CDirectSoundStream_SetMode FFFFFF70
+#define HAS_CDirectSoundStream_SetMode 0
+#endif
+#ifndef SYM_CDirectSoundStream_SetRolloffCurve
+#define SYM_CDirectSoundStream_SetRolloffCurve FFFFFF71
+#define HAS_CDirectSoundStream_SetRolloffCurve 0
+#endif
 #ifndef SYM_IDirectSoundBuffer_SetMode
 #define SYM_IDirectSoundBuffer_SetMode FFFFFF40
 #define HAS_IDirectSoundBuffer_SetMode 0
@@ -700,6 +708,7 @@ static void AuditExports() {
         SYM(CDirectSoundStream_FlushEx), SYM(CDirectSoundStream_Pause), SYM(CDirectSoundStream_SetVolume),
         SYM(CDirectSoundStream_SetFrequency), SYM(CDirectSoundStream_SetFilter), SYM(CDirectSoundStream_SetHeadroom),
         SYM(CDirectSoundStream_SetMixBinVolumes), SYM(CDirectSoundStream_SetMixBins), SYM(CDirectSoundStream_SetMaxDistance),
+        SYM(CDirectSoundStream_SetMode), SYM(CDirectSoundStream_SetRolloffCurve),
         SYM(CDirectSoundStream_SetMinDistance), SYM(CDirectSoundStream_SetPosition), SYM(CDirectSoundStream_SetVelocity),
         SYM(CDirectSoundStream_SetI3DL2Source), SYM(CDirectSoundStream_SetDopplerFactor), SYM(IDirectSoundStream_SetEG),
         SYM(DirectSoundGetSampleTime), SYM(IDirectSound_CreateSoundStream), SYM(IDirectSoundBuffer_GetVoiceProperties),
@@ -1220,6 +1229,15 @@ STREAM(SetMixBinVolumes, 2) {
 }
 STREAM(SetMixBins, 2) {
     SetBins(v, a[1]);
+    return 0;
+}
+STREAM(SetMode, 3) {
+    v.mode = a[1];
+    return 0;
+}
+STREAM(SetRolloffCurve, 4) {
+    v.curve.clear();
+    for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
     return 0;
 }
 STREAM(SetMaxDistance, 3) {

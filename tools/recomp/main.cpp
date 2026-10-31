@@ -118,9 +118,9 @@ static bool LoadConfig(const fs::path& path, Config& cfg, const fs::path& xdk_di
             std::vector<std::string> locs;
             for (auto& x : *a) {
                 std::string s = x.value<std::string>().value_or("");
-                static const std::set<std::string> known{"stack", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"};
+                static const std::set<std::string> known{"?", "stack", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"};
                 if (!known.count(s)) return fail("\"" + s + "\" is not stack, eax, ebx, ecx, edx, esi, edi or ebp");
-                if (s != "stack" && std::count(locs.begin(), locs.end(), s)) return fail(s + " holds two arguments");
+                if (s != "stack" && s != "?" && std::count(locs.begin(), locs.end(), s)) return fail(s + " holds two arguments");
                 locs.push_back(s);
             }
             cfg.abi[name] = locs;
@@ -207,11 +207,17 @@ int main(int argc, char** argv) {
     Config cfg;
     fs::path cfg_path = args[0];
     if (!LoadConfig(cfg_path, cfg, xdk_dir)) return 1;
-    for (auto& [name, locs] : cfg.abi)
+    for (auto& [name, locs] : cfg.abi) {
+        // the scan writes "?" where a convention differs; the hand config, read after its includes, replaces the map
+        if (std::count(locs.begin(), locs.end(), "?")) {
+            std::fprintf(stderr, "%s: [abi] %s: not proven, give its argument locations in the hand config\n", args[0].c_str(), name.c_str());
+            return 1;
+        }
         if (!cfg.symbols.count(name)) {
             std::fprintf(stderr, "%s: [abi] %s is not a [symbols] name\n", args[0].c_str(), name.c_str());
             return 1;
         }
+    }
     fs::path root = cfg_path.parent_path().parent_path();  // the config sits in <game>/config
     fs::path xbe_path = args.size() > 1 ? fs::path(args[1]) : root / cfg.xbe_path;
     fs::path out_dir = args.size() > 2 ? fs::path(args[2]) : root / cfg.out_dir;
