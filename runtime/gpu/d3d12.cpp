@@ -264,6 +264,7 @@ struct BlitOptions {
     bool over = false;        // premultiplied over the target, which keeps its alpha
     bool fxaa = false;        // fast approximate antialiasing (the finished frame; taps and alpha unused)
     uint32_t samples = 1;     // the target's (an MSAA twin's)
+    bool fade = false;        // at the weight mul over what is drawn (psfade; needs over)
 };
 
 // Shrink's settings past the source and the size
@@ -439,7 +440,7 @@ private:
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
     // Blit's pipeline
-    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool fxaa = false, uint32_t samples = 1);
+    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool fxaa = false, uint32_t samples = 1, bool fade = false);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC FullScreenPipelineDesc(ID3DBlob* vs, ID3DBlob* ps, DXGI_FORMAT rtv) const;
     // Init, in order, each callee right after its caller
     bool CreateDevice();
@@ -458,6 +459,13 @@ private:
     void UploadGammaRamp();
     void DrawFrame(Target* t, uint32_t bi);
     void BlitFrame(Target& t);
+    void HoldFrame(Target& t, const Surface& front);
+    // HoldFrame: the last two images of a title blending its frames
+    ComPtr<ID3D12Resource> hold_[2];
+    D3D12_RESOURCE_STATES hold_state_[2] = {D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST};
+    int hold_last_ = 0;
+    bool hold_live_ = false;
+    float hold_w_ = 1;
     void RenderUi();
     void ReleaseOldTextures();
     void ResetFrame();
@@ -1545,7 +1553,7 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
     std::memcpy(cb.cpu, c, sizeof(c));
-    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, o.fxaa, o.samples);
+    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, o.fxaa, o.samples, o.fade);
     if (!pso && o.fxaa) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
     if (pso) DrawFullScreen(pso, cb.gpu, slot, si);
 }
@@ -1630,12 +1638,12 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC D3D12Backend::FullScreenPipelineDesc(ID3DBlob
     return d;
 }
 
-ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool fxaa, uint32_t samples) {
-    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(fxaa) << 33 | uint64_t(samples) << 40];
+ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool fxaa, uint32_t samples, bool fade) {
+    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(fxaa) << 33 | uint64_t(fade) << 34 | uint64_t(samples) << 40];
     if (pso) return pso.Get();
     uint64_t h;
     ID3DBlob* vs = Compile(kBlitHlsl, "vs", "vs_5_0", h);
-    ID3DBlob* ps = Compile(kBlitHlsl, fxaa ? "psfxaa" : "psmain", "ps_5_0", h);
+    ID3DBlob* ps = Compile(kBlitHlsl, fade ? "psfade" : fxaa ? "psfxaa" : "psmain", "ps_5_0", h);
     if (!vs || !ps) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, rtv);
     d.SampleDesc.Count = samples;
@@ -3271,7 +3279,54 @@ void D3D12Backend::BlitFrame(Target& t) {
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if (hold_live_ && hold_w_ < 1) {
+        Blit(hold_[!hold_last_].Get(), t.fmt, uv, {.gamma = gamma_});
+        Blit(hold_[hold_last_].Get(), t.fmt, uv, {.gamma = gamma_, .mul = hold_w_, .over = true, .fade = true});
+        return;
+    }
     Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
+}
+
+// a title blending its frames: the last two images kept, the newest copied when it changes
+void D3D12Backend::HoldFrame(Target& t, const Surface& front) {
+    hold_w_ = front.blend;
+    if (front.blend >= 1) {
+        hold_live_ = false;
+        return;
+    }
+    D3D12_RESOURCE_DESC td = t.res->GetDesc();
+    td.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (!hold_[0] || hold_[0]->GetDesc().Width != td.Width || hold_[0]->GetDesc().Height != td.Height ||
+        hold_[0]->GetDesc().Format != td.Format) {
+        hold_live_ = false;
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        for (int i = 0; i < 2; i++) {
+            if (hold_[i]) Release(std::move(hold_[i]));
+            hold_[i].Reset();
+            hold_state_[i] = D3D12_RESOURCE_STATE_COPY_DEST;
+            if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, hold_state_[i], nullptr,
+                                                     IID_PPV_ARGS(&hold_[i])))) {
+                hold_[0].Reset();
+                hold_w_ = 1;
+                return;
+            }
+            Name(hold_[i].Get(), "blended frame %d (present %llu)", i, (unsigned long long)presents_);
+        }
+    }
+    auto copy = [&](int i) {
+        Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(hold_[i].Get(), hold_state_[i], D3D12_RESOURCE_STATE_COPY_DEST);
+        cl_->CopyResource(hold_[i].Get(), t.res.Get());
+        Transition(hold_[i].Get(), hold_state_[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    };
+    if (!hold_live_) {
+        copy(0);
+        copy(1);
+        hold_live_ = true;
+    } else if (front.blend_new) {
+        hold_last_ = !hold_last_;
+        copy(hold_last_);
+    }
 }
 
 void D3D12Backend::RenderUi() {
@@ -3657,6 +3712,7 @@ void D3D12Backend::Present(const Surface& front) {
         UploadTarget(*t, front);
     }
     if (t) Resolve(*t);
+    if (t) HoldFrame(*t, front);
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
