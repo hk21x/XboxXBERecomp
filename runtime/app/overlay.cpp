@@ -475,7 +475,7 @@ void Graphics(Settings& s) {
         s.scale_filter = uint32_t(filter);
         Save();
     }
-    if (RowCheck("Enhanced world textures", &s.world_textures, "Doubles the 3D scene's textures in the background as they appear. Uses more video memory; textures may sharpen a moment after they show.")) Save();
+    if (RowCheck("Enhanced world textures", &s.world_textures, "Doubles the 3D scene's textures in the background as they appear. Uses more video memory; textures may sharpen a moment after they show. Can cause hitches of a quarter of a second as new scenery appears.")) Save();
     int sharp = int(s.sharpen);
     if (RowSlider("Sharpening", &sharp, 0, 100, 5, "%")) {
         s.sharpen = uint32_t(sharp);
