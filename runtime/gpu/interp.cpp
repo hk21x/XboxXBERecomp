@@ -26,6 +26,7 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
+constexpr double kTooLong = 0.6;                              // of a step, a replay's time
 constexpr float kFar = 0.25f, kFarLeast = 0.5f;               // how far one register of a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
@@ -188,6 +189,7 @@ private:
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0;
+    Clock::time_point rest_until_{};
     bool logged_ = false;
     Clock::time_point reported_{};
     uint32_t shown_ = 0, steps_ = 0, blended_steps_ = 0;
@@ -292,7 +294,7 @@ bool Interpolating::Match() {
             followed++;
         }
     }
-    if (!moved || (matched - jumped + followed) * 2 < draws) return false;
+    if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
 }
@@ -387,14 +389,19 @@ void Interpolating::Present(const Surface& front) {
         const double slot = 1.0 / Rate();
         const double drawing = std::chrono::duration<double>(t - first_).count();
         const double span = usual - drawing - kMargin - replay_seconds_;
-        // as many as fit: a replay's time, measured, falls back while none is drawn so it can be tried again
-        const int fit = replay_seconds_ > 0 ? int(span / replay_seconds_) + 1 : 2;
+        // as many as fit, and always one: the picture runs a step behind the title while blending, and the step just drawn shown now
+        // and then would jump ahead and back, the whole picture flickering. On a machine that cannot keep that up, none for a while
+        const int fit = replay_seconds_ > 0 ? int(std::max(span, 0.0) / replay_seconds_) + 1 : 2;
         const int frames = std::clamp(std::min(int(usual / slot + 0.5), fit), 1, kMostFrames);
-        // the picture follows the clock: a step's change is shown over the whole of the time to the next, which keeps the speed even.
-        // The last frame stops short of the step, and the next step's first goes on from there
         const double spacing = std::min(slot, usual / frames);
-        if (frames == 1) replay_seconds_ *= 0.9;
-        if (frames > 1) {
+        if (t < rest_until_) {
+            inner_->Present(front);
+        } else if (replay_seconds_ > usual * kTooLong) {
+            rest_until_ = t + std::chrono::seconds(2);
+            replay_seconds_ = 0;
+            LOGR("gpu: in-between frames: a replay takes too long, none for 2 s");
+            inner_->Present(front);
+        } else {
             for (int i = 0; i < frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
@@ -403,11 +410,9 @@ void Interpolating::Present(const Surface& front) {
                 inner_->Present(front);
                 if (i) shown_++;
                 // not past the time the title needs for its next step
-                const double until = std::min(at + spacing, span);
+                const double until = std::min(at + spacing, std::max(span, at));
                 std::this_thread::sleep_until(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
             }
-        } else {
-            inner_->Present(front);
         }
     }
     shown_++;
