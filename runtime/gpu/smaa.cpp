@@ -1,5 +1,5 @@
 // SMAA 1x (Jimenez et al., runtime/gpu/smaa) on the finished frame: its three passes and lookup textures for both renderers
-#include "gpu/d3d_common.h"
+#include "gpu/smaa.h"
 
 #include "gpu/smaa/AreaTex.h"
 #include "gpu/smaa/SearchTex.h"
