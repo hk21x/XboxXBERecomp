@@ -120,6 +120,11 @@ struct DrawShaders {
 // draw needs it (a new car, effect or stretch of road in the middle of a race). Thread safe.
 bool CachedShader(uint64_t hash, ID3DBlob** out);  // the blob made from that hash's source, if kept
 void KeepShader(uint64_t hash, ID3DBlob* code);
+// built pipelines' cached blobs on disk by their key (pipelinecache.bin beside the exe), so a pipeline seen in an earlier run
+// builds without the driver's compile: the hitch the first time something new is drawn
+const std::string* CachedPipeline(uint64_t key);  // valid until ForgetPipelines
+void KeepPipeline(uint64_t key, const void* data, size_t size);
+void ForgetPipelines();  // the driver refused a blob (a new driver, another GPU): all of them are stale
 
 // the render target's console size in pixels, or the depth buffer's without one
 struct GuestExtent {

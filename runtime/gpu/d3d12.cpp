@@ -101,7 +101,7 @@ struct Perf {
     uint64_t rtups = 0;
     uint64_t shrinks = 0;
     uint64_t syncs = 0;
-    uint64_t psos = 0;
+    uint64_t psos = 0, psos_kept = 0;
     uint64_t shaders = 0;
     uint64_t raw = 0;
     uint64_t lates = 0;
@@ -1564,7 +1564,24 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
-    if (HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)); FAILED(hr)) {
+    const std::string* kept = CachedPipeline(h);
+    if (kept) {
+        d.CachedPSO = {kept->data(), kept->size()};
+        g_perf.psos_kept++;
+    }
+    HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
+    if (FAILED(hr) && kept) {
+        // refused: the blob is stale, and d must not point at it once the cache is dropped
+        d.CachedPSO = {};
+        ForgetPipelines();
+        kept = nullptr;
+        pso.Reset();
+        hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
+    }
+    if (SUCCEEDED(hr) && !kept) {
+        if (ComPtr<ID3DBlob> blob; SUCCEEDED(pso->GetCachedBlob(&blob)) && blob) KeepPipeline(h, blob->GetBufferPointer(), blob->GetBufferSize());
+    }
+    if (FAILED(hr)) {
         DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
         if (adapter3_) adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
         LOGE("d3d12: pipeline creation failed %08X (samples %u, colour %u format %u, depth %u, topology %u, fill %u; "
@@ -3016,12 +3033,12 @@ void LogPerf() {
              g_perf_sync_late.exchange(0) / n);
         LOGR("perf: per frame %.0f draws (%.0f raw) %.0fk verts %.1f MB upload %.1f overflow | %.0f checks %.2f MB "
              "hashed | %.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f shrinks, "
-             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables | "
+             "%.1f read-backs %.1f late | %llu shaders %llu psos (%llu kept) this second | reused: %.0f vsc %.0f dc %.0f tables | "
              "stages: %.0f last %.0f memo %.0f target %.0f full | same as last draw: %.0f samplers %.0f views | targets %.2f ms",
              p.draws / n, p.raw / n, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n, p.sigs / n,
              p.sig_bytes / n / 1048576.0, p.texups / n, p.texup_bytes / n / 1048576.0, p.newtex / n,
              p.targets / n, p.rtups / n, p.shrinks / n, p.syncs / n, p.lates / n,
-             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
+             (unsigned long long)p.shaders, (unsigned long long)p.psos, (unsigned long long)p.psos_kept, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
              p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
              p.same_views / n, p.t_targets / n);
         g_perf = Perf{};
