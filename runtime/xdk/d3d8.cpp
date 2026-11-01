@@ -577,6 +577,7 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
             }
         }
         if (RenderThread()) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+        if (app::kGame.step_interpolation) g_backend = gpu::CreateInterpolating(std::move(g_backend));
     }
     g_state = gpu::State{};
     MakeFrameBuffers(pp);

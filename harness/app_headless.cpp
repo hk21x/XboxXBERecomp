@@ -15,6 +15,12 @@ namespace app {
 
 Settings& Get() {
     static Settings s;
+    // FPS=N is the cap too, for what reads it (gpu/interp.cpp)
+    static const bool capped = [] {
+        if (const char* e = std::getenv("FPS"); e && *e) s.fps_cap = uint32_t(std::atol(e));
+        return true;
+    }();
+    (void)capped;
     return s;
 }
 void Load() {}

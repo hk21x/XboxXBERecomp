@@ -63,6 +63,8 @@ std::unique_ptr<Backend> CreateD3D11Backend();
 std::unique_ptr<Backend> CreateFallbackBackend();
 // the same backend driven from a thread of its own: calls return once recorded
 std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner);
+// in-between frames for a title drawing one frame a step (GameInfo::step_interpolation)
+std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner);
 
 // perf diagnostic: the title's thread recording for the render thread, and waiting on it
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};
