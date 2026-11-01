@@ -36,9 +36,18 @@ bool StartHandover() {
 
 bool HandingOver() { return g_handing; }
 
+// each present from the second on: the window opens, and the old instance goes only some frames later. A window just shown has
+// nothing on screen until its next present, so going at once showed the desktop for a frame (AUF, leaving a driving mission)
 void FinishHandover() {
-    if (!g_handing.exchange(false)) return;
-    OpenGameWindow(false);
+    static int shown = -1;
+    if (!g_handing) return;
+    if (shown < 0) {
+        OpenGameWindow(false);
+        shown = 0;
+        return;
+    }
+    if (++shown < 3) return;
+    g_handing = false;
     SetEvent(g_ready);
     CloseHandle(g_ready);
 }

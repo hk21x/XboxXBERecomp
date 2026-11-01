@@ -128,7 +128,7 @@ void OpenGameWindow(bool apply = true);  // any thread but the window thread's; 
 // relaunched: the previous instance keeps its window up until this one has shown its first frames (handover.cpp)
 bool StartHandover();   // window thread, at launch; true: the game window starts hidden
 bool HandingOver();
-void FinishHandover();  // any thread but the window thread's: opens the game window, lets the old instance go
+void FinishHandover();  // each present, any thread but the window thread's: opens the game window, some frames later lets the old instance go
 
 // held around ImGui: the window thread's messages and the renderer's frame
 std::recursive_mutex& UiLock();
