@@ -2162,6 +2162,7 @@ void Walk(uint32_t end) {
             } else {
                 continue;
             }
+            if (size_t r = (a - g_im_attr) / 4; r < g_state.vattr.size()) std::memcpy(g_state.vattr[r].data(), a, 16);
             if (!g_im_prim) continue;
             g_im_mask |= 1u << (a - g_im_attr) / 4;
             if (a == g_im_attr && last) g_im_vertices.insert(g_im_vertices.end(), g_im_attr, g_im_attr + 64);

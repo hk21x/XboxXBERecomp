@@ -163,7 +163,17 @@ struct Surface {
     uint32_t data = 0, format = 0, size = 0;
 };
 
+// a v register's value before a title sets one: colours 1, the rest 0 0 0 1
+inline std::array<std::array<float, 4>, 16> DefaultVertexAttributes() {
+    std::array<std::array<float, 4>, 16> a{};
+    for (size_t r = 0; r < a.size(); r++) a[r] = r == 3 ? std::array<float, 4>{1, 1, 1, 1} : std::array<float, 4>{0, 0, 0, 1};
+    return a;
+}
+
 struct State {
+    // the value a v register holds when a draw gives it no stream: the last one pushed (SetVertexData4f and its kin), which
+    // the hardware keeps (True Crime sets v3 and v4 to 1 before its meshes and relies on them: its health bars were black)
+    std::array<std::array<float, 4>, 16> vattr = DefaultVertexAttributes();
     std::array<uint32_t, 0x800> simple{};  // simple render states indexed by method / 4
     std::array<uint32_t, kRsMax> rs{};     // deferred and complex render states by D3DRS
     std::array<std::array<uint32_t, kTssCount>, 4> tss{};

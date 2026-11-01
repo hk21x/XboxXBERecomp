@@ -136,6 +136,7 @@ struct DrawConstants {
     float hud[4];        // pretransformed x squeezed about hud[1] (half the width) by hud[0] (ultrawide 2D), else 1;
                          // [2] depth tested; [3] W-buffered: z kept within w (no far plane clipping)
     float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
+    float vattr[16][4];  // State::vattr
 };
 
 }  // namespace gpu

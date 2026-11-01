@@ -1247,7 +1247,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                 const float* p = input(vi, r);
                 vp.in[r] = V(p[0], p[1], p[2], p[3]);
             } else {
-                vp.in[r] = r == 3 ? V(1, 1, 1, 1) : V(0, 0, 0, 1);
+                const auto& p = s.vattr[size_t(r)];
+                vp.in[r] = V(p[0], p[1], p[2], p[3]);
             }
         }
         Shaded& o = verts[vi];
