@@ -1427,6 +1427,15 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
             LOG_FIRST(8, "d3d: SetVertexShader with unknown handle %08X", h);
         }
     }
+    // the library's own pushes defaults for the colour registers the shader's declaration or FVF does not supply: diffuse
+    // white, specular 0, front and back (True Crime's city multiplies its light by v3, left at a 2D draw's colour without this)
+    const bool diffuse = g_state.vs ? g_state.vs->inputs[3].stream >= 0 : (h & 0x40) != 0;
+    const bool specular = g_state.vs ? g_state.vs->inputs[4].stream >= 0 : (h & 0x80) != 0;
+    const bool back_diffuse = g_state.vs && g_state.vs->inputs[7].stream >= 0, back_specular = g_state.vs && g_state.vs->inputs[8].stream >= 0;
+    if (!diffuse) g_state.vattr[3] = {1, 1, 1, 1};
+    if (!specular) g_state.vattr[4] = {0, 0, 0, 0};
+    if (!back_diffuse) g_state.vattr[7] = {1, 1, 1, 1};
+    if (!back_specular) g_state.vattr[8] = {0, 0, 0, 0};
     return 0;
 }
 
