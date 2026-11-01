@@ -82,6 +82,7 @@ uint16_t KeyFromName(const std::string& name);
 bool OverlayOpen();
 void ToggleOverlay();
 void DrawOverlay();
+void OverlayInit();  // the fonts, after ImGui's context and before a renderer's first frame
 // a key pressed while the overlay waits for one to bind (window thread); true takes it
 bool OverlayKey(uint16_t vk);
 

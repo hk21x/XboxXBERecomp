@@ -138,6 +138,7 @@ int16_t Stick(float neg, float pos) {
     return int16_t(std::lround(v * 32767.0f));
 }
 std::atomic<uint32_t> g_held[4];  // HeldControls, per port
+std::atomic<uint32_t> g_swallow[4];  // held controls kept from the game until let go, per port
 std::atomic<uint16_t> g_rumble[2];  // controller 1's motors as the game last set them, for the wheel
 
 // mouse look: the counts moved since the last poll, read as a rate into a stick deflection. kFullRate counts a second
@@ -240,6 +241,9 @@ int ControlByName(const char* name) {
 }
 
 uint32_t HeldControls() { return g_held[0] | g_held[1] | g_held[2] | g_held[3]; }
+void SwallowHeld() {
+    for (int i = 0; i < 4; i++) g_swallow[i] = g_held[i].load();
+}
 
 Pad Poll(int port) {
     Pad p;
@@ -297,7 +301,7 @@ Pad Poll(int port) {
     uint32_t held = 0;
     for (int c = 0; c < kControls; c++) held |= uint32_t(in[c] >= 0.5f) << c;
     if (port >= 0 && port < 4) {
-        static std::atomic<uint32_t> last[4], swallow[4];
+        static std::atomic<uint32_t> last[4];
         g_held[port] = held;
         uint32_t pressed = held & ~last[port].exchange(held);
         constexpr uint32_t kStartBit = 1u << kStart, kBackBit = 1u << kBack;
@@ -305,11 +309,11 @@ Pad Poll(int port) {
         if ((pressed & kStartBit) && ((held & kBackBit) || open)) {
             std::lock_guard lock(app::UiLock());
             app::ToggleOverlay();
-            for (auto& w : swallow) w = kStartBit | kBackBit;
+            for (auto& w : g_swallow) w = kStartBit | kBackBit;
         }
-        swallow[port] &= held;
+        g_swallow[port] &= held;
         for (int c = 0; c < kControls; c++)
-            if (swallow[port] & (1u << (s.pad_map.size() > size_t(c) ? s.pad_map[c] : c))) out[c] = 0;
+            if (g_swallow[port] & (1u << (s.pad_map.size() > size_t(c) ? s.pad_map[c] : c))) out[c] = 0;
     }
     // the settings window takes the input while it is open
     if (app::OverlayOpen()) std::fill(std::begin(out), std::end(out), 0.0f);
