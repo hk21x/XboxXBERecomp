@@ -26,6 +26,8 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
+constexpr double kLate = 1.2;                                 // of the usual step
+constexpr int kFirstPatience = 240, kMostPatience = 7200;     // steps
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
 constexpr float kStays = 0.1f;                                // of its place, how far a turning object goes in a step
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
@@ -193,7 +195,8 @@ private:
     bool kept_full_ = false;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
-    double replay_seconds_ = 0, typical_ = 0;
+    double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
+    int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience;
     Clock::time_point rest_until_{};
     bool logged_ = false;
     Clock::time_point reported_{};
@@ -423,7 +426,17 @@ void Interpolating::Present(const Surface& front) {
         // as many as fit, and always one: the picture runs a step behind the title while blending, and the step just drawn shown now
         // and then would jump ahead and back, the whole picture flickering. On a machine that cannot keep that up, none for a while
         const int fit = replay_seconds_ > 0 ? int(std::max(span, 0.0) / replay_seconds_) + 1 : 2;
-        const int frames = std::clamp(std::min(int(usual / slot + 0.5), fit), 1, kMostFrames);
+        // steps coming late are the proof, whatever the cause (a full queue behind vertical sync comes in bursts): fewer frames, and
+        // more only after a calm that grows each time more proved too many
+        if (step > usual * kLate && limit_ > 1) {
+            limit_--;
+            calm_ = 0;
+            patience_ = std::min(patience_ * 2, kMostPatience);
+        } else if (++calm_ >= patience_ && limit_ < kMostFrames) {
+            limit_++;
+            calm_ = 0;
+        }
+        const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
         const double spacing = std::min(slot, usual / frames);
         if (t < rest_until_) {
             inner_->Present(front);
@@ -436,14 +449,21 @@ void Interpolating::Present(const Surface& front) {
             // the title's choice for what the player aims: the step shown at once and carried on from there, up to a step too far when
             // the aim stops, with none of the delay
             const bool ahead = app::kGame.step_ahead && app::kGame.step_ahead();
-            if (ahead) inner_->Present(front);
+            // a frame's time includes its present: with vertical sync the render thread waits for the screen, and when its queue is
+            // full so does this. One begun that will not be done before the next step would make the title late
+            if (ahead) {
+                const auto now = Clock::now();
+                inner_->Present(front);
+                frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() + replay_seconds_ - frame_seconds_) * 0.1;
+            }
             for (int i = ahead ? 1 : 0; i < frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
-                if (i && at >= span) break;
+                if ((i || ahead) && at + frame_seconds_ >= span + replay_seconds_) break;
                 const double along = std::min(at / usual, 1.0);
                 Replay(float(ahead ? 1.0 + along : along));
                 inner_->Present(front);
+                frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() - frame_seconds_) * 0.1;
                 if (i) shown_++;
                 // not past the time the title needs for its next step
                 const double until = std::min(at + spacing, std::max(span, at));
