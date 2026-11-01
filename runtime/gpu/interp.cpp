@@ -28,7 +28,7 @@ constexpr double kMargin = 0.002;                             // seconds kept fo
 constexpr int kMostFrames = 32;
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
 constexpr float kStays = 0.1f;                                // of its place, how far a turning object goes in a step
-constexpr float kFar = 0.25f, kLeap = 16.0f;                  // how far a matrix moves in a step and is still the same draw
+constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
@@ -272,7 +272,8 @@ bool Interpolating::Match() {
             for (uint32_t c = 0; c < 3; c++)
                 if (std::fabs(was.vsc[k][c] - r.vsc[k][c]) > kFar * size) far = true;
             const float x = was.vsc[k][3], y = r.vsc[k][3];
-            if (std::fabs(x - y) > kLeap && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) far = true;
+            // in the matrix's own units: the world's rows are near 1, a screen's HUD 0.003 a pixel, across the screen is a leap there
+            if (std::fabs(x - y) > kLeap * size && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) far = true;
         }
         matched++;
         if (far) {
