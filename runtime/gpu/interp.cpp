@@ -32,7 +32,7 @@ constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matri
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
-constexpr uint32_t kRegionBytes = 8u << 20, kRegionHeaders = 4096;  // kept vertices of a step, in guest memory, two steps' worth
+constexpr uint32_t kRegionBytes = 32u << 20, kRegionHeaders = 1u << 16;  // kept vertices of a step, in guest memory, two steps' worth
 constexpr uint32_t kRegisters = 192, kMatrixRegisters = 4;    // the first are the title's transform in every program seen
 
 struct Rec {
@@ -189,6 +189,8 @@ private:
     std::vector<Rec> now_, before_;
     size_t count_ = 0, before_count_ = 0;
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
+    uint32_t kept_count_ = 0;
+    bool kept_full_ = false;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0;
@@ -218,7 +220,11 @@ void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_
         if (!data) continue;
         const uint32_t va = mem::VirtualFromPhysical(data);
         if (!mem::IsCommitted(va) || !mem::IsCommitted(va + uint32_t(bytes) - 1)) continue;
-        if (kept_bytes_.size() + bytes > kRegionBytes) continue;
+        if (kept_bytes_.size() + bytes > kRegionBytes || kept_count_ >= kRegionHeaders) {
+            kept_full_ = true;  // that draw would read what the title wrote after it: the last draws, the HUD, in pieces
+            continue;
+        }
+        kept_count_++;
         const auto* from = static_cast<const uint8_t*>(kernel::HostPtr(va));
         r.kept.push_back({uint8_t(k), uint32_t(kept_bytes_.size()), uint32_t(bytes)});
         kept_bytes_.insert(kept_bytes_.end(), from, from + bytes);
@@ -230,7 +236,7 @@ void Interpolating::UploadKept() {
     region_ ^= 1;
     if (!region_data_[region_]) {
         region_data_[region_] = mem::AllocHostContiguous(kRegionBytes, 0x1000);
-        region_headers_[region_] = mem::AllocSystem(kRegionHeaders * 12);
+        region_headers_[region_] = mem::AllocHostContiguous(kRegionHeaders * 12, 0x1000);
     }
     inner_->WaitFence(region_fence_[region_]);
     if (!kept_bytes_.empty()) std::memcpy(kernel::HostPtr(region_data_[region_]), kept_bytes_.data(), kept_bytes_.size());
@@ -347,7 +353,6 @@ void Interpolating::Replay(float alpha) {
                 State& d = *r.s;
                 std::array<State::Stream, 16> streams = d.streams;
                 for (const Rec::Kept& kept : r.kept) {
-                    if (header >= kRegionHeaders) break;
                     const uint32_t h = region_headers_[region_] + header++ * 12;
                     kernel::W32(h, 1);  // a vertex buffer, one reference
                     kernel::W32(h + 4, mem::PhysicalFromVirtual(region_data_[region_] + kept.offset));
@@ -390,7 +395,8 @@ void Interpolating::Present(const Surface& front) {
     const auto t = Clock::now();
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
-    const bool blend = On() && count_ && Match();
+    if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
+    const bool blend = On() && count_ && !kept_full_ && Match();
     if (blend) UploadKept();
     if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
@@ -451,6 +457,8 @@ void Interpolating::Present(const Surface& front) {
     before_count_ = count_;
     count_ = 0;
     kept_bytes_.clear();
+    kept_count_ = 0;
+    kept_full_ = false;
 }
 }  // namespace
 
