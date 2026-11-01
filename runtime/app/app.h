@@ -106,6 +106,11 @@ void* Monitor();                  // HMONITOR of the monitor setting (the primar
 std::vector<std::string> Monitors();  // the displays' names, in the monitor setting's order from 1
 std::vector<Mode> ListModes();        // the monitor setting's display modes, widest first, each size once
 bool Paused();                    // pause_unfocused and the window is not in front (Windows)
+// F12: the renderers save the next frame, before they draw the interface (app/screenshot.cpp)
+void RequestScreenshot();
+bool TakeScreenshotRequest();
+void SaveScreenshot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h);
+bool ScreenshotJustSaved();  // for a few seconds after one is written
 void DrawHud(double fps);         // the frame counter, inside the ImGui frame (overlay.cpp)
 void FeedPad();                   // controllers to the settings window's navigation, before each ImGui frame
 Mode Output();

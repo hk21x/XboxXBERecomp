@@ -3021,6 +3021,14 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     if (frame) BlitFrame(frame, frame_fmt);
+    // F12: the frame as shown, before the interface; the read submits, so the target is set again
+    if (app::TakeScreenshotRequest()) {
+        Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        std::vector<uint8_t> px;
+        if (ReadBack(bb_[bi].Get(), bb_w_, bb_h_, px)) app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
+        Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    }
     RenderUi();
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
 }

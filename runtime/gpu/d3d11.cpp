@@ -2065,6 +2065,13 @@ void D3D11Backend::Present(const Surface& front) {
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
     SetPassTarget(bb_rtv_.Get(), nullptr, bb_w_, bb_h_);
     if (frame) BlitFrame(frame);
+    // F12: the frame as shown, before the interface
+    if (app::TakeScreenshotRequest()) {
+        ComPtr<ID3D11Texture2D> back;
+        std::vector<uint8_t> px;
+        if (SUCCEEDED(swap_->GetBuffer(0, IID_PPV_ARGS(&back))) && ReadBack(back.Get(), bb_w_, bb_h_, px))
+            app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
+    }
     D3D11_VIEWPORT vp{0, 0, float(bb_w_), float(bb_h_), 0, 1};
     ctx_->RSSetViewports(1, &vp);
     RenderUi();

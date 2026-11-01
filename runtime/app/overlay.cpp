@@ -850,8 +850,16 @@ void Achievements() {
 void DrawHud(double fps) {
     Scale();
     DrawUnlock();
-    if (!Get().show_fps) return;
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (ScreenshotJustSaved()) {
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + 8), 0, ImVec2(0.5f, 0));
+        ImGui::SetNextWindowBgAlpha(0.6f);
+        if (ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+            ImGui::TextUnformatted("Screenshot saved in the screenshots folder");
+        ImGui::End();
+    }
+    if (!Get().show_fps) return;
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 8, vp->WorkPos.y + 8));
     ImGui::SetNextWindowBgAlpha(0.6f);
     ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
