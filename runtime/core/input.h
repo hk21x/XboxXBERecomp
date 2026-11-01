@@ -51,6 +51,8 @@ void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)
 uint32_t HeldControls();
+// what is held now stays from the game until let go (what closed the settings window)
+void SwallowHeld();
 
 // a steering wheel and the rest of a rig through DirectInput (core/wheel.cpp): every game controller DirectInput lists
 // but Xbox pads (SDL's), each control bound to one of them (app::Settings::WheelBind), merged into controller 1
