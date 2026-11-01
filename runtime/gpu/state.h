@@ -176,6 +176,10 @@ struct State {
     // the hardware keeps (True Crime sets v3 and v4 to 1 before its meshes and relies on them: its health bars were black)
     // (here, between simple and textures: render_thread.cpp sends State in ranges, and a field outside them never arrives)
     std::array<std::array<float, 4>, 16> vattr = DefaultVertexAttributes();
+    // SetDepthClipPlanes for vertex programs, in depth buffer units, when a title has set them: outside them nothing draws
+    // (True Crime's far city is clipped this way short of the camera, or it covers the buildings near it)
+    bool depth_clip = false;
+    float depth_clip_near = 0, depth_clip_far = 0;
     std::array<uint32_t, kRsMax> rs{};     // deferred and complex render states by D3DRS
     std::array<std::array<uint32_t, kTssCount>, 4> tss{};
     std::array<uint32_t, 4> textures{};    // guest D3DBaseTexture pointers

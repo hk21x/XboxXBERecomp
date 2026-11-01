@@ -1563,6 +1563,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     // put long triangles that reach the camera in front of everything)
                     float z = wbuf ? wk / (b0 * p0.iw + b1 * p1.iw + b2 * p2.iw) : b0 * zv0 + b1 * zv1 + b2 * zv2;
                     if (z < 0 || (!wbuf && z > s.zscale)) continue;
+                    if (s.depth_clip && (z < s.depth_clip_near || z > s.depth_clip_far)) continue;
                     z = std::clamp(z + zoff + float(adjust.depth_bias) * s.zscale / 16777215.0f, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
                     Vec attr[kAttrs];

@@ -35,6 +35,7 @@ struct VOut {
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
     float wlin : TEXCOORD6;  // w, interpolated perspective correct: the pixel's own
+    float2 clipz : SV_ClipDistance0;  // zclip
     float psize : TEXCOORD7;  // a point's size in console pixels (oPts), 0 for the render state's
 };
 cbuffer VC : register(b0) { float4 c[192]; };
@@ -64,6 +65,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 hud;
     float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
     float4 vattr[16];  // the v registers a draw gives no stream
+    float4 zclip;  // the depth clip planes
 };
 )";
 
@@ -245,6 +247,7 @@ const char* kVsEpilogue = R"(
     q.xyz *= p.w;
     q.w = p.w;
     o.pos = q;
+    o.clipz = float2(q.z - zclip.x * q.w, zclip.y * q.w - q.z);
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = saturate(oB0);
@@ -889,6 +892,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     if (surf.w == 0 && abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;
     if (hud.w != 0) cp.z = min(cp.z, cp.w);  // W-buffered: nothing clipped past the far plane (the programs' epilogue)
     o.pos = cp;
+    o.clipz = float2(cp.z - zclip.x * cp.w, zclip.y * cp.w - cp.z);
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = o.d0;

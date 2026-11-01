@@ -508,6 +508,8 @@ void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
     c.surf[1] = float(size.h);
     c.surf[2] = 1.0f / s.zscale;
     std::memcpy(c.vattr, s.vattr.data(), sizeof(c.vattr));
+    c.zclip[0] = s.depth_clip ? s.depth_clip_near / s.zscale : -2.0f;
+    c.zclip[1] = s.depth_clip ? s.depth_clip_far / s.zscale : 2.0f;
     Color(s.rs[kRsFogColor], c.fog_color);
     c.misc[0] = float(SimpleState(s, kMAlphaRef) & 0xFF);
     c.misc[1] = SimpleState(s, kMAlphaTestEnable) ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;

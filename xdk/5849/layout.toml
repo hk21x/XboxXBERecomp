@@ -26,6 +26,7 @@ CDevice_BackBufferScale   = 0x96C  # the frame buffer init 0x4A1D4B stores the X
 CDevice_Viewport          = 0xEE0  # D3DDevice_SetViewport 0x49B040 to 0x49B06C stores X, Y, Width, Height, MinZ, MaxZ
 CDevice_ScreenSpaceOffset = 0xEF8  # D3DDevice_SetScreenSpaceOffset 0x49B943 stores x + 0.53125, 0x49B953 y + 0.53125 at +4
 CDevice_AutoDepth         = 0x1A20 # the frame buffer init 0x4A2133 stores the depth buffer, D3D_InitDefaultState 0x4A1AD7 reads it
+CDevice_VertexProgramPlanes = 0x1C10 # True Crime SetDepthClipPlanes 0x2BB3E0 stores near, 0x2BB3EC far (+4); GetDepthClipPlanes 0x2BB49D reads them
 CDevice_VBlankCallback    = 0x1DB8 # the vertical blank handler 0x4A306E calls [miniport + 0x190], the miniport is at +0x1C28 (0x4A2287); Black 0x0C0FA5 stores it
 CDevice_VBlankEvent       = 0x1DBC # D3DDevice_BlockUntilVerticalBlank 0x49A627 waits on it, 0x49A61B clears its SignalState
 CDevice_DisplayFlags      = 0x1DDC # D3D_GetAdapterDisplayMode 0x49D633 reads it, the mode set 0x4A2C05 stores the mode entry at miniport + 0x1B4
