@@ -171,10 +171,11 @@ inline std::array<std::array<float, 4>, 16> DefaultVertexAttributes() {
 }
 
 struct State {
+    std::array<uint32_t, 0x800> simple{};  // simple render states indexed by method / 4
     // the value a v register holds when a draw gives it no stream: the last one pushed (SetVertexData4f and its kin), which
     // the hardware keeps (True Crime sets v3 and v4 to 1 before its meshes and relies on them: its health bars were black)
+    // (here, between simple and textures: render_thread.cpp sends State in ranges, and a field outside them never arrives)
     std::array<std::array<float, 4>, 16> vattr = DefaultVertexAttributes();
-    std::array<uint32_t, 0x800> simple{};  // simple render states indexed by method / 4
     std::array<uint32_t, kRsMax> rs{};     // deferred and complex render states by D3DRS
     std::array<std::array<uint32_t, kTssCount>, 4> tss{};
     std::array<uint32_t, 4> textures{};    // guest D3DBaseTexture pointers
