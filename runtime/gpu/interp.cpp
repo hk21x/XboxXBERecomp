@@ -26,6 +26,7 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
+constexpr float kFar = 0.25f, kFarLeast = 0.5f;               // how far one register of a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
@@ -63,6 +64,7 @@ uint64_t KeyOf(const Rec& r) {
     mix(r.a), mix(r.b), mix(r.c), mix(s.vs_handle), mix(s.rt.header);
     for (uint32_t t : s.textures) mix(t);
     mix(s.streams[0].vb), mix(s.index_data);
+    mix(s.viewport.x), mix(s.viewport.y), mix(s.viewport.w), mix(s.viewport.h), mix(s.squeeze_beyond);
     return h;
 }
 
@@ -240,17 +242,23 @@ bool Interpolating::Match() {
         draws++;
         auto it = found.find(KeyOf(r));
         if (it == found.end() || it->second.empty()) continue;
-        r.prev = it->second.back();
+        const int candidate = it->second.back();
         it->second.pop_back();
-        matched++;
-        if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
-        bool jump = false;
-        for (uint32_t k = 0; k < kMatrixRegisters; k++)
+        // HUD pieces of one picture look alike and their number changes: a different matrix is a different draw, or one that jumped
+        const Rec& was = before_[size_t(candidate)];
+        bool far = false;
+        for (uint32_t k = 0; k < kMatrixRegisters && !far; k++)
             for (uint32_t c = 0; c < 4; c++) {
-                const float x = before_[size_t(r.prev)].vsc[k][c], y = r.vsc[k][c];
-                if (std::fabs(x - y) > 0.5f * std::max({std::fabs(x), std::fabs(y), 1.0f})) jump = true;
+                const float x = was.vsc[k][c], y = r.vsc[k][c];
+                if (std::fabs(x - y) > kFar * std::max({std::fabs(x), std::fabs(y), kFarLeast})) far = true;
             }
-        if (jump) jumped++;
+        matched++;
+        if (far) {
+            jumped++;
+            continue;
+        }
+        r.prev = candidate;
+        if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
     }
     if (!moved || matched * 2 < draws) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
