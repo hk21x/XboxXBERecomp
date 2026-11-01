@@ -372,6 +372,7 @@ private:
     ComPtr<ID3D11RasterizerState> pass_raster_;
     ComPtr<ID3D11DepthStencilState> no_depth_, depth_always_;
     ComPtr<ID3D11BlendState> opaque_, over_;
+    ComPtr<ID3D11BlendState> channels_[16];  // ClearRects' clears of some channels, by the write mask
     ComPtr<ID3D11SamplerState> pass_samplers_[4];  // linear, then point; all clamp
     ComPtr<ID3D11Buffer> vsc_cb_, dc_cb_, pass_cb_;
     ComPtr<ID3D11Texture2D> lut_;
@@ -1084,10 +1085,20 @@ void D3D11Backend::ClearRects(Target& t, const std::vector<RECT>& rs, uint32_t f
     }
     SetPassTarget(t.depth ? nullptr : t.rtv.Get(), t.depth ? t.dsv.Get() : nullptr, t.w, t.h);
     float cb[8] = {colour[0], colour[1], colour[2], colour[3], z, 0, 0, 0};
+    // 0x10 to 0x80 are red, green, blue, alpha, in the order of the write mask's bits
+    ID3D11BlendState* blend = opaque_.Get();
+    if (const uint32_t mask = (flags >> 4) & 0xF; !t.depth && mask != 0xF) {
+        if (!channels_[mask]) {
+            D3D11_BLEND_DESC bd{};
+            bd.RenderTarget[0].RenderTargetWriteMask = UINT8(mask);
+            dev_->CreateBlendState(&bd, &channels_[mask]);
+        }
+        blend = channels_[mask].Get();
+    }
     for (const RECT& r : rs) {
         if (r.right <= r.left || r.bottom <= r.top) continue;
         ctx_->RSSetScissorRects(1, &r);
-        FullScreen(vs, ps, cb, 8, nullptr, 0, opaque_.Get(), dss.Get(), stencil & 0xFF);
+        FullScreen(vs, ps, cb, 8, nullptr, 0, blend, dss.Get(), stencil & 0xFF);
     }
     Unbind();
 }
@@ -1112,8 +1123,9 @@ void D3D11Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
             const auto& v = s.viewport;
             rs.push_back(ScaledRect(*t, int(v.x), int(v.y), int(v.x + v.w), int(v.y + v.h)));
         }
-        bool whole = rs.size() == 1 && rs[0].left == 0 && rs[0].top == 0 && rs[0].right == LONG(t->w) &&
-                     rs[0].bottom == LONG(t->h);
+        // a clear of some channels is drawn: a clear view writes them all (True Crime clears alpha after its world)
+        bool whole = (t->depth || (flags & kClearTarget) == kClearTarget) && rs.size() == 1 && rs[0].left == 0 &&
+                     rs[0].top == 0 && rs[0].right == LONG(t->w) && rs[0].bottom == LONG(t->h);
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
         if (!t->depth && LatchCpuWrite(*t)) UploadTarget(*t, s.rt);
         // a whole clear goes to the twin too and leaves both alike; part of one goes to res, the twin refreshed later

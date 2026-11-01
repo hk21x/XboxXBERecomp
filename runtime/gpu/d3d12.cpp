@@ -519,6 +519,7 @@ private:
         uint32_t stencil;
     };
     void ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs);
+    void ClearChannels(Target& t, const std::vector<D3D12_RECT>& rs, uint32_t flags, const float col[4]);
     // Copy's guest lists: count src_rects, dst_points 0 or one per rect
     struct CopyList {
         uint32_t count;
@@ -2590,6 +2591,49 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 }
 
 // rs: the rects buffer, reused across targets
+// A clear of some channels only: 0x10 to 0x80 are red, green, blue, alpha, in the order of the write mask's bits. A
+// clear view writes them all, so it is drawn (True Crime clears alpha and stencil after its world, flags 0x82, for its
+// shadows: the whole picture went black). Into res, the twin refreshed later.
+void D3D12Backend::ClearChannels(Target& t, const std::vector<D3D12_RECT>& rs, uint32_t flags, const float col[4]) {
+    static const char* kHlsl = R"(
+cbuffer B : register(b1) { float4 colour; };
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 t = float2((id << 1) & 2, id & 2);
+    return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float4 ps(float4 p : SV_Position) : SV_Target { return colour; }
+)";
+    const uint32_t mask = (flags >> 4) & 0xF;
+    auto& pso = blit_psos_[Hash(kHlsl, std::strlen(kHlsl), uint64_t(t.fmt) << 8 | mask)];
+    if (!pso) {
+        uint64_t h;
+        ID3DBlob* vs = Compile(kHlsl, "vs", "vs_5_0", h);
+        ID3DBlob* ps = Compile(kHlsl, "ps", "ps_5_0", h);
+        if (!vs || !ps) return;
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, t.fmt);
+        d.BlendState.RenderTarget[0].RenderTargetWriteMask = UINT8(mask);
+        if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return;
+    }
+    Settle(t);
+    Wrote(t);
+    Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    SetBlitTarget(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), t.w, t.h);
+    uint32_t slot = AllocSrvSlots(2);
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = kBgra;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    for (uint32_t i = 0; i < 2; i++) dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+    Alloc cb = Upload(256, 256);
+    std::memcpy(cb.cpu, col, 4 * sizeof(float));
+    for (const D3D12_RECT& r : rs) {
+        if (r.right <= r.left || r.bottom <= r.top) continue;
+        cl_->RSSetScissorRects(1, &r);
+        DrawFullScreen(pso.Get(), cb.gpu, slot);
+    }
+}
+
 void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs) {
     rs.clear();
     if (c.count && c.rects) {
@@ -2620,10 +2664,14 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         float col[4];
         Color(c.color, col);
         for (int i = 0; t.range != 1 && i < 3; i++) col[i] /= t.range;
-        cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
-        if (t.ms) {
-            Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
+        if ((c.flags & kClearTarget) != kClearTarget) {
+            ClearChannels(t, rs, c.flags, col);
+        } else {
+            cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
+            if (t.ms) {
+                Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
+            }
         }
     }
     t.drawn = true;
