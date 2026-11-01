@@ -501,8 +501,28 @@ bool ReplacementFits(const Replacement& r, const TextureDesc& d) {
     return !r.format || (r.format == d.format && r.src_width == d.width && r.src_height == d.height);
 }
 
+// up to 64 KB whole, beyond that 64 evenly spaced runs of 64 bytes
+static uint64_t SampledHash(const uint8_t* p, uint32_t n) {
+    constexpr uint32_t kWhole = 65536, kRuns = 64, kRun = 64;
+    if (n <= kWhole) return Hash(p, n);
+    uint64_t h = n;
+    for (uint32_t i = 0; i < kRuns; i++) h = Hash(p + uint64_t(n - kRun) * i / (kRuns - 1), kRun, h);
+    return h;
+}
+
+bool TakePictureBudget(uint64_t frame, const Replacement& r) {
+    constexpr uint64_t kBytesPerFrame = 6ull << 20;
+    static uint64_t now = ~0ull, spent = 0;  // the render thread's alone
+    if (now != frame) now = frame, spent = 0;
+    const uint64_t cost = uint64_t(r.width) * r.height * 4 * 4 / 3;
+    if (spent && spent + cost > kBytesPerFrame) return false;
+    spent += cost;
+    return true;
+}
+
 bool ReplacementHolds(const Replacement& r) {
-    if (Hash(kernel::HostPtr(r.data), r.guest_bytes) == r.guest_hash) return true;
+    const uint8_t* guest = static_cast<const uint8_t*>(kernel::HostPtr(r.data));
+    if ((r.sampled ? SampledHash(guest, r.guest_bytes) : Hash(guest, r.guest_bytes)) == r.guest_hash) return true;
     if (r.sharpened) {
         std::lock_guard<std::mutex> lock(g_sharp_lock);
         g_sharp_drops[r.data]++;
@@ -693,6 +713,32 @@ std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t
     return out;
 }
 
+// the levels below a picture, each a box filter of the one above
+static std::vector<std::vector<uint32_t>> MakeMips(const std::vector<uint32_t>& top, uint32_t w, uint32_t h) {
+    std::vector<std::vector<uint32_t>> levels;
+    while (w > 1 || h > 1) {
+        uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
+        const std::vector<uint32_t>& up = levels.empty() ? top : levels.back();
+        std::vector<uint32_t> down(size_t(nw) * nh);
+        for (uint32_t y = 0; y < nh; y++)
+            for (uint32_t x = 0; x < nw; x++) {
+                uint32_t sum[4] = {};
+                for (uint32_t dy = 0; dy < 2; dy++)
+                    for (uint32_t dx = 0; dx < 2; dx++) {
+                        uint32_t c = up[size_t(std::min(y * 2 + dy, h - 1)) * w + std::min(x * 2 + dx, w - 1)];
+                        for (int i = 0; i < 4; i++) sum[i] += c >> (i * 8) & 0xFF;
+                    }
+                uint32_t c = 0;
+                for (int i = 0; i < 4; i++) c |= (sum[i] + 2) / 4 << (i * 8);
+                down[size_t(y) * nw + x] = c;
+            }
+        levels.push_back(std::move(down));
+        w = nw;
+        h = nh;
+    }
+    return levels;
+}
+
 namespace {
 struct SharpJob {
     TextureDesc d;
@@ -722,7 +768,8 @@ void SharpWorker() {
         auto r = std::make_shared<Replacement>();
         r->data = job.d.data;
         r->guest_bytes = uint32_t(job.bytes.size());
-        r->guest_hash = Hash(job.bytes.data(), job.bytes.size());
+        r->sampled = job.world;
+        r->guest_hash = job.world ? SampledHash(job.bytes.data(), uint32_t(job.bytes.size())) : Hash(job.bytes.data(), job.bytes.size());
         r->width = job.d.width * scale;
         r->height = job.d.height * scale;
         r->sharpened = true;
@@ -765,6 +812,7 @@ void SharpWorker() {
             tga("orig_", job.d.width, job.d.height, px);
             tga("sharp_", r->width, r->height, r->bgra);
         }
+        r->mips = MakeMips(r->bgra, r->width, r->height);
         RegisterReplacement(std::move(r));
         static std::atomic<int> told{0};
         if (told++ < 8)
@@ -829,27 +877,8 @@ void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v) {
 
 std::vector<std::vector<uint32_t>> ReplacementLevels(const Replacement& r) {
     std::vector<std::vector<uint32_t>> levels{r.bgra};
-    uint32_t w = r.width, h = r.height;
-    while (w > 1 || h > 1) {
-        uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
-        const std::vector<uint32_t>& up = levels.back();
-        std::vector<uint32_t> down(size_t(nw) * nh);
-        for (uint32_t y = 0; y < nh; y++)
-            for (uint32_t x = 0; x < nw; x++) {
-                uint32_t sum[4] = {};
-                for (uint32_t dy = 0; dy < 2; dy++)
-                    for (uint32_t dx = 0; dx < 2; dx++) {
-                        uint32_t c = up[size_t(std::min(y * 2 + dy, h - 1)) * w + std::min(x * 2 + dx, w - 1)];
-                        for (int i = 0; i < 4; i++) sum[i] += c >> (i * 8) & 0xFF;
-                    }
-                uint32_t c = 0;
-                for (int i = 0; i < 4; i++) c |= (sum[i] + 2) / 4 << (i * 8);
-                down[size_t(y) * nw + x] = c;
-            }
-        levels.push_back(std::move(down));
-        w = nw;
-        h = nh;
-    }
+    std::vector<std::vector<uint32_t>> below = r.mips.empty() ? MakeMips(r.bgra, r.width, r.height) : r.mips;
+    for (auto& m : below) levels.push_back(std::move(m));
     return levels;
 }
 

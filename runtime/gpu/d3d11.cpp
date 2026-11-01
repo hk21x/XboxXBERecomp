@@ -1421,6 +1421,10 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
 ID3D11ShaderResourceView* D3D11Backend::BindReplacement(const Replacement& r, const TextureDesc& d, uint32_t& levels) {
     constexpr uint32_t kFmtA8R8G8B8 = 0x06;
     const uint64_t key = uint64_t(0xFFFFFFFFu) << 32 | d.data;  // no palette is at the top of memory
+    if (auto had = textures_.find(key); r.sharpened && (had == textures_.end() || !had->second.res || had->second.sig != r.version) &&
+                                        !TakePictureBudget(presents_, r))
+        return nullptr;
+    const auto load_start = std::chrono::steady_clock::now();
     Tex& tx = textures_[key];
     if (tx.frame != presents_ + 1 && !ReplacementHolds(r)) {
         textures_.erase(key);
@@ -1450,6 +1454,9 @@ ID3D11ShaderResourceView* D3D11Backend::BindReplacement(const Replacement& r, co
             h = std::max(h / 2, 1u);
         }
         tx.sig = r.version;
+        // how long a picture really takes, for a hitch to be read from the log
+        const double load_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_start).count();
+        if (load_ms > 4) LOG_FIRST(16, "d3d11: picture for %08X (%ux%u) took %.1f ms to load", d.data, r.width, r.height, load_ms);
     }
     levels = tx.levels;
     return tx.srv.Get();
