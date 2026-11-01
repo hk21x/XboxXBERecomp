@@ -579,6 +579,9 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
         if (RenderThread()) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
     }
     g_state = gpu::State{};
+    // the stencil masks' defaults, which no library table holds (the device starts with them): at 0 every stencil test passes
+    // and True Crime's stencilled wipe around a building's interior, before its first shadow set them, took the whole screen
+    g_state.simple[gpu::kMStencilMask >> 2] = g_state.simple[gpu::kMStencilWriteMask >> 2] = 0xFFFFFFFF;
     MakeFrameBuffers(pp);
     // where the library's own CreateDevice keeps the present parameters' interval (3948)
     if (XDK_CDevice_PresentInterval != xdk::kUnknown) SetDev(XDK_CDevice_PresentInterval, interval);
@@ -641,7 +644,7 @@ HLE_STDCALL(D3DDevice_SetDepthClipPlanes, 3) {
     const float near_z = ArgF(a, 0), far_z = ArgF(a, 1);
     LOG_FIRST(8, "d3d: SetDepthClipPlanes %g %g flags %u", near_z, far_z, a[2]);
     if (a[2] == 1) {
-        g_state.depth_clip = true;
+        g_state.depth_clip = !std::getenv("XBE_NO_DEPTH_CLIP");
         g_state.depth_clip_near = near_z;
         g_state.depth_clip_far = far_z;
         if (XDK_CDevice_VertexProgramPlanes != xdk::kUnknown) {
