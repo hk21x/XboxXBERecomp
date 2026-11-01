@@ -377,7 +377,9 @@ private:
     void ResizeSwap();
     void UploadGammaRamp();
     void DrawFrame(Target* t, uint32_t bi);
-    void BlitFrame(Target& t);
+    void BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt);
+    bool SmaaFrame(Target& t);  // Settings::smaa: the frame through SMAA's passes into smaa_[2], false when it cannot
+    bool EnsureSmaa(uint32_t w, uint32_t h);
     void RenderUi();
     void ReleaseOldTextures();
     void ResetFrame();
@@ -546,6 +548,17 @@ private:
     ComPtr<IDXGIAdapter3> adapter3_;  // for the video memory in use (logged when a pipeline cannot be made)
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_;
+    UINT swap_flags_ = 0;
+    HANDLE latency_wait_ = nullptr;  // Settings::low_latency: the swap chain's, waited on after each present
+    // SMAA on the finished frame: edges, weights, the result; its two lookups; the size they were made for
+    struct SmaaPass {
+        ComPtr<ID3D12Resource> res;
+        uint32_t view = 0;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    } smaa_[3];
+    ComPtr<ID3D12Resource> smaa_area_, smaa_search_;
+    uint32_t smaa_w_ = 0, smaa_h_ = 0;
+    ComPtr<ID3D12Resource> SmaaLookup(DXGI_FORMAT fmt, uint32_t w, uint32_t h, const unsigned char* bytes, uint32_t row);
     ComPtr<ID3D12Resource> bb_[kFrames];
     ComPtr<ID3D12Fence> fence_;
     HANDLE event_ = nullptr;
@@ -715,7 +728,8 @@ bool D3D12Backend::CreateSwapChain(HWND hwnd) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = kFrames;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    swap_flags_ = (tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (app::Get().low_latency ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
+    sd.Flags = swap_flags_;
     ComPtr<IDXGISwapChain1> sc1;
     if (FAILED(factory_->CreateSwapChainForHwnd(queue_.Get(), hwnd, &sd, nullptr, nullptr, &sc1))) {
         LOGE("d3d12: no swap chain");
@@ -723,6 +737,11 @@ bool D3D12Backend::CreateSwapChain(HWND hwnd) {
     }
     factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
     sc1.As(&swap_);
+    if (app::Get().low_latency) {
+        swap_->SetMaximumFrameLatency(1);
+        latency_wait_ = swap_->GetFrameLatencyWaitableObject();
+        LOGR("d3d12: low latency, a frame held");
+    }
     return true;
 }
 
@@ -1326,8 +1345,8 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
     const app::Settings& st = app::Get();
-    const bool final = o.final && (st.fxaa || st.sharpen);
-    if (final) c[5] = st.fxaa ? 1.0f : 0.0f, c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     std::memcpy(cb.cpu, c, sizeof(c));
     ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples);
     if (!pso && final) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
@@ -1765,13 +1784,14 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
+        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
         }
     }
     if (draw_2d_) Sharpen2D(d);
+    else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -2494,6 +2514,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     bool tested = test.vs && s.vs_handle == test.vs;
     if (tested && test.alphakill) pk.alphakill = 0;
     pk.quad = sh.quad;
+    // alpha tested, not blended, onto MSAA twins: Settings::alpha_coverage (not quads, whose shader is rewritten)
+    if (app::Get().alpha_coverage && bound_ms_ && !sh.quad && SimpleState(s, kMAlphaTestEnable) && !SimpleState(s, kMBlendEnable))
+        pk.coverage = msaa_;
     // D3DZB_USEW draws write w as their depth, as the console does (a Z buffer lost the showroom car's panels to its
     // interior); XBE_WBUFFER=0 goes back to z / w
     static const bool wbuffer = [] {
@@ -2777,7 +2800,7 @@ void D3D12Backend::ResizeSwap() {
         if (f.fence) WaitFence(f.fence);
     }
     for (auto& b : bb_) b.Reset();
-    swap_->ResizeBuffers(kFrames, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+    swap_->ResizeBuffers(kFrames, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, swap_flags_);
     CreateBackBufferViews();
     bb_w_ = w;
     bb_h_ = h;
@@ -2852,7 +2875,105 @@ void D3D12Backend::UploadGammaRamp() {
     cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
 }
 
-void D3D12Backend::BlitFrame(Target& t) {
+// a lookup texture of SMAA's, copied in on this frame's list
+ComPtr<ID3D12Resource> D3D12Backend::SmaaLookup(DXGI_FORMAT fmt, uint32_t w, uint32_t h, const unsigned char* bytes, uint32_t row) {
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC td = Texture2DDesc(fmt, w, h);
+    ComPtr<ID3D12Resource> tex;
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)))) return nullptr;
+    const uint32_t pitch = (row + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    Alloc a = Upload(uint64_t(pitch) * h + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+    for (uint32_t y = 0; y < h; y++) std::memcpy(a.cpu + size_t(y) * pitch, bytes + size_t(y) * row, row);
+    D3D12_TEXTURE_COPY_LOCATION dl{tex.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+    sl.PlacedFootprint.Offset = a.off;
+    sl.PlacedFootprint.Footprint = {fmt, w, h, 1, pitch};
+    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
+    Transition(tex.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    return tex;
+}
+
+bool D3D12Backend::EnsureSmaa(uint32_t w, uint32_t h) {
+    if (!smaa_area_) {
+        smaa_area_ = SmaaLookup(DXGI_FORMAT_R8G8_UNORM, kSmaaAreaWidth, kSmaaAreaHeight, kSmaaArea, kSmaaAreaWidth * 2);
+        smaa_search_ = SmaaLookup(DXGI_FORMAT_R8_UNORM, kSmaaSearchWidth, kSmaaSearchHeight, kSmaaSearch, kSmaaSearchWidth);
+        if (!smaa_area_ || !smaa_search_) {
+            smaa_area_.Reset();
+            return false;
+        }
+    }
+    if (smaa_w_ == w && smaa_h_ == h) return true;
+    for (SmaaPass& p : smaa_) {
+        if (p.res) {
+            CurrentFrame().garbage.push_back(p.res);
+            p.res.Reset();
+            free_rtv_.push_back(p.view);
+        }
+    }
+    smaa_w_ = smaa_h_ = 0;
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+    for (SmaaPass& p : smaa_) {
+        D3D12_RESOURCE_DESC td = Texture2DDesc(kBgra, w, h);
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        p.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        if (free_rtv_.empty() ||
+            FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, p.state, nullptr, IID_PPV_ARGS(&p.res)))) {
+            LOG_FIRST(4, "d3d12: no SMAA targets at %ux%u", w, h);
+            for (SmaaPass& q : smaa_)
+                if (q.res) q.res.Reset(), free_rtv_.push_back(q.view);
+            return false;
+        }
+        p.view = free_rtv_.back();
+        free_rtv_.pop_back();
+        dev_->CreateRenderTargetView(p.res.Get(), nullptr, Cpu(rtv_heap_.Get(), p.view, rtv_inc_));
+    }
+    smaa_w_ = w;
+    smaa_h_ = h;
+    return true;
+}
+
+bool D3D12Backend::SmaaFrame(Target& t) {
+    if (!EnsureSmaa(t.w, t.h)) return false;
+    const float c[8] = {0, 0, 1, 1, 1.0f / t.w, 1.0f / t.h, float(t.w), float(t.h)};
+    struct View {
+        ID3D12Resource* res;
+        DXGI_FORMAT fmt;
+    };
+    auto pass = [&](const char* vse, const char* pse, SmaaPass& dst, std::initializer_list<View> views) {
+        auto& pso = blit_psos_[Hash(pse, std::strlen(pse), Hash("smaa", 4))];
+        if (!pso) {
+            uint64_t h;
+            ID3DBlob* vs = Compile(kSmaaHlsl, vse, "vs_5_0", h);
+            ID3DBlob* ps = Compile(kSmaaHlsl, pse, "ps_5_0", h);
+            if (!vs || !ps) return false;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, kBgra);
+            if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
+        }
+        Transition(dst.res.Get(), dst.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        SetBlitTarget(Cpu(rtv_heap_.Get(), dst.view, rtv_inc_), t.w, t.h);
+        uint32_t slot = AllocSrvSlots(uint32_t(views.size()));
+        uint32_t i = 0;
+        for (const View& v : views) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = v.fmt;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            dev_->CreateShaderResourceView(v.res, &sv, Cpu(srv_heap_.Get(), slot + i++, srv_inc_));
+        }
+        Alloc cb = Upload(256, 256);
+        std::memcpy(cb.cpu, c, sizeof(c));
+        DrawFullScreen(pso.Get(), cb.gpu, slot);
+        Transition(dst.res.Get(), dst.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        return true;
+    };
+    return pass("vsedge", "psedge", smaa_[0], {{t.res.Get(), t.fmt}}) &&
+           pass("vsweight", "psweight", smaa_[1], {{smaa_[0].res.Get(), kBgra}, {smaa_area_.Get(), DXGI_FORMAT_R8G8_UNORM}, {smaa_search_.Get(), DXGI_FORMAT_R8_UNORM}}) &&
+           pass("vsblend", "psblend", smaa_[2], {{t.res.Get(), t.fmt}, {smaa_[1].res.Get(), kBgra}});
+}
+
+void D3D12Backend::BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt) {
     // 16:9 when the console reports a widescreen display, else 4:3; ultrawide the screen's shape
     float aspect = app::FrameAspect();
     float w = float(bb_w_);
@@ -2865,8 +2986,7 @@ void D3D12Backend::BlitFrame(Target& t) {
     ForgetDrawState();
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
-    Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .final = true});
+    Blit(frame, fmt, uv, {.gamma = gamma_, .final = true});
 }
 
 void D3D12Backend::RenderUi() {
@@ -2885,6 +3005,14 @@ void D3D12Backend::RenderUi() {
 }
 
 void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
+    ID3D12Resource* frame = nullptr;
+    DXGI_FORMAT frame_fmt = kBgra;
+    if (t) {
+        Transition(t->res.Get(), t->state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        frame = t->res.Get();
+        frame_fmt = t->fmt;
+        if (app::Get().smaa && SmaaFrame(*t)) frame = smaa_[2].res.Get(), frame_fmt = kBgra;
+    }
     D3D12_RESOURCE_STATES bs = D3D12_RESOURCE_STATE_PRESENT;
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), kRtvCount + bi, rtv_inc_);
@@ -2892,7 +3020,7 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     cl_->ClearRenderTargetView(rh, black, 0, nullptr);
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
-    if (t) BlitFrame(*t);
+    if (frame) BlitFrame(frame, frame_fmt);
     RenderUi();
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
 }
@@ -3016,6 +3144,7 @@ void D3D12Backend::Present(const Surface& front) {
     auto perf_swap = PerfNow();
     swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     g_perf.swap += PerfMs(perf_swap);
+    if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
 
     presents_++;
     presents_seen_.store(presents_);

@@ -270,7 +270,8 @@ private:
     // Present's steps
     void ResizeSwap();
     void UploadGammaRamp();
-    void BlitFrame(Target& t);
+    void BlitFrame(ID3D11ShaderResourceView* frame);
+    ID3D11ShaderResourceView* SmaaFrame(Target& t);  // Settings::smaa: the frame through SMAA's passes, null when it cannot
     void RenderUi();
     void ReleaseOldTextures();
     void CountFps();
@@ -374,6 +375,15 @@ private:
     ComPtr<ID3D11BlendState> opaque_, over_;
     ComPtr<ID3D11SamplerState> pass_samplers_[4];  // linear, then point; all clamp
     ComPtr<ID3D11Buffer> vsc_cb_, dc_cb_, pass_cb_;
+    // SMAA on the finished frame: edges, weights, the result; its two lookups; the size they were made for
+    struct SmaaPass {
+        ComPtr<ID3D11RenderTargetView> rtv;
+        ComPtr<ID3D11ShaderResourceView> srv;
+    } smaa_[3];
+    ComPtr<ID3D11ShaderResourceView> smaa_area_, smaa_search_;
+    uint32_t smaa_w_ = 0, smaa_h_ = 0;
+    UINT swap_flags_ = 0;
+    HANDLE latency_wait_ = nullptr;  // Settings::low_latency: the swap chain's, waited on after each present
     ComPtr<ID3D11Texture2D> lut_;
     ComPtr<ID3D11ShaderResourceView> lut_srv_;
     Ring vring_, iring_;
@@ -474,12 +484,18 @@ bool D3D11Backend::CreateSwapChain(HWND hwnd) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = kBuffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    swap_flags_ = (tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (app::Get().low_latency ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
+    sd.Flags = swap_flags_;
     if (FAILED(factory_->CreateSwapChainForHwnd(dev_.Get(), hwnd, &sd, nullptr, nullptr, &swap_))) {
         LOGE("d3d11: no swap chain");
         return false;
     }
     factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+    if (ComPtr<IDXGISwapChain2> sc2; app::Get().low_latency && SUCCEEDED(swap_.As(&sc2))) {
+        sc2->SetMaximumFrameLatency(1);
+        latency_wait_ = sc2->GetFrameLatencyWaitableObject();
+        LOGR("d3d11: low latency, a frame held");
+    }
     CreateBackBufferView();
     return true;
 }
@@ -1024,13 +1040,13 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
     const app::Settings& st = app::Get();
-    const bool final = o.final && (st.fxaa || st.sharpen);
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
     ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h), h);
     if (!ps && final) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), 1.0f};
-    if (final) c[5] = st.fxaa ? 1.0f : 0.0f, c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
     FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
@@ -1367,13 +1383,14 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
+        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return srv;
         }
     }
     if (draw_2d_) Sharpen2D(d);
+    else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -1773,6 +1790,9 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // the pixel shader made for the textures
     PixelKey pk = MakePixelKey(s, stages.info);
     pk.quad = sh.quad;
+    // alpha tested, not blended, onto MSAA twins: Settings::alpha_coverage (not quads, whose shader is rewritten)
+    if (app::Get().alpha_coverage && bound_ms_ && !sh.quad && SimpleState(s, kMAlphaTestEnable) && !SimpleState(s, kMBlendEnable))
+        pk.coverage = msaa_;
     // D3DZB_USEW draws write w as their depth, as the console does; XBE_WBUFFER=0 goes back to z / w
     static const bool wbuffer = [] {
         const char* e = std::getenv("XBE_WBUFFER");
@@ -1931,14 +1951,58 @@ void D3D11Backend::ResizeSwap() {
     ctx_->OMSetRenderTargets(0, nullptr, nullptr);
     Unbind();
     bb_rtv_.Reset();
-    swap_->ResizeBuffers(kBuffers, w, h, kBgra, tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+    swap_->ResizeBuffers(kBuffers, w, h, kBgra, swap_flags_);
     CreateBackBufferView();
     bb_w_ = w;
     bb_h_ = h;
 }
 
 // the frame at its shape (16:9 or 4:3, ultrawide the screen's), centred on black
-void D3D11Backend::BlitFrame(Target& t) {
+ID3D11ShaderResourceView* D3D11Backend::SmaaFrame(Target& t) {
+    if (!smaa_area_) {
+        auto lookup = [&](DXGI_FORMAT fmt, uint32_t w, uint32_t h, const unsigned char* bytes, uint32_t pitch, ComPtr<ID3D11ShaderResourceView>& srv) {
+            D3D11_TEXTURE2D_DESC td = Texture2DDesc(fmt, w, h, D3D11_BIND_SHADER_RESOURCE);
+            D3D11_SUBRESOURCE_DATA init{bytes, pitch, 0};
+            ComPtr<ID3D11Texture2D> tex;
+            return SUCCEEDED(dev_->CreateTexture2D(&td, &init, &tex)) && SUCCEEDED(dev_->CreateShaderResourceView(tex.Get(), nullptr, &srv));
+        };
+        if (!lookup(DXGI_FORMAT_R8G8_UNORM, kSmaaAreaWidth, kSmaaAreaHeight, kSmaaArea, kSmaaAreaWidth * 2, smaa_area_) ||
+            !lookup(DXGI_FORMAT_R8_UNORM, kSmaaSearchWidth, kSmaaSearchHeight, kSmaaSearch, kSmaaSearchWidth, smaa_search_)) {
+            smaa_area_.Reset();
+            return nullptr;
+        }
+    }
+    if (smaa_w_ != t.w || smaa_h_ != t.h) {
+        smaa_w_ = t.w;
+        smaa_h_ = t.h;
+        for (auto& p : smaa_) {
+            ComPtr<ID3D11Texture2D> tex;
+            D3D11_TEXTURE2D_DESC td = Texture2DDesc(kBgra, t.w, t.h, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+            if (FAILED(dev_->CreateTexture2D(&td, nullptr, &tex)) || FAILED(dev_->CreateRenderTargetView(tex.Get(), nullptr, &p.rtv)) ||
+                FAILED(dev_->CreateShaderResourceView(tex.Get(), nullptr, &p.srv))) {
+                smaa_w_ = 0;
+                return nullptr;
+            }
+        }
+    }
+    const float c[8] = {0, 0, 1, 1, 1.0f / t.w, 1.0f / t.h, float(t.w), float(t.h)};
+    auto pass = [&](const char* vse, const char* pse, SmaaPass& dst, std::initializer_list<ID3D11ShaderResourceView*> srv) {
+        uint64_t h;
+        ID3D11VertexShader* vs = VertexShader(Compile(kSmaaHlsl, vse, "vs_5_0", h), h);
+        ID3D11PixelShader* ps = PixelShader(Compile(kSmaaHlsl, pse, "ps_5_0", h), h);
+        if (!vs || !ps) return false;
+        SetPassTarget(dst.rtv.Get(), nullptr, t.w, t.h);
+        FullScreen(vs, ps, c, 8, srv.begin(), uint32_t(srv.size()), opaque_.Get(), no_depth_.Get());
+        return true;
+    };
+    if (!pass("vsedge", "psedge", smaa_[0], {t.srv.Get()}) ||
+        !pass("vsweight", "psweight", smaa_[1], {smaa_[0].srv.Get(), smaa_area_.Get(), smaa_search_.Get()}) ||
+        !pass("vsblend", "psblend", smaa_[2], {t.srv.Get(), smaa_[1].srv.Get()}))
+        return nullptr;
+    return smaa_[2].srv.Get();
+}
+
+void D3D11Backend::BlitFrame(ID3D11ShaderResourceView* frame) {
     float aspect = app::FrameAspect();
     float w = float(bb_w_), h = float(bb_h_);
     float vw = std::min(w, h * aspect);
@@ -1948,7 +2012,7 @@ void D3D11Backend::BlitFrame(Target& t) {
     ctx_->RSSetViewports(1, &vp);
     ctx_->RSSetScissorRects(1, &sc);
     float uv[4] = {0, 0, 1, 1};
-    Blit(t.srv.Get(), uv, {.gamma = gamma_, .final = true});
+    Blit(frame, uv, {.gamma = gamma_, .final = true});
 }
 
 void D3D11Backend::RenderUi() {
@@ -1994,15 +2058,19 @@ void D3D11Backend::Present(const Surface& front) {
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Settle(*t);
     if (ramp_dirty_) UploadGammaRamp();
+    ID3D11ShaderResourceView* frame = t ? t->srv.Get() : nullptr;
+    if (t && app::Get().smaa)
+        if (ID3D11ShaderResourceView* smoothed = SmaaFrame(*t)) frame = smoothed;
     float black[4] = {0, 0, 0, 1};
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
     SetPassTarget(bb_rtv_.Get(), nullptr, bb_w_, bb_h_);
-    if (t) BlitFrame(*t);
+    if (frame) BlitFrame(frame);
     D3D11_VIEWPORT vp{0, 0, float(bb_w_), float(bb_h_), 0, 1};
     ctx_->RSSetViewports(1, &vp);
     RenderUi();
     bool vsync = app::Get().vsync;
     swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
     // the flip model unbinds the back buffer
     Unbind();
     DeliverReports(false);

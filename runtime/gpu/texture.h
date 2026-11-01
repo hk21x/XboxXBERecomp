@@ -62,7 +62,8 @@ struct Replacement {
     uint64_t guest_hash = 0;
     uint32_t width = 0, height = 0;
     uint64_t version = 0;
-    bool sharpened = false;  // made by Sharpen2D (Settings::sharp_2d), not the title
+    bool sharpened = false;  // made by Sharpen2D (Settings::sharp_2d) or SharpenWorld, not the title
+    bool world = false;      // made by SharpenWorld (Settings::world_textures)
     // the texture it stands for (Sharpen2D's; 0 any): the same memory read in another format or size is not it
     uint32_t format = 0, src_width = 0, src_height = 0;
     std::vector<uint32_t> bgra;
@@ -71,6 +72,9 @@ void SetReplacement(uint32_t data_va, uint32_t guest_bytes, uint32_t width, uint
 // a texture a 2D draw samples (GameInfo::sharpen_2d), from the render thread: its level 0 copied and enlarged on a
 // background thread, then set as its replacement (sharpened); one whose bytes keep changing is left alone
 void Sharpen2D(const TextureDesc& d);
+// a colour texture a 3D draw samples, with Settings::world_textures: as Sharpen2D, twice its size (UpscaleEdgeDirected2x),
+// up to a budget of memory. wrap_u, wrap_v: it tiles that way
+void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v);
 // a picture enlarged: alpha that is mostly fully in or out sharpened as a mask (UpscaleMask), else interpolated;
 // colour Catmull-Rom interpolated weighted by alpha. B8G8R8A8 in and out.
 std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t width, uint32_t height, uint32_t scale);
