@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -230,9 +231,11 @@ extern const GameInfo kGame;
 // within the fps cap
 void Pace(uint32_t vblanks = 1);
 // frames a second for a title asking for vblanks within cap (0 unlimited); 0 unpaced
+// the display rate a present interval counts in: the console's 60, a title drawing faster sets more (its cap still applies)
+inline std::atomic<uint32_t> g_pace_hz{60};
 inline uint32_t PaceRate(uint32_t cap, uint32_t vblanks) {
     if (!vblanks) return cap;
-    uint32_t fps = 60 / vblanks;
+    uint32_t fps = g_pace_hz.load(std::memory_order_relaxed) / vblanks;
     return cap && cap < fps ? cap : fps;
 }
 
