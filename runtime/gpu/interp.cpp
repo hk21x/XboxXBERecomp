@@ -27,7 +27,8 @@ constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past t
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
-constexpr float kFar = 0.25f, kFarLeast = 0.5f;               // how far one register of a matrix moves in a step and is still the same draw
+constexpr float kStays = 0.1f;                                // of its place, how far a turning object goes in a step
+constexpr float kFar = 0.25f, kLeap = 16.0f;                  // how far a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
@@ -56,6 +57,7 @@ struct Rec {
     std::vector<Kept> kept;
     Surface s1, s2;
     int prev = -1;  // the same draw in the step before
+    bool turning = false;  // only the matrix's place follows prev
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
 
@@ -152,6 +154,7 @@ private:
         Rec& r = now_[count_++];
         r.kind = kind;
         r.prev = -1;
+        r.turning = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -260,16 +263,31 @@ bool Interpolating::Match() {
         const int candidate = list[best];
         list.erase(list.begin() + std::ptrdiff_t(best));
         const Rec& was = before_[size_t(candidate)];
+        // by the matrix's turn and scale, each row against its own size: its translation crosses zero as an object is passed, a small
+        // number with a large change, and the object is the same. Past that only a real leap in it counts
         bool far = false;
-        for (uint32_t k = 0; k < kMatrixRegisters && !far; k++)
-            for (uint32_t c = 0; c < 4; c++) {
-                const float x = was.vsc[k][c], y = r.vsc[k][c];
-                if (std::fabs(x - y) > kFar * std::max({std::fabs(x), std::fabs(y), kFarLeast})) far = true;
-            }
+        for (uint32_t k = 0; k < kMatrixRegisters && !far; k++) {
+            float size = 0;
+            for (uint32_t c = 0; c < 3; c++) size = std::max({size, std::fabs(was.vsc[k][c]), std::fabs(r.vsc[k][c])});
+            for (uint32_t c = 0; c < 3; c++)
+                if (std::fabs(was.vsc[k][c] - r.vsc[k][c]) > kFar * size) far = true;
+            const float x = was.vsc[k][3], y = r.vsc[k][3];
+            if (std::fabs(x - y) > kLeap && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) far = true;
+        }
         matched++;
         if (far) {
-            jumped++;
-            continue;
+            // a wheel or a piece of debris turning fast, where it stays with what carries it: only its place is blended. Anything else
+            // that far off is a different draw
+            bool stays = true;
+            for (uint32_t k = 0; k < kMatrixRegisters; k++) {
+                const float x = was.vsc[k][3], y = r.vsc[k][3];
+                if (std::fabs(x - y) > kStays * std::max({std::fabs(x), std::fabs(y), 1.0f})) stays = false;
+            }
+            if (!stays) {
+                jumped++;
+                continue;
+            }
+            r.turning = true;
         }
         r.prev = candidate;
         if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
@@ -284,7 +302,7 @@ bool Interpolating::Match() {
         return h;
     };
     for (size_t i = 0; i < count_; i++)
-        if (now_[i].kind == Rec::Draw && now_[i].prev >= 0) peers.emplace(matrix_key(now_[i]), int(i));
+        if (now_[i].kind == Rec::Draw && now_[i].prev >= 0 && !now_[i].turning) peers.emplace(matrix_key(now_[i]), int(i));
     uint32_t followed = 0;
     for (size_t i = 0; i < count_; i++) {
         Rec& r = now_[i];
@@ -338,8 +356,13 @@ void Interpolating::Replay(float alpha) {
                 const bool blend = r.prev >= 0 && alpha < 1;
                 if (blend) {
                     const Rec& p = before_[size_t(r.prev)];
-                    for (uint32_t k = 0; k < kRegisters; k++)
-                        for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                    if (r.turning) {
+                        d.vsc = r.vsc;
+                        for (uint32_t k = 0; k < kMatrixRegisters; k++) d.vsc[k][3] = p.vsc[k][3] + (r.vsc[k][3] - p.vsc[k][3]) * alpha;
+                    } else {
+                        for (uint32_t k = 0; k < kRegisters; k++)
+                            for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                    }
                 } else if (r.peer >= 0 && alpha < 1) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
