@@ -1,4 +1,5 @@
 #include "gpu/texture.h"
+#include "gpu/upscale.h"
 
 #include <algorithm>
 #include <atomic>
@@ -696,6 +697,7 @@ namespace {
 struct SharpJob {
     TextureDesc d;
     std::vector<uint8_t> bytes;  // level 0 as the game had it
+    bool world = false, wrap_u = false, wrap_v = false;  // SharpenWorld's
 };
 std::condition_variable g_sharp_cv;
 std::deque<SharpJob> g_sharp_jobs;
@@ -716,7 +718,7 @@ void SharpWorker() {
         // would be 4 MB here and 5 MB of video memory
         uint32_t big = std::max(job.d.width, job.d.height);
         bool text = job.d.format == 0x19 || job.d.format == 0x1F;  // A8
-        uint32_t scale = big <= 128 || (text && big <= 512) ? 4 : 2;
+        uint32_t scale = job.world ? 2 : big <= 128 || (text && big <= 512) ? 4 : 2;
         auto r = std::make_shared<Replacement>();
         r->data = job.d.data;
         r->guest_bytes = uint32_t(job.bytes.size());
@@ -727,7 +729,24 @@ void SharpWorker() {
         r->format = job.d.format;
         r->src_width = job.d.width;
         r->src_height = job.d.height;
-        r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
+        r->world = job.world;
+        if (job.world) {
+            r->bgra = UpscaleEdgeDirected2x(px, job.d.width, job.d.height, job.wrap_u, job.wrap_v);
+            // cut-outs keep a hard edge, as UpscalePicture gives them
+            std::vector<uint8_t> alpha(px.size());
+            size_t seen = 0, partial = 0;
+            for (size_t i = 0; i < px.size(); i++) {
+                alpha[i] = uint8_t(px[i] >> 24);
+                seen += alpha[i] > 8;
+                partial += alpha[i] > 8 && alpha[i] < 247;
+            }
+            if (seen && seen < px.size() && partial * 4 < seen) {
+                std::vector<uint8_t> a = UpscaleMask(alpha.data(), job.d.width, job.d.height, 2);
+                for (size_t i = 0; i < r->bgra.size(); i++) r->bgra[i] = (r->bgra[i] & 0xFFFFFF) | uint32_t(a[i]) << 24;
+            }
+        } else {
+            r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
+        }
         if (auto had = FindReplacement(job.d.data); had && !had->sharpened) continue;  // the title's own stays
         // XBE_SHARPEN_DUMP=folder: each picture as a TGA, the game's (orig_<texture>.tga) and enlarged (sharp_)
         if (const char* dir = std::getenv("XBE_SHARPEN_DUMP")) {
@@ -771,6 +790,36 @@ void Sharpen2D(const TextureDesc& d) {
     static std::once_flag started;
     std::call_once(started, [] { std::thread(SharpWorker).detach(); });
     SharpJob job{d, {}};
+    uint32_t size = LevelSize(d, 0);
+    const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
+    job.bytes.assign(p, p + size);
+    g_sharp_jobs.push_back(std::move(job));
+    g_sharp_cv.notify_one();
+}
+
+void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v) {
+    if (!app::Get().world_textures) return;
+    if (d.linear || d.cube || d.depth > 1) return;
+    // colour pictures only: L8, A8 and the bump formats are as often lookups and offsets
+    const bool colour = (d.format >= 0x02 && d.format <= 0x07) || d.format == 0x0C || d.format == 0x0E || d.format == 0x0F;
+    if (!colour || d.width < 16 || d.height < 16 || d.width > 512 || d.height > 512) return;
+    constexpr uint64_t kBudget = 768ull << 20;  // the pictures' memory, with their mip levels counted as a third more
+    static uint64_t used = 0;
+    const uint64_t cost = uint64_t(d.width) * d.height * 4 * 4 * 4 / 3;
+    std::lock_guard<std::mutex> lock(g_sharp_lock);
+    int drops = g_sharp_drops[d.data];
+    if (drops >= 2) return;
+    auto [it, fresh] = g_sharp_queued.emplace(d.data, drops);
+    if (!fresh && it->second == drops) return;
+    if (used + cost > kBudget) {
+        g_sharp_queued.erase(it);
+        return;
+    }
+    used += cost;
+    it->second = drops;
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(SharpWorker).detach(); });
+    SharpJob job{d, {}, true, wrap_u, wrap_v};
     uint32_t size = LevelSize(d, 0);
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
     job.bytes.assign(p, p + size);

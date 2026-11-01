@@ -54,6 +54,7 @@ struct PixelKey {
     uint32_t proj = 0;       // fixed function: bit per stage sampled at coordinates divided by w
     uint32_t quad = 0;       // a screen quad: QuadHlsl
     uint32_t wbuf = 0;       // D3DZB_USEW: the depth written is the pixel's w (DrawConstants::wdepth)
+    uint32_t coverage = 0;   // Settings::alpha_coverage: the target's samples, an alpha test becomes partial coverage
     bool operator==(const PixelKey& o) const;
 };
 
