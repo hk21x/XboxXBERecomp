@@ -32,7 +32,7 @@ constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matri
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
-constexpr uint32_t kRegionBytes = 32u << 20, kRegionHeaders = 1u << 16;  // kept vertices of a step, in guest memory, two steps' worth
+constexpr uint32_t kRegionBytes = 8u << 20, kRegionHeaders = 1u << 16;  // kept vertices of a step, in guest memory, two steps' worth
 constexpr uint32_t kRegisters = 192, kMatrixRegisters = 4;    // the first are the title's transform in every program seen
 
 struct Rec {
@@ -147,7 +147,7 @@ private:
         return type < 0x20000 || type == 0x30000 ? 12 : kHeaderBytes;
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
-    void UploadKept();
+    bool UploadKept();
     Rec& Next(Rec::Kind kind) {
         if (!count_) first_ = Clock::now();
         if (count_ == now_.size()) now_.emplace_back();
@@ -232,14 +232,16 @@ void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_
 }
 
 // into memory the renderers can read, with a vertex buffer header for each; the region the step before used may still be being read
-void Interpolating::UploadKept() {
+bool Interpolating::UploadKept() {
     region_ ^= 1;
     if (!region_data_[region_]) {
         region_data_[region_] = mem::AllocHostContiguous(kRegionBytes, 0x1000);
         region_headers_[region_] = mem::AllocHostContiguous(kRegionHeaders * 12, 0x1000);
     }
+    if (!region_data_[region_] || !region_headers_[region_]) return false;
     inner_->WaitFence(region_fence_[region_]);
     if (!kept_bytes_.empty()) std::memcpy(kernel::HostPtr(region_data_[region_]), kept_bytes_.data(), kept_bytes_.size());
+    return true;
 }
 
 bool Interpolating::Match() {
@@ -396,8 +398,7 @@ void Interpolating::Present(const Surface& front) {
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
-    const bool blend = On() && count_ && !kept_full_ && Match();
-    if (blend) UploadKept();
+    const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
     if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
