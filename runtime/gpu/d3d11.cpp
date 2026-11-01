@@ -1662,11 +1662,11 @@ void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawCon
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
-    if (s.scissor_count) {
-        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
-        y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
-        y1 = std::min(y1, LONG(s.scissors[3] * sy));
+    if (s.scissor_count) {  // in place of the viewport: the library's SetScissors reads it only for a count of 0
+        x0 = LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx);
+        y0 = LONG(s.scissors[1] * sy);
+        x1 = LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx);
+        y1 = LONG(s.scissors[3] * sy);
     }
     if (s.squeeze_margin) {  // only the margin the squeezed picture leaves on that side
         const LONG edge = LONG(SqueezedX(dc.hud, s.squeeze_margin < 0 ? 0.0f : dc.hud[1] * 2) * sx);
