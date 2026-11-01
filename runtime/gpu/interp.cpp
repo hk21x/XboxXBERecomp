@@ -361,7 +361,7 @@ void Interpolating::Replay(float alpha) {
                     kernel::W32(h + 8, 0);
                     d.streams[kept.stream].vb = h;
                 }
-                const bool blend = r.prev >= 0 && alpha < 1;
+                const bool blend = r.prev >= 0 && alpha != 1;
                 if (blend) {
                     const Rec& p = before_[size_t(r.prev)];
                     if (r.turning) {
@@ -371,7 +371,7 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
                     }
-                } else if (r.peer >= 0 && alpha < 1) {
+                } else if (r.peer >= 0 && alpha != 1) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
                     for (uint32_t k = 0; k < kRegisters; k++) {
@@ -433,11 +433,16 @@ void Interpolating::Present(const Surface& front) {
             LOGR("gpu: in-between frames: a replay takes too long, none for 2 s");
             inner_->Present(front);
         } else {
-            for (int i = 0; i < frames; i++) {
+            // the title's choice for what the player aims: the step shown at once and carried on from there, up to a step too far when
+            // the aim stops, with none of the delay
+            const bool ahead = app::kGame.step_ahead && app::kGame.step_ahead();
+            if (ahead) inner_->Present(front);
+            for (int i = ahead ? 1 : 0; i < frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
                 if (i && at >= span) break;
-                Replay(float(std::min(at / usual, 1.0)));
+                const double along = std::min(at / usual, 1.0);
+                Replay(float(ahead ? 1.0 + along : along));
                 inner_->Present(front);
                 if (i) shown_++;
                 // not past the time the title needs for its next step
