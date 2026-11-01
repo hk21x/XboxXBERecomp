@@ -55,6 +55,7 @@ struct Rec {
     std::vector<Kept> kept;
     Surface s1, s2;
     int prev = -1;  // the same draw in the step before
+    int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
 
 uint64_t KeyOf(const Rec& r) {
@@ -150,6 +151,7 @@ private:
         Rec& r = now_[count_++];
         r.kind = kind;
         r.prev = -1;
+        r.peer = -1;
         r.headers.clear();
         r.kept.clear();
         return r;
@@ -242,9 +244,19 @@ bool Interpolating::Match() {
         draws++;
         auto it = found.find(KeyOf(r));
         if (it == found.end() || it->second.empty()) continue;
-        const int candidate = it->second.back();
-        it->second.pop_back();
-        // HUD pieces of one picture look alike and their number changes: a different matrix is a different draw, or one that jumped
+        // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
+        auto& list = it->second;
+        size_t best = list.size() - 1;
+        float best_distance = 1e30f;
+        for (size_t l = list.size(); l-- > 0;) {
+            const Rec& c = before_[size_t(list[l])];
+            float distance = 0;
+            for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                for (uint32_t e = 0; e < 4; e++) distance += std::fabs(c.vsc[k][e] - r.vsc[k][e]);
+            if (distance < best_distance) best_distance = distance, best = l;
+        }
+        const int candidate = list[best];
+        list.erase(list.begin() + std::ptrdiff_t(best));
         const Rec& was = before_[size_t(candidate)];
         bool far = false;
         for (uint32_t k = 0; k < kMatrixRegisters && !far; k++)
@@ -260,7 +272,27 @@ bool Interpolating::Match() {
         r.prev = candidate;
         if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
     }
-    if (!moved || matched * 2 < draws) return false;
+    // the world's pieces come and go between steps. One left at the step's own place, among others blended, is that much out of
+    // line with them, its texture seen sliding: it goes with any of the same matrix that has a match
+    std::unordered_map<uint64_t, int> peers;
+    const auto matrix_key = [](const Rec& r) {
+        uint64_t h = 0xCBF29CE484222325ull;
+        const auto* p = reinterpret_cast<const uint8_t*>(r.vsc.data());
+        for (size_t b = 0; b < kMatrixRegisters * sizeof(r.vsc[0]); b++) h = (h ^ p[b]) * 0x100000001B3ull;
+        return h;
+    };
+    for (size_t i = 0; i < count_; i++)
+        if (now_[i].kind == Rec::Draw && now_[i].prev >= 0) peers.emplace(matrix_key(now_[i]), int(i));
+    uint32_t followed = 0;
+    for (size_t i = 0; i < count_; i++) {
+        Rec& r = now_[i];
+        if (r.kind != Rec::Draw || r.prev >= 0) continue;
+        if (auto it = peers.find(matrix_key(r)); it != peers.end()) {
+            r.peer = it->second;
+            followed++;
+        }
+    }
+    if (!moved || (matched - jumped + followed) * 2 < draws) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
 }
@@ -306,6 +338,14 @@ void Interpolating::Replay(float alpha) {
                     const Rec& p = before_[size_t(r.prev)];
                     for (uint32_t k = 0; k < kRegisters; k++)
                         for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                } else if (r.peer >= 0 && alpha < 1) {
+                    const Rec& q = now_[size_t(r.peer)];
+                    const Rec& p = before_[size_t(q.prev)];
+                    for (uint32_t k = 0; k < kRegisters; k++) {
+                        const bool same = !std::memcmp(r.vsc[k].data(), q.vsc[k].data(), sizeof r.vsc[k]);
+                        for (uint32_t c = 0; c < 4; c++)
+                            d.vsc[k][c] = same ? p.vsc[k][c] + (q.vsc[k][c] - p.vsc[k][c]) * alpha : r.vsc[k][c];
+                    }
                 } else {
                     d.vsc = r.vsc;
                 }
