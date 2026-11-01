@@ -99,6 +99,7 @@ struct Mode {
 Mode Desktop();
 void* Monitor();                  // HMONITOR of the monitor setting (the primary display when it is gone)
 std::vector<std::string> Monitors();  // the displays' names, in the monitor setting's order from 1
+std::vector<Mode> ListModes();        // the monitor setting's display modes, widest first, each size once
 bool Paused();                    // pause_unfocused and the window is not in front (Windows)
 void DrawHud(double fps);         // the frame counter, inside the ImGui frame (overlay.cpp)
 void FeedPad();                   // controllers to the settings window's navigation, before each ImGui frame

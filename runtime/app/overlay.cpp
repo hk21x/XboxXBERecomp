@@ -847,6 +847,8 @@ void DrawHud(double fps) {
     ImGui::PopStyleVar();
 }
 
+std::vector<Mode> ListModes() { return Modes(); }
+
 void ToggleOverlay() {
     g_open = !g_open;
     g_bind_control = -1;
