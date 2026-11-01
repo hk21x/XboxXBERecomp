@@ -461,12 +461,27 @@ void Graphics(Settings& s) {
         s.msaa = uint32_t(ms);
         Save();
     }
-    if (RowCheck("FXAA", &s.fxaa, "Smooths the finished frame, HUD included; a little softer.")) Save();
+    if (RowCheck("Smooth alpha edges", &s.alpha_coverage, "With MSAA on: softens fences, leaves and other cut-out textures, which MSAA alone misses. A dark outline on some is possible.")) Save();
+    int edge = s.smaa ? 2 : s.fxaa ? 1 : 0;
+    const char* edge_names[] = {"Off", "FXAA", "SMAA"};
+    if (RowChoice("Edge smoothing", &edge, edge_names, 3, "On the finished frame, HUD included. SMAA keeps more detail than FXAA, and costs a little more.")) {
+        s.fxaa = edge == 1;
+        s.smaa = edge == 2;
+        Save();
+    }
+    int filter = int(s.scale_filter % 2);
+    const char* filter_names[] = {"Bilinear", "Sharp"};
+    if (RowChoice("Scaling filter", &filter, filter_names, 2, "How the frame reaches the screen's size when render scale is not 100%.")) {
+        s.scale_filter = uint32_t(filter);
+        Save();
+    }
+    if (RowCheck("Enhanced world textures", &s.world_textures, "Doubles the 3D scene's textures in the background as they appear. Uses more video memory; textures may sharpen a moment after they show. Can cause hitches of a quarter of a second as new scenery appears.")) Save();
     int sharp = int(s.sharpen);
     if (RowSlider("Sharpening", &sharp, 0, 100, 5, "%")) {
         s.sharpen = uint32_t(sharp);
         Save();
     }
+    if (RowCheck("Low latency", &s.low_latency, "Applies at the next start. Holds one finished frame instead of several: less input lag, but a slow frame costs more.")) Save();
     if (RowCheck("Show frames a second", &s.show_fps)) Save();
     if (kGame.sharpen_2d && RowCheck("Sharp text and HUD", &s.sharp_2d)) Save();
     int renderer = int(s.renderer % 2);
@@ -835,8 +850,16 @@ void Achievements() {
 void DrawHud(double fps) {
     Scale();
     DrawUnlock();
-    if (!Get().show_fps) return;
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (ScreenshotJustSaved()) {
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + 8), 0, ImVec2(0.5f, 0));
+        ImGui::SetNextWindowBgAlpha(0.6f);
+        if (ImGui::Begin("##shot", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+            ImGui::TextUnformatted("Screenshot saved in the screenshots folder");
+        ImGui::End();
+    }
+    if (!Get().show_fps) return;
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 8, vp->WorkPos.y + 8));
     ImGui::SetNextWindowBgAlpha(0.6f);
     ImGuiWindowFlags f = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
@@ -846,6 +869,8 @@ void DrawHud(double fps) {
     ImGui::End();
     ImGui::PopStyleVar();
 }
+
+std::vector<Mode> ListModes() { return Modes(); }
 
 void ToggleOverlay() {
     g_open = !g_open;
