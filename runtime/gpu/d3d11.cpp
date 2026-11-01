@@ -2014,6 +2014,7 @@ void D3D11Backend::Present(const Surface& front) {
     ctx_->RSSetViewports(1, &vp);
     RenderUi();
     bool vsync = app::Get().vsync;
+    if (vsync && tearing_ && PresentUnsynced()) vsync = false;
     swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     // the flip model unbinds the back buffer
     Unbind();

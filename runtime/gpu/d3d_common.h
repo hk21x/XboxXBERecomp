@@ -170,6 +170,9 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
     return std::max(1.0f, aspect * float(gh) / float(gw));
 }
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
+// a paced frame rate that a high refresh display does not divide evenly (60 on 280 Hz: frames alternately 4 and 5 refreshes): vsync
+// would show frames unevenly, so they go out when the pacing says, the display following with variable refresh. XBE_VSYNC_ALWAYS=1: not so
+bool PresentUnsynced();
 bool DepthTested(const State& s);
 bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture of a draw that leaves it alone
 bool ScreenDraw(const State& s);

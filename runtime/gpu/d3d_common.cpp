@@ -784,6 +784,22 @@ UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 // screens' 2D W-buffered with LESSEQUAL at rhw 0.5 to 1, while light glows and their visibility probes lie in the
 // world (rhw about 0.01) and stay.
 // depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
+bool PresentUnsynced() {
+    static const bool uneven = [] {
+#ifdef _WIN32
+        DEVMODEW display{};
+        display.dmSize = sizeof(display);
+        if (std::getenv("XBE_VSYNC_ALWAYS") || !EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &display)) return false;
+        const bool u = display.dmDisplayFrequency > 60 && display.dmDisplayFrequency % 60 != 0;
+        if (u) LOGR("display: %u Hz is not a multiple of 60: frames are presented when paced, not at a refresh", unsigned(display.dmDisplayFrequency));
+        return u;
+#else
+        return false;
+#endif
+    }();
+    return uneven && app::Get().fps_cap != 0;
+}
+
 bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
 
 // the depth buffer is one of the draw's textures and the draw leaves it alone (no test that fails, no depth or
