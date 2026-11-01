@@ -1,6 +1,6 @@
 // In-between frames for a title that draws one frame a step of its game (GameInfo::step_interpolation). Each step's clears, draws
-// and copies are kept as they pass; when it presents, the step is drawn again a few times with the vertex shader constants and
-// fixed function matrices blended from the step before, then as it is, at the rate of the frame cap, before the title goes on. A
+// and copies are kept as they pass; when it presents, the step is drawn again a few times with the vertex shader constants blended
+// from the step before, by the time since it presented, at the rate of the frame cap, until the title has to go on. A
 // draw of the step before is found by what it draws, in order. Its memory is the title's until its next step, and the title is
 // waiting here. So the picture is up to one step late; nothing is drawn beyond what the title gave. No blend after a camera cut.
 #include <algorithm>
@@ -350,20 +350,25 @@ void Interpolating::Present(const Surface& front) {
         // as many as fit: a replay's time, measured, falls back while none is drawn so it can be tried again
         const int fit = replay_seconds_ > 0 ? int(span / replay_seconds_) + 1 : 2;
         const int frames = std::clamp(std::min(int(usual / slot + 0.5), fit), 1, kMostFrames);
-        const double spacing = frames > 1 ? std::min(slot, span / (frames - 1)) : 0;
+        // the picture follows the clock: a step's change is shown over the whole of the time to the next, which keeps the speed even.
+        // The last frame stops short of the step, and the next step's first goes on from there
+        const double spacing = std::min(slot, usual / frames);
         if (frames == 1) replay_seconds_ *= 0.9;
         if (frames > 1) {
-            for (int i = 1; i < frames; i++) {
+            for (int i = 0; i < frames; i++) {
                 const auto now = Clock::now();
-                if (std::chrono::duration<double>(now - t).count() >= span) break;
-                Replay(float(i) / float(frames));
+                const double at = std::chrono::duration<double>(now - t).count();
+                if (i && at >= span) break;
+                Replay(float(std::min(at / usual, 1.0)));
                 inner_->Present(front);
-                shown_++;
-                std::this_thread::sleep_until(now + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(spacing)));
+                if (i) shown_++;
+                // not past the time the title needs for its next step
+                const double until = std::min(at + spacing, span);
+                std::this_thread::sleep_until(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
             }
-            Replay(1);
+        } else {
+            inner_->Present(front);
         }
-        inner_->Present(front);
     }
     shown_++;
     steps_++;
