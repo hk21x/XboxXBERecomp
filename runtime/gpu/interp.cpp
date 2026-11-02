@@ -26,6 +26,8 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
+constexpr double kSameMove = 0.02;                            // summed over a move's matrix: the same camera
+constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
@@ -60,6 +62,8 @@ struct Rec {
     Surface s1, s2;
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
+    bool derived = false;  // first seen this step: where the camera's move says its matrix was
+    float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
 
@@ -157,6 +161,7 @@ private:
         r.kind = kind;
         r.prev = -1;
         r.turning = false;
+        r.derived = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -248,6 +253,30 @@ bool Interpolating::UploadKept() {
     return true;
 }
 
+// 4 by 4, rows; false when it has no inverse
+bool Invert(const double m[4][4], double out[4][4]) {
+    double a[4][8];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 8; j++) a[i][j] = j < 4 ? m[i][j] : (j - 4 == i ? 1 : 0);
+    for (int c = 0; c < 4; c++) {
+        int best = c;
+        for (int i = c + 1; i < 4; i++)
+            if (std::fabs(a[i][c]) > std::fabs(a[best][c])) best = i;
+        if (std::fabs(a[best][c]) < 1e-12) return false;
+        for (int j = 0; j < 8; j++) std::swap(a[c][j], a[best][j]);
+        const double d = a[c][c];
+        for (int j = 0; j < 8; j++) a[c][j] /= d;
+        for (int i = 0; i < 4; i++) {
+            if (i == c) continue;
+            const double f = a[i][c];
+            for (int j = 0; j < 8; j++) a[i][j] -= f * a[c][j];
+        }
+    }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) out[i][j] = a[i][j + 4];
+    return true;
+}
+
 bool Interpolating::Match() {
     if (!before_count_) return false;
     std::unordered_map<uint64_t, std::vector<int>> found;
@@ -316,6 +345,67 @@ bool Interpolating::Match() {
             followed++;
         }
     }
+    // A piece come into view this step has no self to blend from, and its own matrix. Left at the step's place while what is around it
+    // runs behind, it is seen to jump (a building's lit windows). The scenery has one camera: its move, step before = move * now, is
+    // read off matched draws of the same target, the one most of a sample agree on (a car has its own), and gives the new piece's.
+    {
+        struct Move {
+            uint32_t rt;
+            double d[4][4];
+            int votes;
+        };
+        std::vector<Move> moves;
+        constexpr size_t kSample = 24;
+        size_t tried = 0;
+        const auto flat = [](const std::array<std::array<float, 4>, 192>& v) {  // a screen's 2D has no perspective row
+            return std::fabs(v[3][0]) + std::fabs(v[3][1]) + std::fabs(v[3][2]) < 1e-6f;
+        };
+        for (size_t i = 0; i < count_ && tried < kSample * 8; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc)) continue;
+            tried++;
+            double n[4][4], inv[4][4];
+            const auto& p = before_[size_t(r.prev)].vsc;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) n[a][b] = r.vsc[size_t(a)][size_t(b)];
+            if (!Invert(n, inv)) continue;
+            Move m{r.s->rt.data, {}, 1};
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += double(p[size_t(a)][size_t(c)]) * inv[c][b];
+                    m.d[a][b] = t;
+                }
+            bool same = false;
+            for (Move& o : moves) {
+                if (o.rt != m.rt) continue;
+                double e = 0;
+                for (int a = 0; a < 4; a++)
+                    for (int b = 0; b < 4; b++) e += std::fabs(o.d[a][b] - m.d[a][b]);
+                if (e < kSameMove) {
+                    o.votes++;
+                    same = true;
+                    break;
+                }
+            }
+            if (!same && moves.size() < kSample) moves.push_back(m);
+        }
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev >= 0 || flat(r.vsc)) continue;
+            const Move* best = nullptr;
+            for (const Move& o : moves)
+                if (o.rt == r.s->rt.data && (!best || o.votes > best->votes)) best = &o;
+            if (!best || best->votes < kLeastVotes) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += best->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.derived = true;
+        }
+    }
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
@@ -366,6 +456,10 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
                     }
+                } else if (r.derived && alpha != 1) {
+                    d.vsc = r.vsc;
+                    for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                        for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
                 } else if (r.peer >= 0 && alpha != 1) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
