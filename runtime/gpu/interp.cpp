@@ -29,6 +29,7 @@ constexpr int kMostFrames = 32;
 constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's move, and for no move at all: the same camera
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
+constexpr uint32_t kLeastVertices = 24;
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
@@ -422,7 +423,8 @@ bool Interpolating::Match() {
         }
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
-            if (r.kind != Rec::Draw || r.prev >= 0 || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
+            if (r.kind != Rec::Draw || r.prev >= 0 || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
