@@ -24,6 +24,8 @@ struct GameConfig {
     // the player's copy into the source's assets, and every exe the build makes that the game runs, installed beside
     // the first; game.json "xbes" and "exes", by default only xbe and exe
     std::vector<std::string> xbes, exes;
+    // a release with other programs than xbes lists (Agent Under Fire's USA disc): game.json "release_xbes", xbe SHA-1 -> its xbes
+    std::map<std::string, std::vector<std::string>> release_xbes;
 };
 
 bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string& error);

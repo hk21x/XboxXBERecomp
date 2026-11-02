@@ -26,6 +26,11 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
+constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's move, and for no move at all: the same camera
+constexpr int kLeastVotes = 3;                                // draws agreeing on it
+constexpr size_t kSampleDraws = 192, kMostMoves = 24;
+constexpr uint32_t kLeastVertices = 24;
+constexpr int kFreshShare = 4;                                // matched draws of a program to each new one, for it to be scenery
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
@@ -60,6 +65,8 @@ struct Rec {
     Surface s1, s2;
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
+    bool derived = false;  // first seen this step: where the camera's move says its matrix was
+    float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
 
@@ -69,7 +76,7 @@ uint64_t KeyOf(const Rec& r) {
     auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
     mix(r.a), mix(r.b), mix(r.c), mix(s.vs_handle), mix(s.rt.header);
     for (uint32_t t : s.textures) mix(t);
-    mix(s.streams[0].vb), mix(s.index_data);
+    // not the buffers: a title hands a mesh another vertex buffer from one step to the next (what it draws is the same); the matrix tells alike apart
     mix(s.viewport.x), mix(s.viewport.y), mix(s.viewport.w), mix(s.viewport.h), mix(s.squeeze_beyond);
     return h;
 }
@@ -150,6 +157,7 @@ private:
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
     bool UploadKept();
+    void LogJumps();
     Rec& Next(Rec::Kind kind) {
         if (!count_) first_ = Clock::now();
         if (count_ == now_.size()) now_.emplace_back();
@@ -157,6 +165,7 @@ private:
         r.kind = kind;
         r.prev = -1;
         r.turning = false;
+        r.derived = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -248,6 +257,72 @@ bool Interpolating::UploadKept() {
     return true;
 }
 
+// 4 by 4, rows; false when it has no inverse
+bool Invert(const double m[4][4], double out[4][4]) {
+    double a[4][8];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 8; j++) a[i][j] = j < 4 ? m[i][j] : (j - 4 == i ? 1 : 0);
+    for (int c = 0; c < 4; c++) {
+        int best = c;
+        for (int i = c + 1; i < 4; i++)
+            if (std::fabs(a[i][c]) > std::fabs(a[best][c])) best = i;
+        if (std::fabs(a[best][c]) < 1e-12) return false;
+        for (int j = 0; j < 8; j++) std::swap(a[c][j], a[best][j]);
+        const double d = a[c][c];
+        for (int j = 0; j < 8; j++) a[c][j] /= d;
+        for (int i = 0; i < 4; i++) {
+            if (i == c) continue;
+            const double f = a[i][c];
+            for (int j = 0; j < 8; j++) a[i][j] -= f * a[c][j];
+        }
+    }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) out[i][j] = a[i][j + 4];
+    return true;
+}
+
+// XBE_INTERP_LOG=1: draws at a car's distance whose place on screen jumps between the two steps blended, for what cannot be seen here
+void Interpolating::LogJumps() {
+    static const bool on = std::getenv("XBE_INTERP_LOG") != nullptr;
+    if (!on) return;
+    // each kind of draw a few times, in all at most a line a step: what is rare is what is wanted
+    static std::unordered_map<uint64_t, int> kinds;
+    static int shown = 0, steps = 0;
+    if (++steps % 600 == 0) shown = 0, kinds.clear();
+    const auto place = [](const float m[4][4], float* o) {
+        const float w = m[3][3];
+        if (std::fabs(w) < 1.5f || w > 60) return false;  // nearer is scenery passing the camera, moving far on screen as it should
+        o[0] = m[0][3] / w, o[1] = m[1][3] / w, o[2] = w;
+        return true;
+    };
+    for (size_t i = 0; i < count_ && shown < 200; i++) {
+        const Rec& r = now_[i];
+        if (r.kind != Rec::Draw || std::fabs(r.vsc[3][0]) + std::fabs(r.vsc[3][1]) + std::fabs(r.vsc[3][2]) < 1e-6f) continue;
+        float a[4][4], b[4][4];
+        for (size_t x = 0; x < 4; x++)
+            for (size_t y = 0; y < 4; y++) a[x][y] = r.vsc[x][y];
+        const char* how;
+        if (r.prev >= 0) {
+            how = r.turning ? "turning" : "matched";
+            for (size_t x = 0; x < 4; x++)
+                for (size_t y = 0; y < 4; y++) b[x][y] = before_[size_t(r.prev)].vsc[x][y];
+        } else if (r.derived) {
+            how = "piece";
+            std::memcpy(b, r.was, sizeof b);
+        } else {
+            continue;
+        }
+        float p[3], q[3];
+        if (!place(a, p) || !place(b, q)) continue;
+        const float d = std::max(std::fabs(p[0] - q[0]), std::fabs(p[1] - q[1])), wr = std::fabs(q[2] / p[2] - 1);
+        if (d < 0.04f && wr < 0.04f) continue;
+        if (++kinds[(uint64_t(r.s->vs_handle) << 32) ^ r.s->textures[0] ^ (uint64_t(r.c) << 12)] > 3) continue;
+        shown++;
+        LOGR("jump: %s step %d vs %08X t0 %08X n %u rt %08X moved %.3f depth %.3f w %.2f was %.2f", how, steps, r.s->vs_handle,
+             r.s->textures[0], r.c, r.s->rt.data, d, wr, p[2], q[2]);
+    }
+}
+
 bool Interpolating::Match() {
     if (!before_count_) return false;
     std::unordered_map<uint64_t, std::vector<int>> found;
@@ -316,6 +391,133 @@ bool Interpolating::Match() {
             followed++;
         }
     }
+    {
+        static const bool log_lost = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint32_t all_lost = 0, most = 0, steps = 0;
+        uint32_t lost = 0;
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && now_[i].prev < 0) lost++;
+        all_lost += lost, most = std::max(most, lost);
+        if (log_lost && ++steps % 600 == 0) {
+            LOGR("gpu: in-between frames: %u draws without a match in 600 steps, at most %u in a step", all_lost, most);
+            all_lost = most = 0;
+        }
+    }
+    static const bool pieces = [] {
+        const char* e = std::getenv("XBE_INTERP_PIECES");
+        const bool on = !e || std::atoi(e) != 0;
+        LOGR("gpu: in-between frames: scenery come into view %s (XBE_INTERP_PIECES)", on ? "takes the camera's move" : "stays at its step's place");
+        return on;
+    }();
+    // A piece of scenery come into view this step has no self to blend from, and its own matrix. Left at the step's place while what is
+    // around it runs behind, it is seen to jump (a building's lit windows). It takes the camera's move, step before = move * now, read
+    // off matched draws of the same target, the one most agree on. Only scenery: the nearest matched draw of its program must move
+    // that way and nothing of that program be turning. A piece of a car given a wheel's move, or the road's, is thrown out of place;
+    // it stays at the step's place.
+    {
+        struct Move {
+            uint32_t rt;
+            double d[4][4];
+            int votes;
+        };
+        const auto flat = [](const std::array<std::array<float, 4>, 192>& v) {  // a screen's 2D has no perspective row
+            return std::fabs(v[3][0]) + std::fabs(v[3][1]) + std::fabs(v[3][2]) < 1e-6f;
+        };
+        const auto move_of = [&](const Rec& r, double d[4][4]) {
+            double n[4][4], inv[4][4];
+            const auto& p = before_[size_t(r.prev)].vsc;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) n[a][b] = r.vsc[size_t(a)][size_t(b)];
+            if (!Invert(n, inv)) return false;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    d[a][b] = 0;
+                    for (int c = 0; c < 4; c++) d[a][b] += double(p[size_t(a)][size_t(c)]) * inv[c][b];
+                }
+            return true;
+        };
+        // a step's moves are all small: alike is judged against how far the camera went, or a car would pass for scenery
+        const auto same_move = [](const double x[4][4], const double y[4][4]) {
+            double e = 0, size = 0;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    e += std::fabs(x[a][b] - y[a][b]);
+                    size += std::fabs(y[a][b] - (a == b ? 1 : 0));
+                }
+            return e < std::max(kSameMove * size, kStill);
+        };
+        std::vector<Move> moves;
+        std::unordered_map<uint32_t, bool> spinning;
+        for (size_t i = 0, tried = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || flat(r.vsc)) continue;
+            if (r.turning) spinning[r.s->vs_handle] = true;
+            if (r.turning || tried >= kSampleDraws) continue;
+            tried++;
+            Move m{r.s->rt.data, {}, 1};
+            if (!move_of(r, m.d)) continue;
+            bool same = false;
+            for (Move& o : moves)
+                if (o.rt == m.rt && same_move(o.d, m.d)) {
+                    o.votes++;
+                    same = true;
+                    break;
+                }
+            if (!same && moves.size() < kMostMoves) moves.push_back(m);
+        }
+        const auto camera_of = [&](uint32_t rt) {
+            const Move* camera = nullptr;
+            for (const Move& o : moves)
+                if (o.rt == rt && (!camera || o.votes > camera->votes)) camera = &o;
+            return camera;
+        };
+        // a program is the scenery's when most of what it draws goes with the camera; a car's goes with the car
+        std::unordered_map<uint32_t, std::array<int, 2>> program;
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            double d[4][4];
+            if (!camera || !move_of(r, d)) continue;
+            auto& seen = program[r.s->vs_handle];
+            seen[0]++;
+            if (same_move(d, camera->d)) seen[1]++;
+        }
+        // scenery comes into view a piece at a time among many that are matched. A whole car losing its match for a step comes all at
+        // once, and its program has as many new as matched: not scenery
+        std::unordered_map<uint32_t, int> fresh;
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && now_[i].prev < 0) fresh[now_[i].s->vs_handle]++;
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
+            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            if (!camera || camera->votes < kLeastVotes) continue;
+            const auto seen = program.find(r.s->vs_handle);
+            if (seen == program.end() || seen->second[1] * 2 <= seen->second[0] || seen->second[1] < fresh[r.s->vs_handle] * kFreshShare) continue;
+            const Rec* near = nullptr;
+            float nearest = 1e30f;
+            for (size_t j = 0; j < count_; j++) {
+                const Rec& o = now_[j];
+                if (o.kind != Rec::Draw || o.prev < 0 || o.s->vs_handle != r.s->vs_handle || o.s->rt.data != r.s->rt.data) continue;
+                float distance = 0;
+                for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                    for (uint32_t c = 0; c < 4; c++) distance += std::fabs(o.vsc[k][c] - r.vsc[k][c]);
+                if (distance < nearest) nearest = distance, near = &o;
+            }
+            double d[4][4];
+            if (!near || !move_of(*near, d) || !same_move(d, camera->d)) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.derived = true;
+        }
+    }
+    LogJumps();
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
@@ -366,6 +568,10 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
                     }
+                } else if (r.derived && alpha != 1) {
+                    d.vsc = r.vsc;
+                    for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                        for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
                 } else if (r.peer >= 0 && alpha != 1) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
