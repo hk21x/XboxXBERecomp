@@ -19,6 +19,7 @@ struct GameConfig {
     // builds, or "dev" for one built from a branch, which builds the branch
     std::string version = "dev";
     std::string toolchain;     // toolchain.json's address
+    std::string package;       // a prebuilt release's zip ("PGR2-package.zip"), from game.json; empty: the whole build
     bool music = false;        // the game plays Xbox custom soundtracks: the launcher makes them from a music folder
     // a game of several programs (007: Everything or Nothing's driving.xbe): every xbe the build recompiles, taken from
     // the player's copy into the source's assets, and every exe the build makes that the game runs, installed beside

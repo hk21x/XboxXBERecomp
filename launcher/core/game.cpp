@@ -54,6 +54,7 @@ bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string
     game.branch = j.value("branch", "main");
     game.toolchain = j.value("toolchain", "");
     game.music = j.value("music", false);
+    game.package = j.value("package", "");
     game.xbes = j.value("xbes", std::vector<std::string>{game.xbe});
     game.exes = j.value("exes", std::vector<std::string>{game.exe});
     if (game.xbes.empty()) game.xbes = {game.xbe};

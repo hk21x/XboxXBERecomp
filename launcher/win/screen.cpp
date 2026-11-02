@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <cmath>
 #include <fstream>
 #include <vector>
 
@@ -17,7 +18,7 @@ namespace {
 constexpr const char* kLicenseUrl = "https://go.microsoft.com/fwlink/?LinkId=2179911";  // Visual Studio Build Tools' terms
 constexpr float kBodyFont = 15;
 
-enum Page { kGamePage, kMusicPage, kLogPage };
+enum Page { kGamePage, kMusicPage, kManagePage, kLogPage };
 
 void TextIn(ImU32 colour, const std::string& text) {
     ImGui::PushStyleColor(ImGuiCol_Text, colour);
@@ -57,7 +58,76 @@ void Results(App& app, const std::string& error, const std::string& done, const 
     }
 }
 
-void GamePage(App& app, void* window, ImFont* heading, const std::string& error, const std::string& done) {
+enum class Mark { Waiting, Working, Done };
+
+// one step of the install: a tick when done, a pulsing box while it runs, an empty box to come; what it is and how far
+void StepRow(Mark mark, const char* name, const std::string& detail, const Status* live) {
+    const float em = ImGui::GetFontSize();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x, h = em * 2;
+    ImGui::Dummy(ImVec2(w, h));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (mark == Mark::Working) dl->AddRectFilled(pos, pos + ImVec2(w, h), kHover);
+    ImVec2 box = pos + ImVec2(em * 0.45f, em * 0.5f), end = box + ImVec2(em, em);
+    dl->AddRectFilled(box, end, kField);
+    dl->AddRect(box, end, kDark);
+    if (mark == Mark::Done) {
+        dl->AddLine(box + ImVec2(em * 0.2f, em * 0.5f), box + ImVec2(em * 0.42f, em * 0.75f), kGood, 2);
+        dl->AddLine(box + ImVec2(em * 0.42f, em * 0.75f), box + ImVec2(em * 0.8f, em * 0.25f), kGood, 2);
+    } else if (mark == Mark::Working) {
+        float pulse = 0.55f + 0.45f * std::sin(float(ImGui::GetTime()) * 4);
+        ImU32 fill = (kAccent & 0x00ffffff) | (ImU32(pulse * 255) << 24);
+        dl->AddRectFilled(box + ImVec2(em * 0.22f, em * 0.22f), end - ImVec2(em * 0.22f, em * 0.22f), fill);
+    }
+    ImVec2 text = pos + ImVec2(em * 2, (h - em) * 0.5f);
+    dl->AddText(text, mark == Mark::Waiting ? kDim : mark == Mark::Working ? kWhite : kText, name);
+    std::string right = live && !live->detail.empty() ? live->detail : detail;
+    ImVec2 size = ImGui::CalcTextSize(right.c_str());
+    dl->AddText(ImVec2(pos.x + w - size.x - em * 0.6f, text.y), mark == Mark::Working ? kAccent : kDim, right.c_str());
+}
+
+// a prebuilt install: the steps, then the action
+void InstallSection(App& app, ImFont* heading, const Status& st, const std::string& error, const std::string& done) {
+    const float em = ImGui::GetFontSize();
+    const bool busy = app.busy && !app.music_job, built = app.builder->Built();
+    Step at = app.builder->step;
+    if (built && !busy && !app.update) at = Step::Ready;
+    auto mark = [&](Step s) { return at == s && busy ? Mark::Working : int(at) > int(s) ? Mark::Done : Mark::Waiting; };
+    Section(built && !app.update ? "Ready to play" : "Getting the game ready", heading);
+    if (!built) {
+        ImGui::TextWrapped("The program comes ready to go, and your PC builds the game's code from your own disc, once. "
+                           "Nothing is installed in Windows, and it all stays in one folder.");
+        ImGui::Spacing();
+    }
+    StepRow(app.copy.ok ? Mark::Done : Mark::Waiting, "Your game", app.copy.ok ? app.copy.release : "not chosen yet", nullptr);
+    StepRow(mark(Step::Package), "Download the program", "", at == Step::Package && busy ? &st : nullptr);
+    StepRow(mark(Step::Unpack), "Unpack it", "", at == Step::Unpack && busy ? &st : nullptr);
+    StepRow(mark(Step::Compile), "Build the game for this PC", "", at == Step::Compile && busy ? &st : nullptr);
+    ImGui::Spacing();
+    if (busy) {
+        TextIn(kDim, "You can stop at any time: it carries on from there next time. Your saves and music are not touched.");
+        return;
+    }
+    if (app.update) {
+        std::string was = app.builder->BuiltVersion();
+        TextIn(kAccent, IsReleaseVersion(app.game.version)
+                            ? "Version " + app.game.version + " is ready to install (yours: " + (was.empty() ? std::string("an earlier one") : was) + "). Your saves, settings and music are kept."
+                            : std::string("A new version is available."));
+    }
+    if (!built || app.update) {
+        TextIn(kDim, "Free on this drive: " + Megabytes(FreeBytes(app.root)));
+        ImGui::BeginDisabled(!app.copy.ok);
+        if (Primary(built ? "Update" : "Get the game ready", ImVec2(14 * em, 0))) {
+            app.update = false;
+            app.music_job = false;
+            app.Start([&app](std::string& e) { return app.builder->BuildAll(e); }, "The game is ready. Press Play.");
+        }
+        ImGui::EndDisabled();
+    }
+    if (!app.music_job) Results(app, error, done, "Open launcher.log");
+}
+
+void GamePage(App& app, void* window, ImFont* heading, const Status& st, const std::string& error, const std::string& done) {
     const float em = ImGui::GetFontSize();
     const bool busy = app.busy, built = app.builder->Built();
 
@@ -105,6 +175,9 @@ void GamePage(App& app, void* window, ImFont* heading, const std::string& error,
     }
     ImGui::EndDisabled();
 
+    if (app.builder->Prebuilt()) {
+        InstallSection(app, heading, st, error, done);
+    } else {
     Section("Build", heading);
     if (busy) {
         TextIn(kDim, "Working: see the bar below. It carries on from there next time if you stop it.");
@@ -144,6 +217,7 @@ void GamePage(App& app, void* window, ImFont* heading, const std::string& error,
         ImGui::EndDisabled();
         if (!app.music_job) Results(app, error, done, "Open launcher.log");
     }
+    }
 
     Section("Play", heading);
     ImGui::BeginDisabled(busy || !built || !app.copy.ok);
@@ -157,23 +231,6 @@ void GamePage(App& app, void* window, ImFont* heading, const std::string& error,
     }
     ImGui::PopFont();
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginGroup();
-    ImGui::BeginDisabled(!built);
-    if (ImGui::Button("Open the game's folder")) OpenFolder(app.builder->PlayDir());
-    ImGui::EndDisabled();
-    uint64_t build_bytes;
-    {
-        std::lock_guard l(app.lock);
-        build_bytes = app.build_bytes;
-    }
-    ImGui::BeginDisabled(busy || !built || build_bytes == 0);
-    std::string clean = "Remove the build files (" + Megabytes(build_bytes) + ")";
-    if (ImGui::Button(clean.c_str()))
-        app.music_job = false, app.Start([&app](std::string& e) { return app.builder->RemoveBuildFiles(e); },
-                  "Build files removed. An update builds everything again.");
-    ImGui::EndDisabled();
-    ImGui::EndGroup();
     TextIn(kDim, "In the game: F1 opens the PC settings. Saves, settings and logs stay in the game's folder.");
 }
 
@@ -213,6 +270,61 @@ void MusicPage(App& app, void* window, ImFont* heading, const std::string& error
             summary = app.music_summary;
         }
         Results(app, error, done.empty() ? done : done + " " + summary, "Open launcher.log##music");
+    }
+}
+
+void ManagePage(App& app, ImFont* heading) {
+    const bool busy = app.busy, built = app.builder->Built();
+    const float em = ImGui::GetFontSize();
+    Section("This install", heading);
+    if (ImGui::BeginTable("install", 2)) {
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, em * 10);
+        auto row = [](const char* name, const std::string& value) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            TextIn(kDim, name);
+            ImGui::TableNextColumn();
+            ImGui::TextWrapped("%s", value.c_str());
+        };
+        row("Launcher", app.game.version);
+        std::string version = app.builder->BuiltVersion();
+        row("Game", !built ? "not ready yet" : version.empty() ? "ready" : version);
+        row("Your copy", app.copy.ok ? app.copy.release + ", " + U8(app.copy.path) : "not chosen");
+        row("Folder", U8(app.root));
+        row("Free on this drive", Megabytes(FreeBytes(app.root)));
+        ImGui::EndTable();
+    }
+    Section("Folders", heading);
+    ImGui::BeginDisabled(!built);
+    if (ImGui::Button("Open the game's folder")) OpenFolder(app.builder->PlayDir());
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Open launcher.log")) OpenUrl(U8(app.root / "launcher.log"));
+    Section("Space and repairs", heading);
+    uint64_t build_bytes;
+    {
+        std::lock_guard l(app.lock);
+        build_bytes = app.build_bytes;
+    }
+    ImGui::BeginDisabled(busy || !built || build_bytes == 0);
+    std::string clean = "Remove the build files (" + Megabytes(build_bytes) + ")";
+    if (ImGui::Button(clean.c_str()))
+        app.music_job = false, app.Start([&app](std::string& e) { return app.builder->RemoveBuildFiles(e); },
+                  "Build files removed. An update builds everything again.");
+    ImGui::EndDisabled();
+    TextIn(kDim, "Frees space once the game is built. Your saves, settings and music are not touched.");
+    if (app.builder->Prebuilt()) {
+        ImGui::BeginDisabled(busy || !built || !app.copy.ok);
+        if (ImGui::Button("Build the game again")) {
+            app.music_job = false;
+            app.Start([&app](std::string& e) {
+                std::error_code ec;
+                fs::remove(app.builder->PlayDir() / (app.game.exe + ".dll"), ec);
+                return app.builder->BuildAll(e);
+            }, "The game is ready. Press Play.");
+        }
+        ImGui::EndDisabled();
+        TextIn(kDim, "If the game will not start. Takes a minute or two, and keeps your saves.");
     }
 }
 
@@ -297,6 +409,7 @@ void DrawScreen(App& app, void* window, ImFont* heading) {
     };
     std::vector<Entry> entries = {{"Game", kGamePage}};
     if (app.game.music) entries.push_back({"Your music", kMusicPage});
+    entries.push_back({"Manage", kManagePage});
     entries.push_back({"Log", kLogPage});
     ImGui::SetCursorScreenPos(origin + ImVec2(0, head_h + 1));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, kSide);
@@ -321,7 +434,8 @@ void DrawScreen(App& app, void* window, ImFont* heading) {
     ImGui::PopStyleVar();
     if (app.page == kMusicPage && app.game.music) MusicPage(app, window, heading, error, done);
     else if (app.page == kLogPage) LogPage(app);
-    else GamePage(app, window, heading, error, done);
+    else if (app.page == kManagePage) ManagePage(app, heading);
+    else GamePage(app, window, heading, st, error, done);
     ImGui::EndChild();
 
     // the footer: the work going on, on every page; else where everything goes

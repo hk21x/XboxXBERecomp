@@ -5,6 +5,7 @@
 //   launcher_cli <game.json> <root> source             clone or update the source, put the xbe in it
 //   launcher_cli <game.json> <root> env                the build's environment
 //   launcher_cli <game.json> <root> latest [version]   the newest release, and whether a launcher of version is behind
+//   launcher_cli <game.json> <root> prebuilt <copy>    a prebuilt install from a zip beside root (test of BuildPackage)
 //   launcher_cli <game.json> <root> timing             the stage timing on two short stages, one that stops
 //   launcher_cli hash <file>                           SHA-256 and SHA-1
 //   launcher_cli untar <file.tar.xz> <dest> [keep...]  unpack with keep rules (strip 1)
@@ -92,6 +93,14 @@ int main(int argc, char** argv) {
             std::printf("  a launcher of %s: %s\n", argv[4],
                         !IsReleaseVersion(argv[4]) ? "dev, offered nothing"
                         : CompareVersions(r.tag, argv[4]) > 0 ? "behind: offered the update" : "up to date");
+        return 0;
+    }
+    if (cmd == "prebuilt") {  // argv[4] the copy of the game, a package zip beside <root>
+        GameCheck copy;
+        copy.ok = true, copy.path = argv[4];
+        std::string err;
+        if (!b.SetGame(copy, err) || !b.BuildPackage(err)) return std::printf("prebuilt: %s\n", err.c_str()), 1;
+        std::printf("prebuilt ok, built=%d\n", int(b.Built()));
         return 0;
     }
     if (cmd == "timing") {

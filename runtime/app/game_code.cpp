@@ -54,11 +54,12 @@ constexpr uint64_t kJobMemory = 512ull << 20;  // a compiler's peak on the bigge
 constexpr uint64_t kDiskNeeded = 1ull << 30;    // both images' sources, objects and DLLs, with room to spare
 
 // the window's colours
-constexpr COLORREF kBackground = RGB(10, 11, 10);
-constexpr COLORREF kText = RGB(227, 232, 219);
-constexpr COLORREF kDim = RGB(145, 153, 138);
-constexpr COLORREF kBarEmpty = RGB(28, 33, 26);
-constexpr COLORREF kBarFull = RGB(145, 158, 130);
+// as classic_theme.h: this window only shows when the exe is started without the launcher having built the code
+constexpr COLORREF kBackground = RGB(62, 70, 55);
+constexpr COLORREF kText = RGB(216, 222, 211);
+constexpr COLORREF kDim = RGB(160, 170, 149);
+constexpr COLORREF kBarEmpty = RGB(40, 45, 35);
+constexpr COLORREF kBarFull = RGB(149, 136, 49);
 
 enum class Stage { Translating, Compiling, Linking, Ready };
 
@@ -456,13 +457,13 @@ std::wstring Blocker(const std::vector<Target>& targets) {
 std::wstring StageText() {
     switch (g_progress.stage.load()) {
         case Stage::Translating:
-            return L"Translating the game's code";
+            return L"Reading your disc's code";
         case Stage::Compiling:
-            return L"Compiling the game's code, file " +
+            return L"Building, file " +
                    std::to_wstring(std::min(g_progress.files_done + 1, g_progress.files_total.load())) + L" of " +
                    std::to_wstring(g_progress.files_total);
         case Stage::Linking:
-            return L"Linking the game's code";
+            return L"Finishing the build";
         default:
             return L"Start the game now?";
     }
@@ -532,15 +533,6 @@ void PaintChoices(HDC dc, const Layout& l, int unit) {
     DrawLine(dc, l.start, L"Start (A)", kBackground, DT_CENTER);
     FillBox(dc, l.exit, kBarEmpty);
     DrawLine(dc, l.exit, L"Exit (B)", kText, DT_CENTER);
-    int middle = (l.delete_toggle.top + l.delete_toggle.bottom) / 2;
-    RECT box{l.delete_toggle.left, middle - unit / 2, l.delete_toggle.left + unit, middle + unit / 2};
-    FillBox(dc, box, kBarEmpty);
-    if (g_delete_compiler) InflateRect(&box, -unit / 4, -unit / 4);
-    if (g_delete_compiler) FillBox(dc, box, kBarFull);
-    RECT label = l.delete_toggle;
-    label.left += unit * 3 / 2;
-    std::wstring megabytes = std::to_wstring(g_compiler_bytes >> 20);
-    DrawLine(dc, label, L"Delete the compiler files, " + megabytes + L" MB (X)", kText, DT_LEFT);
 }
 
 void Paint(HDC dc, const RECT& client, int unit) {
@@ -548,7 +540,7 @@ void Paint(HDC dc, const RECT& client, int unit) {
     bool ready = g_progress.stage == Stage::Ready;
     FillBox(dc, client, kBackground);
     SetBkMode(dc, TRANSPARENT);
-    const wchar_t* heading = ready ? L"The game is ready." : L"Preparing the game for this PC. This only happens once.";
+    const wchar_t* heading = ready ? L"Your game is built." : L"Building the game for this PC, from your disc. This happens once.";
     DrawLine(dc, l.heading, heading, kText, DT_LEFT);
     DrawLine(dc, l.stage, StageText(), kDim, DT_LEFT);
     FillBox(dc, l.bar, kBarEmpty);
@@ -617,7 +609,6 @@ void OnClick(HWND hwnd, LPARAM lp) {
     POINT at{short(LOWORD(lp)), short(HIWORD(lp))};
     if (PtInRect(&l.start, at)) CloseWindowWith(hwnd, true);
     else if (PtInRect(&l.exit, at)) CloseWindowWith(hwnd, false);
-    else if (PtInRect(&l.delete_toggle, at)) g_delete_compiler = !g_delete_compiler;
 }
 
 // a controller's A starts, B leaves and X ticks the delete box, once ready; on the press, not the hold
@@ -627,7 +618,6 @@ void PollController(HWND hwnd) {
     uint16_t pressed = now & ~held;
     held = now;
     if (g_progress.stage != Stage::Ready) return;
-    if (pressed & XINPUT_GAMEPAD_X) g_delete_compiler = !g_delete_compiler;
     if (pressed & XINPUT_GAMEPAD_A) CloseWindowWith(hwnd, true);
     else if (pressed & XINPUT_GAMEPAD_B) CloseWindowWith(hwnd, false);
 }
@@ -648,7 +638,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             OnClick(hwnd, lp);
             return 0;
         case WM_KEYDOWN:
-            if (ready && wp == VK_SPACE) g_delete_compiler = !g_delete_compiler;
             if (ready && (wp == VK_RETURN || wp == VK_ESCAPE)) CloseWindowWith(hwnd, wp == VK_RETURN);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -751,7 +740,52 @@ bool BuildWithWindow(std::vector<Target>& targets) {
     return ok && g_start;
 }
 
+void Say(const std::string& line) {
+    std::string text = line + "\n";
+    DWORD wrote = 0;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), text.data(), DWORD(text.size()), &wrote, nullptr);
+}
+
 }  // namespace
+
+int PrepareGameCodeHeadless(const GameFiles& game) {
+    std::wstring mutex_name = std::wstring(kGame.name) + L"-GameCode";
+    HANDLE lock = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
+    WaitForSingleObject(lock, INFINITE);
+    std::vector<Image> images = Images();
+    std::vector<Target> stale = StaleTargets(game, images);
+    auto narrow = [](const std::wstring& w) {
+        std::string out;
+        for (wchar_t c : w) out += c < 128 ? char(c) : '?';
+        return out;
+    };
+    bool ok = stale.empty();
+    if (!ok) {
+        if (std::wstring blocker = Blocker(stale); !blocker.empty()) {
+            g_failure = blocker;
+        } else {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);  // no sleep while it works
+            std::atomic<bool> done{false};
+            std::thread worker([&] {
+                ok = Build(stale);
+                done = true;
+            });
+            // the launcher ends this process to stop it; finished objects are kept for the next run
+            while (!done) {
+                Say("progress " + std::to_string(int(g_progress.stage.load())) + " " + std::to_string(g_progress.files_done.load()) + " " +
+                    std::to_string(g_progress.files_total.load()) + " " + std::to_string(g_progress.bytes_done.load()) + " " +
+                    std::to_string(g_progress.bytes_total.load()));
+                Sleep(250);
+            }
+            worker.join();
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    }
+    ReleaseMutex(lock);
+    CloseHandle(lock);
+    Say(ok ? std::string("ready") : "failed " + narrow(g_failure));
+    return ok ? 0 : 1;
+}
 
 bool PrepareGameCode(const GameFiles& game) {
     // one build at a time: a second copy of the game started meanwhile waits for it, then finds the DLL current
@@ -777,5 +811,6 @@ bool PrepareGameCode(const GameFiles& game) {
 #include "app/app.h"
 namespace app {
 bool PrepareGameCode(const GameFiles&) { return true; }  // the code is in the executable
+int PrepareGameCodeHeadless(const GameFiles&) { return 0; }
 }  // namespace app
 #endif

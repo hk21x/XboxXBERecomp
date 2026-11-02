@@ -27,6 +27,9 @@ struct Status {
     double fraction = -1;  // 0..1, -1 when unknown
 };
 
+// where a prebuilt install has got to, for the screen's list of steps
+enum class Step { None, Package, Unpack, Compile, Ready };
+
 class Builder {
 public:
     Builder(const GameConfig& game, const std::filesystem::path& root, Http& http, Platform& platform);
@@ -48,6 +51,11 @@ public:
 
     // the whole build: tools, source, xbe, compile, install. Returns false with the reason (also in launcher.log)
     bool BuildAll(std::string& error);
+    // game.json's package: the prebuilt runtime and compiler, unpacked into play (saves, music and settings left alone),
+    // then the game's code compiled there. BuildAll takes this way when there is one
+    bool BuildPackage(std::string& error);
+    bool Prebuilt() const { return !game_.package.empty(); }
+    std::atomic<Step> step{Step::None};
     // the launcher's folder is too deep for the Windows SDK: msiexec (which unpacks it) fails past 260 characters, and
     // the SDK's deepest headers lie about 130 below tools\; message: what to do
     static constexpr size_t kMaxRootLength = 80;
@@ -71,7 +79,7 @@ public:
     std::filesystem::path MusicDir() const;    // where the game finds them: play\hdd\E\TDATA\FFFE0000\MUSIC
 
     // steps, for the test tool
-    bool LoadToolchain(Plan& plan, std::string& error);
+    bool LoadToolchain(Plan& plan, std::string& error, bool microsoft = true);
     bool InstallTool(const Tool& tool, std::string& error);
     bool GetSource(std::string& error);
     bool PutXbe(std::string& error);
