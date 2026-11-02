@@ -89,13 +89,31 @@ int64_t NowMs() {
 
 fs::path CompilerDir() { return ExeDir() / "compiler"; }
 
-// the config in compiler\config whose [xbe] path is this xbe; an included one has no path
+// a config's [xbe] entry, its own or from the configs it includes (a game's generated config holds path and partitions,
+// the hand-kept one that includes it what the build reads)
+toml::node_view<toml::node> XbeEntry(toml::table& t, const fs::path& folder, const char* key, std::vector<toml::table>& kept) {
+    if (auto own = t["xbe"][key]) return own;
+    if (toml::array* includes = t["includes"].as_array())
+        for (auto& i : *includes)
+            if (auto name = i.value<std::string>()) {
+                kept.reserve(8);  // the views point into these
+                kept.push_back(toml::parse_file((folder / *name).string()));
+                if (auto found = XbeEntry(kept.back(), folder, key, kept)) return found;
+            }
+    return {};
+}
+
+// the config in compiler\config the build reads for this xbe: the one naming the game code DLL, whose [xbe] path, its own
+// or included, is this xbe
 fs::path ConfigFor(const std::string& xbe) {
     std::error_code ec;
     for (auto& e : fs::directory_iterator(CompilerDir() / "config", ec)) {
         try {
             toml::table t = toml::parse_file(e.path().string());
-            if (fs::path(t["xbe"]["path"].value_or(std::string())).filename() == xbe) return e.path();
+            if (!t["xbe"]["library"]) continue;
+            std::vector<toml::table> kept;
+            auto path = XbeEntry(t, e.path().parent_path(), "path", kept);
+            if (fs::path(path.value_or(std::string())).filename() == xbe) return e.path();
         } catch (const toml::parse_error&) {
         }
     }
@@ -192,7 +210,8 @@ struct Job {
 uint32_t PartitionCount(const Image& image) {
     try {
         toml::table t = toml::parse_file(image.config.string());
-        return uint32_t(t["xbe"]["partitions"].value_or(int64_t(0)));
+        std::vector<toml::table> kept;
+        return uint32_t(XbeEntry(t, image.config.parent_path(), "partitions", kept).value_or(int64_t(0)));
     } catch (const toml::parse_error&) {
         return 0;
     }
