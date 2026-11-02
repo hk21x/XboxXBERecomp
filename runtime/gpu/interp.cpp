@@ -284,15 +284,17 @@ bool Invert(const double m[4][4], double out[4][4]) {
 void Interpolating::LogJumps() {
     static const bool on = std::getenv("XBE_INTERP_LOG") != nullptr;
     if (!on) return;
+    // each kind of draw a few times, in all at most a line a step: what is rare is what is wanted
+    static std::unordered_map<uint64_t, int> kinds;
     static int shown = 0, steps = 0;
-    if (++steps % 600 == 0) shown = 0;
+    if (++steps % 600 == 0) shown = 0, kinds.clear();
     const auto place = [](const float m[4][4], float* o) {
         const float w = m[3][3];
         if (std::fabs(w) < 1.5f || w > 60) return false;  // nearer is scenery passing the camera, moving far on screen as it should
         o[0] = m[0][3] / w, o[1] = m[1][3] / w, o[2] = w;
         return true;
     };
-    for (size_t i = 0; i < count_ && shown < 40; i++) {
+    for (size_t i = 0; i < count_ && shown < 200; i++) {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw || std::fabs(r.vsc[3][0]) + std::fabs(r.vsc[3][1]) + std::fabs(r.vsc[3][2]) < 1e-6f) continue;
         float a[4][4], b[4][4];
@@ -313,6 +315,7 @@ void Interpolating::LogJumps() {
         if (!place(a, p) || !place(b, q)) continue;
         const float d = std::max(std::fabs(p[0] - q[0]), std::fabs(p[1] - q[1])), wr = std::fabs(q[2] / p[2] - 1);
         if (d < 0.04f && wr < 0.04f) continue;
+        if (++kinds[(uint64_t(r.s->vs_handle) << 32) ^ r.s->textures[0] ^ (uint64_t(r.c) << 12)] > 3) continue;
         shown++;
         LOGR("jump: %s step %d vs %08X t0 %08X n %u rt %08X moved %.3f depth %.3f w %.2f was %.2f", how, steps, r.s->vs_handle,
              r.s->textures[0], r.c, r.s->rt.data, d, wr, p[2], q[2]);
