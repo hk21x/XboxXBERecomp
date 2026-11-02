@@ -318,7 +318,8 @@ bool Builder::PutXbe(std::string& error) {
         return false;
     }
     // every xbe the build recompiles (GameConfig::xbes), written where it is not there already
-    for (const std::string& name : game_.xbes) {
+    const auto own = game_.release_xbes.find(copy.sha1);
+    for (const std::string& name : own != game_.release_xbes.end() ? own->second : game_.xbes) {
         std::vector<uint8_t> xbe;
         if (!ReadXbeNamed(name, copy, xbe, error)) return false;
         fs::path to = root_ / "source" / "assets" / name;
