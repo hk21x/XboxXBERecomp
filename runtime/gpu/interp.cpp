@@ -26,6 +26,9 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
+constexpr double kSameMove = 0.02;                            // summed over a move's matrix: the same camera
+constexpr int kLeastVotes = 3;                                // draws agreeing on it
+constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
@@ -60,7 +63,7 @@ struct Rec {
     Surface s1, s2;
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
-    bool derived = false;  // first seen this step: where its neighbour's move says its matrix was
+    bool derived = false;  // first seen this step: where the camera's move says its matrix was
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
@@ -343,41 +346,81 @@ bool Interpolating::Match() {
             followed++;
         }
     }
-    // A piece come into view this step has no self to blend from, and its own matrix. Left at the step's place while what is around it
-    // runs behind, it is seen to jump (a building's lit windows). It takes the move of the nearest matched draw of the same target and
-    // program, step before = move * now: the scenery's for scenery, its own car's for a piece of a car, which moves with the camera.
+    // A piece of scenery come into view this step has no self to blend from, and its own matrix. Left at the step's place while what is
+    // around it runs behind, it is seen to jump (a building's lit windows). It takes the camera's move, step before = move * now, read
+    // off matched draws of the same target, the one most agree on. Only scenery: the nearest matched draw of its program must move
+    // that way and nothing of that program be turning. A piece of a car given a wheel's move, or the road's, is thrown out of place;
+    // it stays at the step's place.
     {
+        struct Move {
+            uint32_t rt;
+            double d[4][4];
+            int votes;
+        };
         const auto flat = [](const std::array<std::array<float, 4>, 192>& v) {  // a screen's 2D has no perspective row
             return std::fabs(v[3][0]) + std::fabs(v[3][1]) + std::fabs(v[3][2]) < 1e-6f;
         };
-        for (size_t i = 0; i < count_; i++) {
-            Rec& r = now_[i];
-            if (r.kind != Rec::Draw || r.prev >= 0 || flat(r.vsc)) continue;
-            const Rec* near = nullptr;
-            float nearest = 1e30f;
-            for (size_t j = 0; j < count_; j++) {
-                const Rec& o = now_[j];
-                if (o.kind != Rec::Draw || o.prev < 0 || o.turning || o.s->vs_handle != r.s->vs_handle || o.s->rt.data != r.s->rt.data) continue;
-                float distance = 0;
-                for (uint32_t k = 0; k < kMatrixRegisters; k++)
-                    for (uint32_t c = 0; c < 4; c++) distance += std::fabs(o.vsc[k][c] - r.vsc[k][c]);
-                if (distance < nearest) nearest = distance, near = &o;
-            }
-            if (!near) continue;
-            double n[4][4], inv[4][4], d[4][4];
-            const auto& p = before_[size_t(near->prev)].vsc;
+        const auto move_of = [&](const Rec& r, double d[4][4]) {
+            double n[4][4], inv[4][4];
+            const auto& p = before_[size_t(r.prev)].vsc;
             for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) n[a][b] = near->vsc[size_t(a)][size_t(b)];
-            if (!Invert(n, inv)) continue;
+                for (int b = 0; b < 4; b++) n[a][b] = r.vsc[size_t(a)][size_t(b)];
+            if (!Invert(n, inv)) return false;
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     d[a][b] = 0;
                     for (int c = 0; c < 4; c++) d[a][b] += double(p[size_t(a)][size_t(c)]) * inv[c][b];
                 }
+            return true;
+        };
+        const auto same_move = [](const double x[4][4], const double y[4][4]) {
+            double e = 0;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) e += std::fabs(x[a][b] - y[a][b]);
+            return e < kSameMove;
+        };
+        std::vector<Move> moves;
+        std::unordered_map<uint32_t, bool> spinning;
+        for (size_t i = 0, tried = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || flat(r.vsc)) continue;
+            if (r.turning) spinning[r.s->vs_handle] = true;
+            if (r.turning || tried >= kSampleDraws) continue;
+            tried++;
+            Move m{r.s->rt.data, {}, 1};
+            if (!move_of(r, m.d)) continue;
+            bool same = false;
+            for (Move& o : moves)
+                if (o.rt == m.rt && same_move(o.d, m.d)) {
+                    o.votes++;
+                    same = true;
+                    break;
+                }
+            if (!same && moves.size() < kMostMoves) moves.push_back(m);
+        }
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev >= 0 || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            const Move* camera = nullptr;
+            for (const Move& o : moves)
+                if (o.rt == r.s->rt.data && (!camera || o.votes > camera->votes)) camera = &o;
+            if (!camera || camera->votes < kLeastVotes) continue;
+            const Rec* near = nullptr;
+            float nearest = 1e30f;
+            for (size_t j = 0; j < count_; j++) {
+                const Rec& o = now_[j];
+                if (o.kind != Rec::Draw || o.prev < 0 || o.s->vs_handle != r.s->vs_handle || o.s->rt.data != r.s->rt.data) continue;
+                float distance = 0;
+                for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                    for (uint32_t c = 0; c < 4; c++) distance += std::fabs(o.vsc[k][c] - r.vsc[k][c]);
+                if (distance < nearest) nearest = distance, near = &o;
+            }
+            double d[4][4];
+            if (!near || !move_of(*near, d) || !same_move(d, camera->d)) continue;
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     double t = 0;
-                    for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
                 }
             r.derived = true;
