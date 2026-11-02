@@ -17,6 +17,7 @@
 #include <chrono>
 #include <fstream>
 #include <string_view>
+#include <cctype>
 #include <thread>
 
 #include <toml++/toml.hpp>
@@ -104,6 +105,13 @@ toml::node_view<toml::node> XbeEntry(toml::table& t, const fs::path& folder, con
     return {};
 }
 
+// discs and configs differ in case: DRIVING.XBE, driving.xbe
+bool SameName(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) {
+               return std::tolower(x) == std::tolower(y);
+           });
+}
+
 // the config in compiler\config the build reads for this xbe: the one naming the game code DLL, whose [xbe] path, its own
 // or included, is this xbe
 fs::path ConfigFor(const std::string& xbe) {
@@ -114,7 +122,7 @@ fs::path ConfigFor(const std::string& xbe) {
             if (!t["xbe"]["library"]) continue;
             std::vector<toml::table> kept;
             auto path = XbeEntry(t, e.path().parent_path(), "path", kept);
-            if (fs::path(path.value_or(std::string())).filename() == xbe) return e.path();
+            if (SameName(fs::path(path.value_or(std::string())).filename().string(), xbe)) return e.path();
         } catch (const toml::parse_error&) {
         }
     }
@@ -174,7 +182,7 @@ bool Current(const Target& target) {
 
 // an image's xbe from the game in assets: the extracted file, else the mounted disc image
 bool ReadXbe(const GameFiles& game, const char* name, std::vector<uint8_t>& out) {
-    if (std::string_view(name) == IMAGE_XBE) {
+    if (SameName(name, IMAGE_XBE)) {
         out = game.xbe;
         return true;
     }
@@ -800,7 +808,7 @@ bool PrepareGameCode(const GameFiles& game) {
     CloseHandle(lock);
     if (!built) return false;
     for (const Image& image : images)
-        if (image.xbe == IMAGE_XBE && dispatch::Load(CodeDll(image))) return true;
+        if (SameName(image.xbe, IMAGE_XBE) && dispatch::Load(CodeDll(image))) return true;
     MessageBoxW(nullptr, L"The game's code could not be loaded, see the log in the logs folder.", kGame.title,
                 MB_ICONERROR);
     return false;

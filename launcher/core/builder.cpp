@@ -166,6 +166,7 @@ bool Builder::SetGame(const GameCheck& copy, std::string& error) {
         return false;
     }
     Remember("game", U8(copy.path));
+    Remember("game_sha1", copy.sha1);
     Log("game: " + U8(copy.path) + ", " + copy.release + ", sha1 " + copy.sha1);
     return true;
 }
@@ -482,6 +483,14 @@ bool Builder::BuildAll(std::string& error) {
     return true;
 }
 
+std::string Builder::PackageName() const {
+    std::string text;
+    json j = ReadAll(root_ / "launcher.json", text) ? json::parse(text, nullptr, false) : json::object();
+    std::string sha = j.is_object() ? j.value("game_sha1", "") : "";
+    auto it = game_.packages.find(Lower(sha));
+    return it != game_.packages.end() ? it->second : game_.package;
+}
+
 bool Builder::BuildPackage(std::string& error) {
     cancel = false;
     StartTiming();
@@ -497,7 +506,12 @@ bool Builder::BuildPackage(std::string& error) {
         return stopped();
     }
     // a zip beside the launcher (a test's, or a release downloaded by hand) before the release's
-    fs::path downloads = root_ / "downloads", zip = root_.parent_path() / game_.package;
+    const std::string package = PackageName();
+    if (package.empty()) {
+        error = "No package is known for this copy of the game: choose it again.";
+        return stopped();
+    }
+    fs::path downloads = root_ / "downloads", zip = root_.parent_path() / package;
     std::string id;
     step = Step::Package;
     if (fs::exists(zip, ec)) {
@@ -515,7 +529,7 @@ bool Builder::BuildPackage(std::string& error) {
                    }
                    std::string repo = game_.repo;
                    if (repo.size() > 4 && repo.compare(repo.size() - 4, 4, ".git") == 0) repo.resize(repo.size() - 4);
-                   std::string url = repo + "/releases/download/" + tag + "/" + game_.package, text;
+                   std::string url = repo + "/releases/download/" + tag + "/" + package, text;
                    if (!FetchText(http_, url + ".json", text, error)) {
                        error = "Could not find the game's package for " + tag + ": " + error;
                        return false;
@@ -529,7 +543,7 @@ bool Builder::BuildPackage(std::string& error) {
                    uint64_t size = info.value("size", uint64_t(0));
                    id = sha;
                    fs::create_directories(downloads, ec);
-                   zip = downloads / game_.package;
+                   zip = downloads / package;
                    // already unpacked: a build stopped after this point carries on
                    std::string have;
                    if (ReadAll(PlayDir() / "package.stamp", have) && have == id) return true;

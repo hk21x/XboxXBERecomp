@@ -54,7 +54,8 @@ public:
     // game.json's package: the prebuilt runtime and compiler, unpacked into play (saves, music and settings left alone),
     // then the game's code compiled there. BuildAll takes this way when there is one
     bool BuildPackage(std::string& error);
-    bool Prebuilt() const { return !game_.package.empty(); }
+    bool Prebuilt() const { return !game_.package.empty() || !game_.packages.empty(); }
+    std::string PackageName() const;  // the chosen disc's zip, empty when none is known for it
     std::atomic<Step> step{Step::None};
     // the launcher's folder is too deep for the Windows SDK: msiexec (which unpacks it) fails past 260 characters, and
     // the SDK's deepest headers lie about 130 below tools\; message: what to do
