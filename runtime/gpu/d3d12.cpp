@@ -2308,7 +2308,6 @@ void D3D12Backend::EnsureVertexShader(const State& s, const Assembled& a, DrawSh
             for (size_t at = 0; (at = src.find(from, at)) != std::string::npos; at += to.size()) src.replace(at, from.size(), to);
         };
         if (vs_edit.find("noprecise") != std::string::npos) replace_all("precise ", "");
-        if (vs_edit.find("noinf") != std::string::npos) replace_all("1.#INF", "3.402823e38");
         if (vs_edit.find("noskin") != std::string::npos) replace_all("a0 = mac_arl(", "a0 = 0 * mac_arl(");
         if (vs_edit.find("rcpclamp") != std::string::npos)
             replace_all("float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }", "float4 ilu_rcp(float v) { return magclamp(1.0 / v).xxxx; }");
