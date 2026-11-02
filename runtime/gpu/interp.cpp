@@ -30,6 +30,7 @@ constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
+constexpr int kFreshShare = 4;                                // matched draws of a program to each new one, for it to be scenery
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
@@ -470,6 +471,11 @@ bool Interpolating::Match() {
             seen[0]++;
             if (same_move(d, camera->d)) seen[1]++;
         }
+        // scenery comes into view a piece at a time among many that are matched. A whole car losing its match for a step comes all at
+        // once, and its program has as many new as matched: not scenery
+        std::unordered_map<uint32_t, int> fresh;
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && now_[i].prev < 0) fresh[now_[i].s->vs_handle]++;
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
@@ -477,7 +483,7 @@ bool Interpolating::Match() {
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
-            if (seen == program.end() || seen->second[1] * 2 <= seen->second[0]) continue;
+            if (seen == program.end() || seen->second[1] * 2 <= seen->second[0] || seen->second[1] < fresh[r.s->vs_handle] * kFreshShare) continue;
             const Rec* near = nullptr;
             float nearest = 1e30f;
             for (size_t j = 0; j < count_; j++) {
