@@ -128,6 +128,10 @@ struct GameFiles {
     std::vector<uint8_t> xbe;
 };
 bool FindGame(GameFiles& game);
+std::string Sha1(const std::vector<uint8_t>& data);  // lower case hex
+// the recompiled code, <exe>.dll, built from the game in assets when missing or out of date (game_code.cpp) and
+// loaded; false after telling the player why the game cannot start, or when they chose not to start it yet
+bool PrepareGameCode(const GameFiles& game);
 int Instance();  // --instance N on the command line, 0 without: a second copy on this PC for system link tests
 void* Window();  // HWND
 // leave the game as closing its window does (the settings window's Quit, a title's own quit item); from any thread

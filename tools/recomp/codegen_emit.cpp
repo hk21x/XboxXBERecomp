@@ -232,8 +232,17 @@ bool CodeGen::Run() {
     for (uint32_t f : absent) shared += F("X86_EXTERN_FUNC(%s);\n", FuncName(f).c_str());
     std::map<std::string, bool> hooks;
     for (auto& [va, h] : an_.cfg.hooks) hooks.emplace(h.call, h.Returns());
-    for (auto& [name, returns] : hooks) shared += F("%s %s(X86Context& ctx, uint8_t* base);\n", returns ? "bool" : "void", name.c_str());
+    for (auto& [name, returns] : hooks)
+        shared += F("X86_HOST_API %s %s(X86Context& ctx, uint8_t* base);\n", returns ? "bool" : "void", name.c_str());
     WriteIfChanged(out_ / "x86_recomp_shared.h", shared);
+
+    // the executable exports the hooks under their C++ names (app/game_code.cpp includes this)
+    std::string hook_exports = "#pragma once\n";
+    for (auto& [name, returns] : hooks) {
+        const char* result = returns ? "_N" : "X";
+        hook_exports += F("#pragma comment(linker, \"/EXPORT:?%s@@YA%sAEAUX86Context@@PEAE@Z\")\n", name.c_str(), result);
+    }
+    WriteIfChanged(out_ / "hook_exports.h", hook_exports);
 
     // partition by instruction count so the files compile in similar time
     size_t total = 0;
@@ -282,6 +291,25 @@ bool CodeGen::Run() {
         map += F("X86_WEAK_FUNC(%s, __imp__%s)\n", FuncName(f).c_str(), FuncName(f).c_str());
     }
     WriteIfChanged(out_ / "x86_func_mapping.cpp", map);
+
+    // the game code DLL exports its tables and each recompiled body (one name a function: PE allows 65535); the
+    // executable's import library also takes a function's own name, for the calls it makes where it has no override
+    std::string library = F("LIBRARY %s\nEXPORTS\n", an_.cfg.library.c_str());
+    std::string exports;
+    std::string aliases;
+    for (const char* table : {"X86FuncMappings", "X86Continuations", "X86CodeBase", "X86CodeEnd", "X86EntryPoint"})
+        exports += F("    %s DATA\n", table);
+    for (const std::vector<uint32_t>* list : {&funcs, &absent}) {
+        for (uint32_t f : *list) {
+            std::string name = FuncName(f);
+            exports += F("    __imp__%s\n", name.c_str());
+            aliases += F("    %s == __imp__%s\n", name.c_str(), name.c_str());
+        }
+    }
+    if (!an_.cfg.library.empty()) {
+        WriteIfChanged(out_ / "exports.def", library + exports);
+        WriteIfChanged(out_ / "imports.def", library + exports + aliases);
+    }
 
     std::string stats = F("functions %zu\ninstructions %zu\n", funcs.size(), insn_count_);
     for (auto& [k, v] : unimpl_) stats += F("unimplemented %s %zu\n", k.c_str(), v);

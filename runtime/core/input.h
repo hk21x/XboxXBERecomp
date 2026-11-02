@@ -26,7 +26,8 @@ const char* ControlName(int c);  // settings file name, "dpad_up" ...
 const char* ControlLabel(int c); // shown to the player, "D-pad up" ...
 int ControlByName(const char* name);  // -1 when unknown
 
-void Init();  // window thread, before boot
+void Init();  // window thread, before boot; the game code window starts it earlier
+uint16_t HeldOnAnyController();  // face buttons as XINPUT_GAMEPAD_A/B/X/Y masks, GameInfo::pad left out
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
 // raw mouse movement, from the window thread (WM_INPUT): read into controller 1's right stick (Settings::mouse_look)

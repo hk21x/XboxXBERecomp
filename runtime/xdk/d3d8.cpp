@@ -22,6 +22,10 @@
 #include "xdk/layout.h"
 #include "xdk/state_numbering.h"
 
+namespace dispatch {
+bool InCode(uint32_t va);  // cpu/dispatch.cpp
+}
+
 using namespace kernel;
 
 // configs written before the SDK knew the name
@@ -648,7 +652,7 @@ HLE_STDCALL(D3D_BlockOnResource, 1) {
                 uint32_t code[4] = {}, n = 0;
                 for (uint32_t i = 0; i < 32 && n < 4; i++) {
                     uint32_t v = R32(ctx.esp + i * 4);
-                    if (v >= X86CodeBase && v < X86CodeEnd) code[n++] = v;
+                    if (dispatch::InCode(v)) code[n++] = v;
                 }
                 LOGI("d3d: BlockOnResource on surface %08X, stack %08X %08X %08X %08X", data, code[0], code[1], code[2], code[3]);
             }
