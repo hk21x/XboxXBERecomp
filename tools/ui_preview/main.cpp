@@ -80,6 +80,7 @@ void* Monitor() { return nullptr; }
 std::vector<std::string> Monitors() { return {"Dell U4919DW", "LG C2"}; }
 Mode Desktop() { return {1920, 1080}; }
 void Quit() { g_quits++; }
+bool ScreenshotJustSaved() { return false; }
 int8_t DefaultWheelButton(int) { return 0; }
 const char* GearName(int g) { static const char* n[] = {"R", "1", "2", "3", "4", "5", "6", "7"}; return n[g]; }
 std::array<uint16_t, 2> DefaultKeys(int c) { return {uint16_t(c ? 'A' + c : 0), 0}; }
