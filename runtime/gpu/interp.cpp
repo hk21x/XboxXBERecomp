@@ -30,6 +30,7 @@ constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
+constexpr float kNearCamera = 2.0f;                           // the matrix's w
 constexpr int kFreshShare = 4;                                // matched draws of a program to each new one, for it to be scenery
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
@@ -368,6 +369,11 @@ bool Interpolating::Match() {
             continue;
         }
         r.turning = turned;  // a wheel or a piece of debris turning fast stays with what carries it: only its place is blended
+        // a small piece passing the camera: between its two places it comes nearer than either, and is drawn enormous for a frame
+        if ((turned || r.c < kLeastVertices) && (was.vsc[3][3] * r.vsc[3][3] <= 0 || std::min(std::fabs(was.vsc[3][3]), std::fabs(r.vsc[3][3])) < kNearCamera)) {
+            r.turning = false;
+            continue;
+        }
         r.prev = candidate;
         if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
     }
