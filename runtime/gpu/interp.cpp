@@ -30,7 +30,6 @@ constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
-constexpr float kSamePlace = 0.25f;                           // summed over a matrix: the same object, a step on
 constexpr int kFreshShare = 4;                                // matched draws of a program to each new one, for it to be scenery
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
@@ -77,7 +76,7 @@ uint64_t KeyOf(const Rec& r) {
     auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
     mix(r.a), mix(r.b), mix(r.c), mix(s.vs_handle), mix(s.rt.header);
     for (uint32_t t : s.textures) mix(t);
-    mix(s.streams[0].vb), mix(s.index_data);
+    // not the buffers: a title hands a mesh another vertex buffer from one step to the next (what it draws is the same); the matrix tells alike apart
     mix(s.viewport.x), mix(s.viewport.y), mix(s.viewport.w), mix(s.viewport.h), mix(s.squeeze_beyond);
     return h;
 }
@@ -392,36 +391,16 @@ bool Interpolating::Match() {
             followed++;
         }
     }
-    // What lost its match by what it draws (a car changing its detail: other vertices, the same place) is found by its place: a draw
-    // of the step before, same program and target, whose matrix is all but this one's. Its matrix is all that is blended from it.
-    uint32_t lost = 0, by_place = 0;
-    for (size_t i = 0; i < count_; i++) {
-        Rec& r = now_[i];
-        if (r.kind != Rec::Draw || r.prev >= 0 || std::fabs(r.vsc[3][0]) + std::fabs(r.vsc[3][1]) + std::fabs(r.vsc[3][2]) < 1e-6f) continue;
-        lost++;
-        int best = -1;
-        float nearest = kSamePlace;
-        for (size_t j = 0; j < before_count_; j++) {
-            const Rec& o = before_[j];
-            if (o.kind != Rec::Draw || o.s->vs_handle != r.s->vs_handle || o.s->rt.header != r.s->rt.header) continue;
-            float distance = 0;
-            for (uint32_t k = 0; k < kMatrixRegisters; k++)
-                for (uint32_t c = 0; c < 4; c++) distance += std::fabs(o.vsc[k][c] - r.vsc[k][c]);
-            if (distance < nearest) nearest = distance, best = int(j);
-        }
-        if (best < 0) continue;
-        for (size_t a = 0; a < 4; a++)
-            for (size_t b = 0; b < 4; b++) r.was[a][b] = before_[size_t(best)].vsc[a][b];
-        r.derived = true;
-        by_place++;
-    }
     {
         static const bool log_lost = std::getenv("XBE_INTERP_LOG") != nullptr;
-        static uint32_t all_lost = 0, all_found = 0, most = 0, steps = 0;
-        all_lost += lost, all_found += by_place, most = std::max(most, lost - by_place);
+        static uint32_t all_lost = 0, most = 0, steps = 0;
+        uint32_t lost = 0;
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && now_[i].prev < 0) lost++;
+        all_lost += lost, most = std::max(most, lost);
         if (log_lost && ++steps % 600 == 0) {
-            LOGR("gpu: in-between frames: %u draws lost their match in 600 steps, %u found by place; at most %u left in a step", all_lost, all_found, most);
-            all_lost = all_found = most = 0;
+            LOGR("gpu: in-between frames: %u draws without a match in 600 steps, at most %u in a step", all_lost, most);
+            all_lost = most = 0;
         }
     }
     static const bool pieces = [] {
@@ -508,11 +487,11 @@ bool Interpolating::Match() {
         // once, and its program has as many new as matched: not scenery
         std::unordered_map<uint32_t, int> fresh;
         for (size_t i = 0; i < count_; i++)
-            if (now_[i].kind == Rec::Draw && now_[i].prev < 0 && !now_[i].derived) fresh[now_[i].s->vs_handle]++;
+            if (now_[i].kind == Rec::Draw && now_[i].prev < 0) fresh[now_[i].s->vs_handle]++;
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
-            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.derived || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
