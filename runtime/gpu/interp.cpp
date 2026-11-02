@@ -156,6 +156,7 @@ private:
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
     bool UploadKept();
+    void LogJumps();
     Rec& Next(Rec::Kind kind) {
         if (!count_) first_ = Clock::now();
         if (count_ == now_.size()) now_.emplace_back();
@@ -279,6 +280,45 @@ bool Invert(const double m[4][4], double out[4][4]) {
     return true;
 }
 
+// XBE_INTERP_LOG=1: draws at a car's distance whose place on screen jumps between the two steps blended, for what cannot be seen here
+void Interpolating::LogJumps() {
+    static const bool on = std::getenv("XBE_INTERP_LOG") != nullptr;
+    if (!on) return;
+    static int shown = 0, steps = 0;
+    if (++steps % 600 == 0) shown = 0;
+    const auto place = [](const float m[4][4], float* o) {
+        const float w = m[3][3];
+        if (std::fabs(w) < 1.5f || w > 60) return false;  // nearer is scenery passing the camera, moving far on screen as it should
+        o[0] = m[0][3] / w, o[1] = m[1][3] / w, o[2] = w;
+        return true;
+    };
+    for (size_t i = 0; i < count_ && shown < 40; i++) {
+        const Rec& r = now_[i];
+        if (r.kind != Rec::Draw || std::fabs(r.vsc[3][0]) + std::fabs(r.vsc[3][1]) + std::fabs(r.vsc[3][2]) < 1e-6f) continue;
+        float a[4][4], b[4][4];
+        for (size_t x = 0; x < 4; x++)
+            for (size_t y = 0; y < 4; y++) a[x][y] = r.vsc[x][y];
+        const char* how;
+        if (r.prev >= 0) {
+            how = r.turning ? "turning" : "matched";
+            for (size_t x = 0; x < 4; x++)
+                for (size_t y = 0; y < 4; y++) b[x][y] = before_[size_t(r.prev)].vsc[x][y];
+        } else if (r.derived) {
+            how = "piece";
+            std::memcpy(b, r.was, sizeof b);
+        } else {
+            continue;
+        }
+        float p[3], q[3];
+        if (!place(a, p) || !place(b, q)) continue;
+        const float d = std::max(std::fabs(p[0] - q[0]), std::fabs(p[1] - q[1])), wr = std::fabs(q[2] / p[2] - 1);
+        if (d < 0.04f && wr < 0.04f) continue;
+        shown++;
+        LOGR("jump: %s step %d vs %08X t0 %08X n %u rt %08X moved %.3f depth %.3f w %.2f was %.2f", how, steps, r.s->vs_handle,
+             r.s->textures[0], r.c, r.s->rt.data, d, wr, p[2], q[2]);
+    }
+}
+
 bool Interpolating::Match() {
     if (!before_count_) return false;
     std::unordered_map<uint64_t, std::vector<int>> found;
@@ -347,6 +387,12 @@ bool Interpolating::Match() {
             followed++;
         }
     }
+    static const bool pieces = [] {
+        const char* e = std::getenv("XBE_INTERP_PIECES");
+        const bool on = !e || std::atoi(e) != 0;
+        LOGR("gpu: in-between frames: scenery come into view %s (XBE_INTERP_PIECES)", on ? "takes the camera's move" : "stays at its step's place");
+        return on;
+    }();
     // A piece of scenery come into view this step has no self to blend from, and its own matrix. Left at the step's place while what is
     // around it runs behind, it is seen to jump (a building's lit windows). It takes the camera's move, step before = move * now, read
     // off matched draws of the same target, the one most agree on. Only scenery: the nearest matched draw of its program must move
@@ -424,7 +470,7 @@ bool Interpolating::Match() {
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
-            if (r.kind != Rec::Draw || r.prev >= 0 || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
@@ -450,6 +496,7 @@ bool Interpolating::Match() {
             r.derived = true;
         }
     }
+    LogJumps();
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
