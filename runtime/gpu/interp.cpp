@@ -27,9 +27,9 @@ constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past t
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
 constexpr double kLate = 1.2;                                 // of the usual step
-constexpr int kFirstPatience = 240, kMostPatience = 7200;     // steps
+constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
+constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
-constexpr float kStays = 0.1f;                                // of its place, how far a turning object goes in a step
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
@@ -196,7 +196,8 @@ private:
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
-    int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience;
+    int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience, late_ = 0;
+    bool raised_ = false;
     Clock::time_point rest_until_{};
     bool logged_ = false;
     Clock::time_point reported_{};
@@ -276,31 +277,22 @@ bool Interpolating::Match() {
         const Rec& was = before_[size_t(candidate)];
         // by the matrix's turn and scale, each row against its own size: its translation crosses zero as an object is passed, a small
         // number with a large change, and the object is the same. Past that only a real leap in it counts
-        bool far = false;
-        for (uint32_t k = 0; k < kMatrixRegisters && !far; k++) {
+        bool turned = false, leapt = false;
+        for (uint32_t k = 0; k < kMatrixRegisters; k++) {
             float size = 0;
             for (uint32_t c = 0; c < 3; c++) size = std::max({size, std::fabs(was.vsc[k][c]), std::fabs(r.vsc[k][c])});
             for (uint32_t c = 0; c < 3; c++)
-                if (std::fabs(was.vsc[k][c] - r.vsc[k][c]) > kFar * size) far = true;
+                if (std::fabs(was.vsc[k][c] - r.vsc[k][c]) > kFar * size) turned = true;
             const float x = was.vsc[k][3], y = r.vsc[k][3];
             // in the matrix's own units: the world's rows are near 1, a screen's HUD 0.003 a pixel, across the screen is a leap there
-            if (std::fabs(x - y) > kLeap * size && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) far = true;
+            if (std::fabs(x - y) > kLeap * size && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) leapt = true;
         }
         matched++;
-        if (far) {
-            // a wheel or a piece of debris turning fast, where it stays with what carries it: only its place is blended. Anything else
-            // that far off is a different draw
-            bool stays = true;
-            for (uint32_t k = 0; k < kMatrixRegisters; k++) {
-                const float x = was.vsc[k][3], y = r.vsc[k][3];
-                if (std::fabs(x - y) > kStays * std::max({std::fabs(x), std::fabs(y), 1.0f})) stays = false;
-            }
-            if (!stays) {
-                jumped++;
-                continue;
-            }
-            r.turning = true;
+        if (leapt) {  // a different draw, alike in all but place
+            jumped++;
+            continue;
         }
+        r.turning = turned;  // a wheel or a piece of debris turning fast stays with what carries it: only its place is blended
         r.prev = candidate;
         if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
     }
@@ -426,15 +418,21 @@ void Interpolating::Present(const Surface& front) {
         // as many as fit, and always one: the picture runs a step behind the title while blending, and the step just drawn shown now
         // and then would jump ahead and back, the whole picture flickering. On a machine that cannot keep that up, none for a while
         const int fit = replay_seconds_ > 0 ? int(std::max(span, 0.0) / replay_seconds_) + 1 : 2;
-        // steps coming late are the proof, whatever the cause (a full queue behind vertical sync comes in bursts): fewer frames, and
-        // more only after a calm that grows each time more proved too many
-        if (step > usual * kLate && limit_ > 1) {
+        // steps coming late again and again are the proof, whatever the cause (a full queue behind vertical sync comes in bursts); one
+        // now and then is only the title's own work, an explosion say. Fewer frames, and more after a calm, longer if the last try failed
+        late_ += step > usual * kLate ? kLateWeight : 0;
+        if (late_ > 0) late_--;
+        if (late_ >= kLateLimit && limit_ > 1) {
+            if (raised_) patience_ = std::min(patience_ * 2, kMostPatience);
+            raised_ = false;
             limit_--;
             calm_ = 0;
-            patience_ = std::min(patience_ * 2, kMostPatience);
+            late_ = 0;
         } else if (++calm_ >= patience_ && limit_ < kMostFrames) {
             limit_++;
+            raised_ = true;
             calm_ = 0;
+            if (patience_ > kFirstPatience) patience_ = std::max(patience_ * 3 / 4, kFirstPatience);
         }
         const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
         const double spacing = std::min(slot, usual / frames);
