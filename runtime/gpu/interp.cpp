@@ -26,7 +26,7 @@ using Clock = std::chrono::steady_clock;
 constexpr double kLongestStep = 0.15, kShortestStep = 0.005;  // seconds; past these the steps are not moving a picture along
 constexpr double kMargin = 0.002;                             // seconds kept for the title's own work before its first draw
 constexpr int kMostFrames = 32;
-constexpr double kSameMove = 0.02;                            // summed over a move's matrix: the same camera
+constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's move, and for no move at all: the same camera
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr double kLate = 1.2;                                 // of the usual step
@@ -373,11 +373,15 @@ bool Interpolating::Match() {
                 }
             return true;
         };
+        // a step's moves are all small: alike is judged against how far the camera went, or a car would pass for scenery
         const auto same_move = [](const double x[4][4], const double y[4][4]) {
-            double e = 0;
+            double e = 0, size = 0;
             for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) e += std::fabs(x[a][b] - y[a][b]);
-            return e < kSameMove;
+                for (int b = 0; b < 4; b++) {
+                    e += std::fabs(x[a][b] - y[a][b]);
+                    size += std::fabs(y[a][b] - (a == b ? 1 : 0));
+                }
+            return e < std::max(kSameMove * size, kStill);
         };
         std::vector<Move> moves;
         std::unordered_map<uint32_t, bool> spinning;
