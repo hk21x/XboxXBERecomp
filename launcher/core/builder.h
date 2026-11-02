@@ -11,6 +11,8 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "core/game.h"
 #include "core/net.h"
@@ -50,6 +52,10 @@ public:
     // the SDK's deepest headers lie about 130 below tools\; message: what to do
     static constexpr size_t kMaxRootLength = 80;
     bool PathTooLong(std::string& message) const;
+    // each stage of a build timed, its seconds logged as it ends; LogTiming lists them with their shares
+    void StartTiming();
+    bool Timed(const std::string& stage, const std::function<bool()>& step);
+    void LogTiming();
     // a build of another version is in play: a release launcher's own tag not built yet (no network asked), a dev
     // launcher's source behind its branch's head
     bool UpdateAvailable(bool& available, std::string& error);
@@ -75,6 +81,7 @@ public:
 
     // a line in launcher.log and the window's log (thread safe)
     void Log(const std::string& line);
+    std::vector<std::pair<std::string, double>> stages_;  // this build's stages and their seconds
 
 private:
     void Remember(const std::string& key, const std::string& value);  // an entry of launcher.json, the others kept
