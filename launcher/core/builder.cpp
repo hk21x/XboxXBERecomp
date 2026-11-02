@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <thread>
 
 #include "core/archive.h"
 #include "core/hash.h"
@@ -61,8 +64,43 @@ void Builder::Log(const std::string& line) {
     std::lock_guard lock(log_lock_);
     std::error_code ec;
     fs::create_directories(root_, ec);
-    std::ofstream(root_ / "launcher.log", std::ios::app) << line << "\n";
+    // the time on each line of the file: how long a build's steps took can be read from it
+    std::time_t now = std::time(nullptr);
+    char stamp[16] = "";
+    if (std::tm* local = std::localtime(&now)) std::strftime(stamp, sizeof(stamp), "%H:%M:%S ", local);
+    std::ofstream(root_ / "launcher.log", std::ios::app) << stamp << line << "\n";
     if (on_log) on_log(line);
+}
+
+void Builder::StartTiming() {
+    stages_.clear();
+    std::time_t now = std::time(nullptr);
+    char date[32] = "";
+    if (std::tm* local = std::localtime(&now)) std::strftime(date, sizeof(date), "%Y-%m-%d", local);
+    Log("build started " + std::string(date) + ", " + std::to_string(std::thread::hardware_concurrency()) + " logical processors");
+}
+
+bool Builder::Timed(const std::string& stage, const std::function<bool()>& step) {
+    auto start = std::chrono::steady_clock::now();
+    bool ok = step();
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    stages_.push_back({stage, seconds});
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.1f s", seconds);
+    Log("stage " + stage + ": " + text + (ok ? "" : " (stopped)"));
+    return ok;
+}
+
+void Builder::LogTiming() {
+    double total = 0;
+    for (const auto& [stage, seconds] : stages_) total += seconds;
+    char text[64];
+    std::snprintf(text, sizeof(text), "timing: %zu stages, %.1f s in all", stages_.size(), total);
+    Log(text);
+    for (const auto& [stage, seconds] : stages_) {
+        std::snprintf(text, sizeof(text), "%9.1f s %5.1f%%  ", seconds, total > 0 ? seconds * 100 / total : 0.0);
+        Log("timing: " + (text + stage));
+    }
 }
 
 void Builder::Say(const std::string& step, const std::string& detail, double fraction) {
@@ -348,8 +386,12 @@ bool Builder::Compile(std::string& error) {
     }
     Say("Preparing the build", "the first time also downloads the libraries it uses");
     // clang links with lld (no Microsoft linker in the kit)
-    int code = platform_.Run({cmake, "--preset", "release", "-DCMAKE_LINKER_TYPE=LLD"}, src, env,
+    int code = 0;
+    Timed("configure (cmake)", [&] {
+        code = platform_.Run({cmake, "--preset", "release", "-DCMAKE_LINKER_TYPE=LLD"}, src, env,
                              [&](const std::string& line) { Log("cmake: " + line); }, &cancel);
+        return code == 0;
+    });
     if (code != 0) {
         error = "Preparing the build failed, see launcher.log";
         return false;
@@ -357,6 +399,7 @@ bool Builder::Compile(std::string& error) {
     fs::create_directories(build, ec);
     std::ofstream(seen) << tools;
     Say("Building " + game_.title, "the first build takes 30 to 90 minutes", 0);
+    Timed("compile and link (cmake --build)", [&] {
     code = platform_.Run({cmake, "--build", "out/build/release"}, src, env, [&](const std::string& line) {
             Log(line);
             // ninja: "[123/4567] Building CXX object ..."
@@ -368,6 +411,8 @@ bool Builder::Compile(std::string& error) {
                 }
             }
         }, &cancel);
+        return code == 0;
+    });
     if (code != 0) {
         error = cancel ? "cancelled" : "The build failed, see launcher.log";
         return false;
@@ -415,13 +460,17 @@ bool Builder::PathTooLong(std::string& message) const {
 
 bool Builder::BuildAll(std::string& error) {
     cancel = false;
+    StartTiming();
     auto steps = [&] {
-        if ((!Built() && PathTooLong(error)) || !LoadToolchain(plan_, error)) return false;
+        if ((!Built() && PathTooLong(error)) || !Timed("build tools list", [&] { return LoadToolchain(plan_, error); })) return false;
         for (const Tool& t : plan_.tools)
-            if (!t.optional && !InstallTool(t, error)) return false;
-        return GetSource(error) && PutXbe(error) && Compile(error) && Install(error);
+            if (!t.optional && !Timed("tool " + t.id, [&] { return InstallTool(t, error); })) return false;
+        return Timed("game source", [&] { return GetSource(error); }) && Timed("game's xbe", [&] { return PutXbe(error); }) &&
+               Compile(error) && Timed("install", [&] { return Install(error); });
     };
-    if (!steps()) {
+    bool ok = steps();
+    LogTiming();
+    if (!ok) {
         if (error != "cancelled") Log("build stopped: " + error);
         return false;
     }
