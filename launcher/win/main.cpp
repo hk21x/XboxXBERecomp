@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 
+#include "screen.h"
 #include "core/builder.h"
 #include "core/update.h"
 #include "core/util.h"
@@ -34,8 +35,6 @@ namespace fs = std::filesystem;
 using namespace launcher;
 
 namespace {
-
-constexpr const char* kLicenseUrl = "https://go.microsoft.com/fwlink/?LinkId=2179911";  // Visual Studio Build Tools
 
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
@@ -104,8 +103,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+}  // namespace
+
+namespace launcher {
+
 // the shell's own picker: a disc image (or the xbe), or a folder
-fs::path Pick(HWND owner, bool folder, const wchar_t* title = nullptr) {
+fs::path Pick(void* owner_window, bool folder, const wchar_t* title) {
+    HWND owner = static_cast<HWND>(owner_window);
     fs::path out;
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return out;
@@ -146,53 +150,9 @@ uint64_t FreeBytes(const fs::path& dir) {
     return avail.QuadPart;
 }
 
-// The window's state; the worker thread writes status and log under the lock
-struct App {
-    GameConfig game;
-    std::unique_ptr<Http> http = MakeHttp();
-    std::unique_ptr<Platform> platform = MakePlatform();
-    std::unique_ptr<Builder> builder;
-    fs::path root;
+}  // namespace launcher
 
-    GameCheck copy;
-    bool agreed = false;
-    std::atomic<bool> busy{false}, update{false}, checked_update{false};
-    // a newer release's launcher (core/update.h): offered at the top until updated or put off
-    std::mutex release_lock;
-    Release release;
-    std::atomic<bool> launcher_update{false}, later{false}, restart{false};
-    std::thread worker;
-    std::mutex lock;
-    Status status;
-    std::string error, done_message;
-    std::deque<std::string> log;
-    uint64_t build_bytes = 0;
-    fs::path music;            // the music folder imported last
-    bool music_job = false;    // the job running or last run imports the music: its result shows under Your music
-    std::string music_summary;
-
-    void Start(std::function<bool(std::string&)> job, std::string done) {
-        if (busy) return;
-        if (worker.joinable()) worker.join();
-        busy = true;
-        {
-            std::lock_guard l(lock);
-            error.clear();
-            done_message.clear();
-            status = {};
-        }
-        worker = std::thread([this, job, done] {
-            std::string e;
-            bool ok = job(e);
-            std::lock_guard l(lock);
-            if (!ok) error = e == "cancelled" ? "Stopped. Press the button again to carry on where it left off." : e;
-            else done_message = done;
-            status = {};
-            build_bytes = builder->BuildFilesBytes();
-            busy = false;
-        });
-    }
-};
+namespace {
 
 // this exe's path, and the names an update uses beside it
 fs::path SelfPath() {
@@ -209,7 +169,9 @@ fs::path Beside(const fs::path& exe, const wchar_t* ext) {
 // The release's launcher downloaded beside this one (checked by its SHA-256 where GitHub lists it, else its size),
 // then swapped in: Windows lets a running exe be renamed, not overwritten, so this one becomes <exe>.old, which the
 // next start removes. The new one starts when this window closes (App::restart).
-bool UpdateLauncher(App& app, const Release& r, std::string& error) {
+}  // namespace
+
+bool launcher::UpdateLauncher(App& app, const Release& r, std::string& error) {
     fs::path exe = SelfPath(), fresh = Beside(exe, L".new"), old = Beside(exe, L".old");
     app.builder->cancel = false;
     Progress progress = [&app](uint64_t done, uint64_t total) {
@@ -235,245 +197,6 @@ bool UpdateLauncher(App& app, const Release& r, std::string& error) {
     return true;
 }
 
-void Section(const char* title) {
-    ImGui::Spacing();
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.2f, 1), "%s", title);
-    ImGui::Separator();
-    ImGui::Spacing();
-}
-
-void Draw(App& app, HWND hwnd, ImFont* big) {
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->WorkPos);
-    ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("launcher", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    float em = ImGui::GetFontSize();
-    ImGui::PushFont(big);
-    ImGui::TextUnformatted(app.game.title.c_str());
-    ImGui::PopFont();
-    ImGui::TextDisabled("PC port launcher. Everything goes in %s", U8(app.root).c_str());
-
-    bool busy = app.busy;
-    bool built = app.builder->Built();
-
-    if (app.launcher_update && !app.later) {
-        Release r;
-        {
-            std::lock_guard l(app.release_lock);
-            r = app.release;
-        }
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "Version %s is out (this launcher is %s).", r.tag.c_str(),
-                           app.game.version.c_str());
-        ImGui::TextWrapped("Update the launcher, then build the game again with the new version. Your saves and "
-                           "settings are kept.");
-        ImGui::BeginDisabled(busy || r.launcher_url.empty());
-        if (ImGui::Button("Update the launcher")) {
-            app.music_job = false;
-            app.Start([&app, r](std::string& e) { return UpdateLauncher(app, r, e); }, "");
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("What's new") && !r.page.empty()) OpenUrl(r.page);
-        ImGui::SameLine();
-        if (ImGui::Button("Later")) app.later = true;
-    }
-
-    Section("1  Your game");
-    if (app.copy.ok) {
-        ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "%s", app.copy.release.c_str());
-        ImGui::SameLine();
-        ImGui::TextWrapped("%s", U8(app.copy.path).c_str());
-    } else {
-        ImGui::TextWrapped("Choose your copy of the game: a disc image (.iso) of your own disc, or a folder with the "
-                           "disc's files. Nothing is copied off the internet: the game comes from your disc.");
-        if (!app.copy.error.empty()) ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", app.copy.error.c_str());
-    }
-    ImGui::BeginDisabled(busy);
-    for (int folder = 0; folder < 2; folder++) {
-        if (folder) ImGui::SameLine();
-        if (ImGui::Button(folder ? "Choose a folder..." : "Choose a disc image...")) {
-            fs::path p = Pick(hwnd, folder != 0);
-            if (!p.empty()) {
-                app.copy = CheckGame(app.game, p);
-                std::string e;
-                if (app.copy.ok && !app.builder->SetGame(app.copy, e)) app.copy.ok = false, app.copy.error = e;
-            }
-        }
-    }
-    ImGui::EndDisabled();
-
-    Section("2  Build");
-    std::string error, done;
-    Status st;
-    {
-        std::lock_guard l(app.lock);
-        error = app.error;
-        done = app.done_message;
-        st = app.status;
-    }
-    if (busy) {
-        ImGui::TextUnformatted(st.step.empty() ? "Starting..." : st.step.c_str());
-        if (st.fraction >= 0) ImGui::ProgressBar(float(st.fraction), ImVec2(-1, 0), st.detail.empty() ? nullptr : st.detail.c_str());
-        else {
-            ImGui::ProgressBar(-float(ImGui::GetTime()), ImVec2(-1, 0), "");
-            if (!st.detail.empty()) ImGui::TextDisabled("%s", st.detail.c_str());
-        }
-        if (ImGui::Button("Stop")) app.builder->cancel = true;
-        ImGui::SameLine();
-        ImGui::TextDisabled("It carries on from here next time.");
-    } else {
-        if (!built) {
-            ImGui::TextWrapped("The game is built on this PC from your disc. This downloads about 1.4 GB of build tools "
-                               "(Clang, CMake, Git and Microsoft's C++ libraries and Windows SDK) into the tools folder; "
-                               "nothing is installed in Windows. The first build takes 30 to 90 minutes and needs about "
-                               "3 GB free, plus room for your copy of the game.");
-            ImGui::TextDisabled("Free on this drive: %s", Megabytes(FreeBytes(app.root)).c_str());
-            ImGui::Checkbox("I accept the license terms for Microsoft's C++ libraries and Windows SDK", &app.agreed);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Read them")) OpenUrl(kLicenseUrl);
-        } else if (app.update) {
-            std::string was = app.builder->BuiltVersion();
-            if (IsReleaseVersion(app.game.version))
-                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "Version %s of the game is ready to build (yours: %s).",
-                                   app.game.version.c_str(), was.empty() ? "an earlier one" : was.c_str());
-            else
-                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1, 1), "A new version is available.");
-        } else {
-            ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "Built and ready.");
-        }
-        std::string too_long;
-        bool long_path = !built && app.builder->PathTooLong(too_long);  // built: the SDK is unpacked already
-        if (long_path) ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", too_long.c_str());
-        bool can = app.copy.ok && (built || app.agreed) && !long_path;
-        ImGui::BeginDisabled(!can);
-        const char* label = !built ? "Build" : app.update ? "Update" : "Rebuild";
-        if (ImGui::Button(label, ImVec2(10 * em, 0))) {
-            if (!built) {
-                std::ofstream(app.root / "agreed.txt") << kLicenseUrl;
-            }
-            app.update = false;
-            app.music_job = false;
-            app.Start([&app](std::string& e) { return app.builder->BuildAll(e); }, "The game is built. Press Play.");
-        }
-        ImGui::EndDisabled();
-        if (app.music_job) {
-        } else if (!error.empty()) {
-            ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", error.c_str());
-            if (ImGui::SmallButton("Open launcher.log")) OpenUrl(U8(app.root / "launcher.log"));
-        } else if (!done.empty()) {
-            ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "%s", done.c_str());
-        }
-    }
-
-    Section("3  Play");
-    ImGui::BeginDisabled(busy || !built || !app.copy.ok);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.55f, 0.25f, 1));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.65f, 0.3f, 1));
-    ImGui::PushFont(big);
-    if (ImGui::Button("Play", ImVec2(10 * em, 0))) {
-        std::string e;
-        if (!app.builder->Launch(e)) {
-            std::lock_guard l(app.lock);
-            app.error = e;
-        }
-    }
-    ImGui::PopFont();
-    ImGui::PopStyleColor(2);
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginGroup();
-    ImGui::BeginDisabled(!built);
-    if (ImGui::Button("Open the game's folder")) OpenFolder(app.builder->PlayDir());
-    ImGui::EndDisabled();
-    uint64_t build_bytes;
-    {
-        std::lock_guard l(app.lock);
-        build_bytes = app.build_bytes;
-    }
-    ImGui::BeginDisabled(busy || !built || build_bytes == 0);
-    std::string clean = "Remove the build files (" + Megabytes(build_bytes) + ")";
-    if (ImGui::Button(clean.c_str()))
-        app.music_job = false, app.Start([&app](std::string& e) { return app.builder->RemoveBuildFiles(e); },
-                  "Build files removed. An update builds everything again.");
-    ImGui::EndDisabled();
-    ImGui::EndGroup();
-    ImGui::TextDisabled("In the game: F1 opens the PC settings. Saves, settings and logs stay in the game's folder.");
-
-    if (app.game.music) {
-        Section("4  Your music");
-        ImGui::TextWrapped("The game plays Xbox custom soundtracks. Choose a folder of your own music: each folder in it "
-                           "becomes a soundtrack (MP3, FLAC, OGG, Opus, M4A, AAC, WAV, WMA, AIFF), and the songs in the "
-                           "folder itself one more. They are converted for the game (ffmpeg, about 90 MB, downloaded "
-                           "the first time; nothing is installed). In the game they are with the custom soundtracks.");
-        if (!app.music.empty()) ImGui::TextDisabled("Your music: %s", U8(app.music).c_str());
-        auto import = [&app](const fs::path& folder) {
-            app.music_job = true;
-            app.Start([&app, folder](std::string& e) {
-                std::string summary;
-                bool ok = app.builder->ImportMusic(folder, summary, e);
-                std::lock_guard l(app.lock);
-                if (ok) app.music = folder, app.music_summary = summary;
-                return ok;
-            }, "Your music is ready.");
-        };
-        ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Choose a music folder...")) {
-            fs::path p = Pick(hwnd, true, L"Choose a folder of your music");
-            if (!p.empty()) import(p);
-        }
-        if (!app.music.empty()) {
-            ImGui::SameLine();
-            if (ImGui::Button("Update my music")) import(app.music);
-            ImGui::SameLine();
-            ImGui::TextDisabled("after adding or changing songs: only those are converted");
-        }
-        ImGui::EndDisabled();
-        if (app.music_job && !busy) {
-            if (!error.empty()) {
-                ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%s", error.c_str());
-                if (ImGui::SmallButton("Open launcher.log##music")) OpenUrl(U8(app.root / "launcher.log"));
-            } else if (!done.empty()) {
-                std::string summary;
-                {
-                    std::lock_guard l(app.lock);
-                    summary = app.music_summary;
-                }
-                ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1), "%s %s", done.c_str(), summary.c_str());
-            }
-        }
-    }
-
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Details")) {
-        ImGui::BeginChild("log", ImVec2(0, 0), ImGuiChildFlags_Border, ImGuiWindowFlags_HorizontalScrollbar);
-        {
-            std::lock_guard l(app.lock);
-            for (const std::string& line : app.log) ImGui::TextUnformatted(line.c_str());
-        }
-        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - em) ImGui::SetScrollHereY(1.0f);
-        ImGui::EndChild();
-    }
-    ImGui::End();
-}
-
-void Style(float scale) {
-    ImGuiStyle& s = ImGui::GetStyle();
-    ImGui::StyleColorsDark();
-    s.WindowPadding = ImVec2(24, 20);
-    s.FramePadding = ImVec2(12, 7);
-    s.ItemSpacing = ImVec2(10, 8);
-    s.FrameRounding = 4;
-    s.GrabRounding = 4;
-    s.Colors[ImGuiCol_WindowBg] = ImVec4(0.09f, 0.09f, 0.1f, 1);
-    s.Colors[ImGuiCol_Button] = ImVec4(0.25f, 0.27f, 0.32f, 1);
-    s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.33f, 0.36f, 0.42f, 1);
-    s.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.95f, 0.55f, 0.2f, 1);
-    s.ScaleAllSizes(scale);
-}
-
-}  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -564,22 +287,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    Style(scale);
-    ImFont* body = nullptr;
-    ImFont* big = nullptr;
+    ScreenStyle(scale);
     wchar_t windir[MAX_PATH];
     GetWindowsDirectoryW(windir, MAX_PATH);
-    std::string font = U8(fs::path(windir) / "Fonts" / "segoeui.ttf");
-    if (fs::exists(fs::path(windir) / "Fonts" / "segoeui.ttf", ec)) {
-        body = io.Fonts->AddFontFromFileTTF(font.c_str(), 17.0f * scale);
-        big = io.Fonts->AddFontFromFileTTF(font.c_str(), 28.0f * scale);
-    }
-    if (!body) {
-        ImFontConfig cfg;
-        cfg.SizePixels = 13.0f * scale;
-        body = io.Fonts->AddFontDefault(&cfg);
-        big = body;
-    }
+    ImFont* big = ScreenFonts(fs::path(windir) / "Fonts", scale);
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
 
@@ -600,9 +311,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-        Draw(app, hwnd, big);
+        DrawScreen(app, hwnd, big);
         ImGui::Render();
-        const float clear[4] = {0.09f, 0.09f, 0.1f, 1};
+        const float clear[4] = {62 / 255.0f, 70 / 255.0f, 55 / 255.0f, 1};  // classic::kWindow
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
         g_context->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
