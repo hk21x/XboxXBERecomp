@@ -200,7 +200,7 @@ std::vector<Target> StaleTargets(const GameFiles& game, const std::vector<Image>
     for (const Image& image : images) {
         Target target{&image};
         if (!ReadXbe(game, image.xbe.c_str(), target.xbe)) {
-            LOGR("Game code: no %s in the game files, %ls is not built", image.xbe.c_str(), image.exe.c_str());
+            LOGI("Game code: %s is not on this disc, skipped for %ls", image.xbe.c_str(), image.exe.c_str());  // discs differ
             continue;
         }
         if (!StampFor(image, target.xbe, target.stamp) || Current(target)) continue;

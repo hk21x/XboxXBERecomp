@@ -602,7 +602,8 @@ bool Builder::BuildPackage(std::string& error) {
                     }
                     Say("Building " + game_.title + " for this PC", detail, total ? double(bytes) / double(total) : -1);
                 } else {
-                    Log("game: " + line);
+                    // the game's own log has its startup and settings: only what the build says belongs here
+                    if (line.rfind("[", 0) != 0 || line.find("Game code:") != std::string::npos) Log("game: " + line);
                     if (line.rfind("failed ", 0) == 0) failed = line.substr(7);
                 }
             }, &cancel);
