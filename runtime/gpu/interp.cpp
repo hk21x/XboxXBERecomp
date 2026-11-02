@@ -402,13 +402,31 @@ bool Interpolating::Match() {
                 }
             if (!same && moves.size() < kMostMoves) moves.push_back(m);
         }
+        const auto camera_of = [&](uint32_t rt) {
+            const Move* camera = nullptr;
+            for (const Move& o : moves)
+                if (o.rt == rt && (!camera || o.votes > camera->votes)) camera = &o;
+            return camera;
+        };
+        // a program is the scenery's when most of what it draws goes with the camera; a car's goes with the car
+        std::unordered_map<uint32_t, std::array<int, 2>> program;
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            double d[4][4];
+            if (!camera || !move_of(r, d)) continue;
+            auto& seen = program[r.s->vs_handle];
+            seen[0]++;
+            if (same_move(d, camera->d)) seen[1]++;
+        }
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             if (r.kind != Rec::Draw || r.prev >= 0 || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
-            const Move* camera = nullptr;
-            for (const Move& o : moves)
-                if (o.rt == r.s->rt.data && (!camera || o.votes > camera->votes)) camera = &o;
+            const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
+            const auto seen = program.find(r.s->vs_handle);
+            if (seen == program.end() || seen->second[1] * 2 <= seen->second[0]) continue;
             const Rec* near = nullptr;
             float nearest = 1e30f;
             for (size_t j = 0; j < count_; j++) {
