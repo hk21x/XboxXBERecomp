@@ -228,6 +228,9 @@ struct GameInfo {
     bool (*step_interpolation)() = nullptr;
     // while true, those frames carry on past the step instead of leading up to it: no delay, for what the player aims
     bool (*step_ahead)() = nullptr;
+    // the title draws its world a few vertices at a time with nothing changed between (Agent Under Fire: thousands of draws a
+    // frame, nine in ten alike): those runs reach the renderer as one draw, each costing its time per draw (render_thread.cpp)
+    bool merge_draws = false;
     // the aspect setting's "from the screen's shape" follows an ultrawide screen instead of stopping at 16:9
     bool auto_fills_screen = false;
     // a title's music decoded to PCM streams against its other sounds, read on the audio thread at each mix (effects the
