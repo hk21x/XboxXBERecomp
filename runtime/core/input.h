@@ -12,6 +12,7 @@ struct Pad {
     uint16_t buttons = 0;  // dpad up/down/left/right, start, back, left thumb, right thumb
     uint8_t analog[8] = {};  // A B X Y black white left trigger right trigger
     int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+    bool wheel = false;  // a steering wheel steers it: the port reports itself a wheel (XInputGetCapabilities)
 };
 
 // every input of the console controller, each 0 to 1: buttons, triggers, and each stick direction on its own
@@ -25,7 +26,8 @@ const char* ControlName(int c);  // settings file name, "dpad_up" ...
 const char* ControlLabel(int c); // shown to the player, "D-pad up" ...
 int ControlByName(const char* name);  // -1 when unknown
 
-void Init();  // window thread, before boot
+void Init();  // window thread, before boot; the game code window starts it earlier
+uint16_t HeldOnAnyController();  // face buttons as XINPUT_GAMEPAD_A/B/X/Y masks, GameInfo::pad left out
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
 // raw mouse movement, from the window thread (WM_INPUT): read into controller 1's right stick (Settings::mouse_look)
@@ -51,6 +53,8 @@ void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)
 uint32_t HeldControls();
+// what is held now stays from the game until let go (what closed the settings window)
+void SwallowHeld();
 
 // a steering wheel and the rest of a rig through DirectInput (core/wheel.cpp): every game controller DirectInput lists
 // but Xbox pads (SDL's), each control bound to one of them (app::Settings::WheelBind), merged into controller 1
@@ -81,8 +85,9 @@ struct WheelInfo {
 };
 void WheelInit(void* hwnd);  // with the game window (force feedback needs it): starts the wheel thread
 void WheelSetup();           // the bindings again from app::Get(), after the settings window changed them
-// the rig's console inputs, 0 to 1 each in Control order; false when no binding reads a device
-bool WheelRead(float* v);
+// the rig's console inputs, 0 to 1 each in Control order; false when no binding reads a device. steers: the steering
+// is bound to a device that is plugged in
+bool WheelRead(float* v, bool* steers = nullptr);
 void WheelFeedback(const WheelFeel& feel, uint16_t rumble_left, uint16_t rumble_right);
 WheelInfo Wheel();           // the settings window's view
 void WheelTestForce(float level);  // -1 left to 1 right, for half a second

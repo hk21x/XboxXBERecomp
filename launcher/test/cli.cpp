@@ -5,12 +5,16 @@
 //   launcher_cli <game.json> <root> source             clone or update the source, put the xbe in it
 //   launcher_cli <game.json> <root> env                the build's environment
 //   launcher_cli <game.json> <root> latest [version]   the newest release, and whether a launcher of version is behind
+//   launcher_cli <game.json> <root> prebuilt <copy>    a prebuilt install from a zip beside root (test of BuildPackage)
+//   launcher_cli <game.json> <root> timing             the stage timing on two short stages, one that stops
 //   launcher_cli hash <file>                           SHA-256 and SHA-1
 //   launcher_cli untar <file.tar.xz> <dest> [keep...]  unpack with keep rules (strip 1)
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <thread>
 
 #include "core/builder.h"
 #include "core/hash.h"
@@ -89,6 +93,30 @@ int main(int argc, char** argv) {
             std::printf("  a launcher of %s: %s\n", argv[4],
                         !IsReleaseVersion(argv[4]) ? "dev, offered nothing"
                         : CompareVersions(r.tag, argv[4]) > 0 ? "behind: offered the update" : "up to date");
+        return 0;
+    }
+    if (cmd == "prebuilt") {  // argv[4] the copy of the game, a package zip beside <root>
+        GameCheck copy;
+        copy.ok = true, copy.path = argv[4];
+        std::string err;
+        if (!b.SetGame(copy, err) || !b.BuildPackage(err)) return std::printf("prebuilt: %s\n", err.c_str()), 1;
+        std::printf("prebuilt ok, built=%d\n", int(b.Built()));
+        return 0;
+    }
+    if (cmd == "upgrade") {  // the install in <root> as it is (its remembered game), then the old tools removed
+        std::string err;
+        std::printf("legacy=%d old=%llu\n", int(b.Legacy()), (unsigned long long)b.OldBuildBytes());
+        if (!b.BuildPackage(err)) return std::printf("upgrade: %s\n", err.c_str()), 1;
+        std::printf("built=%d legacy=%d\n", int(b.Built()), int(b.Legacy()));
+        if (!b.RemoveOldBuild(err)) return std::printf("remove: %s\n", err.c_str()), 1;
+        std::printf("old after=%llu\n", (unsigned long long)b.OldBuildBytes());
+        return 0;
+    }
+    if (cmd == "timing") {
+        b.StartTiming();
+        b.Timed("short", [] { std::this_thread::sleep_for(std::chrono::milliseconds(300)); return true; });
+        b.Timed("stops", [] { std::this_thread::sleep_for(std::chrono::milliseconds(100)); return false; });
+        b.LogTiming();
         return 0;
     }
     Plan plan;

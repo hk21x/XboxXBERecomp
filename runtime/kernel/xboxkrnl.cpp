@@ -363,8 +363,14 @@ KERNEL_EXPORT(217, NtQueryVirtualMemory, 2) {
     return kSuccess;
 }
 
-KERNEL_EXPORT(165, MmAllocateContiguousMemory, 1) { return mem::AllocContiguous(a[0], 0, 0xFFFFFFFF, 0); }
-KERNEL_EXPORT(166, MmAllocateContiguousMemoryEx, 5) { return mem::AllocContiguous(a[0], a[1], a[2], a[3]); }
+KERNEL_EXPORT(165, MmAllocateContiguousMemory, 1) {
+    if (mem::MemLogLevel() >= 2) LOGI("memory: MmAllocateContiguousMemory %X from %08X", a[0], R32(ctx.esp));
+    return mem::AllocContiguous(a[0], 0, 0xFFFFFFFF, 0);
+}
+KERNEL_EXPORT(166, MmAllocateContiguousMemoryEx, 5) {
+    if (mem::MemLogLevel() >= 2) LOGI("memory: MmAllocateContiguousMemoryEx %X from %08X", a[0], R32(ctx.esp));
+    return mem::AllocContiguous(a[0], a[1], a[2], a[3]);
+}
 KERNEL_EXPORT(171, MmFreeContiguousMemory, 1) {
     mem::FreeContiguous(a[0]);
     return 0;
@@ -376,7 +382,11 @@ KERNEL_EXPORT(176, MmLockUnlockPhysicalPage, 2) { return 0; }
 KERNEL_EXPORT(180, MmQueryAllocationSize, 1) { return mem::AllocationSize(a[0]); }
 KERNEL_EXPORT(182, MmSetAddressProtect, 3) { return 0; }
 KERNEL_EXPORT(179, MmQueryAddressProtect, 1) { return 4; }  // PAGE_READWRITE
-KERNEL_EXPORT(167, MmAllocateSystemMemory, 2) { return mem::AllocSystem(a[0], 0x1000); }
+KERNEL_EXPORT(167, MmAllocateSystemMemory, 2) {
+    uint32_t va = mem::AllocSystem(a[0], 0x1000);
+    if (mem::MemLogLevel() >= 2) LOGI("memory: MmAllocateSystemMemory %X from %08X at %08X", a[0], R32(ctx.esp), va);
+    return va;
+}
 KERNEL_EXPORT(172, MmFreeSystemMemory, 2) {
     mem::FreeSystem(a[0]);
     return a[1];
@@ -391,8 +401,16 @@ KERNEL_EXPORT(170, MmDeleteKernelStack, 2) {
     mem::FreeStack(a[0]);
     return 0;
 }
-KERNEL_EXPORT(15, ExAllocatePoolWithTag, 2) { return mem::AllocSystem(a[0]); }
-KERNEL_EXPORT(14, ExAllocatePool, 1) { return mem::AllocSystem(a[0]); }
+KERNEL_EXPORT(15, ExAllocatePoolWithTag, 2) {
+    uint32_t va = mem::AllocSystem(a[0]);
+    if (mem::MemLogLevel() >= 2) LOGI("memory: ExAllocatePoolWithTag %X from %08X at %08X", a[0], R32(ctx.esp), va);
+    return va;
+}
+KERNEL_EXPORT(14, ExAllocatePool, 1) {
+    uint32_t va = mem::AllocSystem(a[0]);
+    if (mem::MemLogLevel() >= 2) LOGI("memory: ExAllocatePool %X from %08X at %08X", a[0], R32(ctx.esp), va);
+    return va;
+}
 KERNEL_EXPORT(174, MmIsAddressValid, 1) { return mem::IsCommitted(a[0]); }
 // every page stays read write
 KERNEL_EXPORT(204, NtProtectVirtualMemory, 4) {
@@ -1258,13 +1276,19 @@ static uint32_t VideoFlags() {
     return (app::Widescreen() ? 0x00010000 : 0) | 0x00080000 | (PalConsole() ? 0x00400000 : 0);
 }
 // XC_FACTORY_AV_REGION: NTSC-M (standard 1 in bits 8 to 15), or PAL-I (3)
+// XC_LANGUAGE: the language setting, for a title offering it; XBE_LANGUAGE (the setting's numbers) to test one
+static uint32_t Language() {
+    if (const char* e = std::getenv("XBE_LANGUAGE")) return uint32_t(std::atoi(e));
+    return app::kGame.languages.empty() ? 1 : app::Get().language;
+}
+
 static uint32_t AvRegion() { return PalConsole() ? 0x00800300 : 0x00400100; }
 
 KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
     uint32_t index = a[0], type_out = a[1], value = a[2], len = a[3], result_len = a[4];
     uint32_t v = 0;
     switch (index) {
-        case 7: v = 1; break;                      // XC_LANGUAGE english
+        case 7: v = Language(); break;             // XC_LANGUAGE
         case 8: v = VideoFlags(); break;          // XC_VIDEO_FLAGS
         case 9: v = 0x00010001; break;             // XC_AUDIO_FLAGS stereo
         case 0x103: v = AvRegion(); break;         // XC_FACTORY_AV_REGION
@@ -1277,7 +1301,7 @@ KERNEL_EXPORT(24, ExQueryNonVolatileSetting, 5) {
         // the whole EEPROM image: user settings live at 0xC0 onwards
         if (type_out) W32(type_out, 3);  // REG_BINARY
         if (value && len >= 0x100) {
-            W32(value + 0xE8, 1);                     // language
+            W32(value + 0xE8, Language());            // language
             W32(value + 0xEC, VideoFlags());          // video flags
             W32(value + 0xF0, 0x00010001);            // audio flags
             W32(value + 0x58, AvRegion());            // factory video standard

@@ -77,7 +77,8 @@ struct Target {
     uint32_t data = 0, bytes = 0;
     uint64_t epoch = 0, sig = 0;  // last lock seen, guest memory as last matched
     bool drawn = false;           // the GPU wrote it since the last readback
-    bool linear32 = true;         // a 32 bit linear surface in guest memory, the only kind written back
+    bool linear32 = true;         // a 32 bit linear surface in guest memory, written back row by row
+    bool swizzled32 = false;      // a 32 bit swizzled one, written back in Morton order (a title reading it as data)
     std::vector<uint8_t> read;    // what Sync left in guest memory
     // MSAA: a multisampled twin that draws go to, resolved into res before anything reads res
     ComPtr<ID3D11Texture2D> ms;
@@ -125,7 +126,7 @@ struct BlitOptions {
     bool alpha = false;    // the source's alpha, else 1
     uint32_t taps = 1;     // n x n box filter per pixel
     bool over = false;     // premultiplied over the target, which keeps its alpha
-    bool fxaa = false;     // fast approximate antialiasing (the finished frame)
+    bool final = false;    // the finished frame: psfinal with the settings' FXAA and sharpening (taps, alpha unused)
 };
 
 // a full screen triangle that writes a colour or a depth, for clears of part of a target
@@ -269,7 +270,8 @@ private:
     // Present's steps
     void ResizeSwap();
     void UploadGammaRamp();
-    void BlitFrame(Target& t);
+    void BlitFrame(ID3D11ShaderResourceView* frame);
+    ID3D11ShaderResourceView* SmaaFrame(Target& t);  // Settings::smaa: the frame through SMAA's passes, null when it cannot
     void RenderUi();
     void ReleaseOldTextures();
     void CountFps();
@@ -332,7 +334,7 @@ private:
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                          GuestExtent size, DrawConstants& c);
     void SetTexturesAndSamplers(const State& s, const Assembled& a, const DrawTextures& stages);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc);
     void DrawGeometry(const Assembled& a);
     uint32_t Reserve(Ring& r, uint32_t bytes);
     uint32_t Push(Ring& r, uint32_t at, const void* p, uint32_t bytes);
@@ -373,6 +375,15 @@ private:
     ComPtr<ID3D11BlendState> opaque_, over_;
     ComPtr<ID3D11SamplerState> pass_samplers_[4];  // linear, then point; all clamp
     ComPtr<ID3D11Buffer> vsc_cb_, dc_cb_, pass_cb_;
+    // SMAA on the finished frame: edges, weights, the result; its two lookups; the size they were made for
+    struct SmaaPass {
+        ComPtr<ID3D11RenderTargetView> rtv;
+        ComPtr<ID3D11ShaderResourceView> srv;
+    } smaa_[3];
+    ComPtr<ID3D11ShaderResourceView> smaa_area_, smaa_search_;
+    uint32_t smaa_w_ = 0, smaa_h_ = 0;
+    UINT swap_flags_ = 0;
+    HANDLE latency_wait_ = nullptr;  // Settings::low_latency: the swap chain's, waited on after each present
     ComPtr<ID3D11Texture2D> lut_;
     ComPtr<ID3D11ShaderResourceView> lut_srv_;
     Ring vring_, iring_;
@@ -473,12 +484,18 @@ bool D3D11Backend::CreateSwapChain(HWND hwnd) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = kBuffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    swap_flags_ = (tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (app::Get().low_latency ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
+    sd.Flags = swap_flags_;
     if (FAILED(factory_->CreateSwapChainForHwnd(dev_.Get(), hwnd, &sd, nullptr, nullptr, &swap_))) {
         LOGE("d3d11: no swap chain");
         return false;
     }
     factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+    if (ComPtr<IDXGISwapChain2> sc2; app::Get().low_latency && SUCCEEDED(swap_.As(&sc2))) {
+        sc2->SetMaximumFrameLatency(1);
+        latency_wait_ = sc2->GetFrameLatencyWaitableObject();
+        LOGR("d3d11: low latency, a frame held");
+    }
     CreateBackBufferView();
     return true;
 }
@@ -627,6 +644,8 @@ Target* D3D11Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     t.data = data;
     TextureDesc d;
     t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
+    t.swizzled32 = !depth && !t.linear32 && Describe(s.header, d) && Format(d.format).swizzled &&
+                   !Format(d.format).compressed && Format(d.format).bits == 32;
     t.bytes = depth ? sw * sh * 4 : GuestPitch(sw) * sh;
     t.epoch = DirtyEpoch(data);
     t.sig = SurfaceSig(data, t.bytes);
@@ -767,9 +786,9 @@ void D3D11Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
     if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
     Target& t = it->second;
-    // pixels written back are 32 bit linear rows: over a narrower or swizzled surface they would run past it
-    if (!t.linear32) {
-        LOG_FIRST(8, "d3d11: read-back of %08X skipped, not a 32 bit linear surface", data);
+    // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
+    if (!t.linear32 && !t.swizzled32) {
+        LOG_FIRST(8, "d3d11: read-back of %08X skipped, not a 32 bit surface", data);
         return;
     }
     ComPtr<ID3D11Texture2D> src = PrepareCopySource(t);
@@ -777,7 +796,13 @@ void D3D11Backend::Sync(uint32_t data, uint32_t) {
     if (!src || !ReadBack(src.Get(), t.gw, t.gh, px)) return;
     uint32_t pitch = GuestPitch(t.gw);
     uint8_t* guest = static_cast<uint8_t*>(kernel::HostPtr(data));
-    for (uint32_t y = 0; y < t.gh; y++) std::memcpy(guest + size_t(y) * pitch, &px[size_t(y) * t.gw * 4], t.gw * 4);
+    if (t.swizzled32) {
+        for (uint32_t y = 0; y < t.gh; y++)
+            for (uint32_t x = 0; x < t.gw; x++)
+                std::memcpy(guest + size_t(SwizzledOffset(x, y, t.gw, t.gh)) * 4, &px[(size_t(y) * t.gw + x) * 4], 4);
+    } else {
+        for (uint32_t y = 0; y < t.gh; y++) std::memcpy(guest + size_t(y) * pitch, &px[size_t(y) * t.gw * 4], t.gw * 4);
+    }
     t.read = std::move(px);
     t.drawn = false;
     t.sig = SurfaceSig(t.data, t.bytes);
@@ -1014,11 +1039,14 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 // src over the bound viewport and scissor
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
+    const app::Settings& st = app::Get();
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
-    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, o.fxaa ? "psfxaa" : "psmain", "ps_5_0", h), h);
-    if (!ps && o.fxaa) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
+    ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h), h);
+    if (!ps && final) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), 1.0f};
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
     FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
@@ -1352,15 +1380,17 @@ bool SameTexture(const Tex& tx, const TextureDesc& d) {
 // a texture in guest memory: made again when its layout changed, uploaded again when its bytes did
 ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d,
                                                          const FormatInfo& fi, DrawTextures& stages) {
-    if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
+    // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
+    if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
+        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return srv;
         }
     }
     if (draw_2d_) Sharpen2D(d);
+    else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -1391,6 +1421,10 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
 ID3D11ShaderResourceView* D3D11Backend::BindReplacement(const Replacement& r, const TextureDesc& d, uint32_t& levels) {
     constexpr uint32_t kFmtA8R8G8B8 = 0x06;
     const uint64_t key = uint64_t(0xFFFFFFFFu) << 32 | d.data;  // no palette is at the top of memory
+    if (auto had = textures_.find(key); r.sharpened && (had == textures_.end() || !had->second.res || had->second.sig != r.version) &&
+                                        !TakePictureBudget(presents_, r))
+        return nullptr;
+    const auto load_start = std::chrono::steady_clock::now();
     Tex& tx = textures_[key];
     if (tx.frame != presents_ + 1 && !ReplacementHolds(r)) {
         textures_.erase(key);
@@ -1420,6 +1454,9 @@ ID3D11ShaderResourceView* D3D11Backend::BindReplacement(const Replacement& r, co
             h = std::max(h / 2, 1u);
         }
         tx.sig = r.version;
+        // how long a picture really takes, for a hitch to be read from the log
+        const double load_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_start).count();
+        if (load_ms > 4) LOG_FIRST(16, "d3d11: picture for %08X (%ux%u) took %.1f ms to load", d.data, r.width, r.height, load_ms);
     }
     levels = tx.levels;
     return tx.srv.Get();
@@ -1628,20 +1665,25 @@ void D3D11Backend::SetTexturesAndSamplers(const State& s, const Assembled& a, co
 }
 
 // the viewport covers the target, the guest viewport is in the shader; the scissor clips to it
-void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw) {
+void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc) {
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
     float W = float(b->w), H = float(b->h);
     D3D11_VIEWPORT vp{0, 0, W, H, 0, 1};
     float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
-    LONG x0 = LONG(s.viewport.x * sx);
+    LONG x0 = LONG(SqueezedX(dc.hud, s.viewport.x) * sx);
     LONG y0 = LONG(s.viewport.y * sy);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
+    LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sx));
+        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
         y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(s.scissors[2] * sx));
+        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
         y1 = std::min(y1, LONG(s.scissors[3] * sy));
+    }
+    if (s.squeeze_margin) {  // only the margin the squeezed picture leaves on that side
+        const LONG edge = LONG(SqueezedX(dc.hud, s.squeeze_margin < 0 ? 0.0f : dc.hud[1] * 2) * sx);
+        x0 = s.squeeze_margin < 0 ? 0 : edge;
+        x1 = s.squeeze_margin < 0 ? edge : LONG(W);
     }
     D3D11_RECT sc{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)), std::clamp<LONG>(x1, 0, LONG(W)),
                   std::clamp<LONG>(y1, 0, LONG(H))};
@@ -1726,6 +1768,7 @@ void D3D11Backend::DrawGeometry(const Assembled& a) {
 }
 
 void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
         Clear(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
         return;
@@ -1754,6 +1797,9 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // the pixel shader made for the textures
     PixelKey pk = MakePixelKey(s, stages.info);
     pk.quad = sh.quad;
+    // alpha tested, not blended, onto MSAA twins: Settings::alpha_coverage (not quads, whose shader is rewritten)
+    if (app::Get().alpha_coverage && bound_ms_ && !sh.quad && SimpleState(s, kMAlphaTestEnable) && !SimpleState(s, kMBlendEnable))
+        pk.coverage = msaa_;
     // D3DZB_USEW draws write w as their depth, as the console does; XBE_WBUFFER=0 goes back to z / w
     static const bool wbuffer = [] {
         const char* e = std::getenv("XBE_WBUFFER");
@@ -1820,7 +1866,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     SqueezeBeyond(s, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, c);
 
     // geometry, counted while the title runs a visibility test
     ComPtr<ID3D11Query> query;
@@ -1912,14 +1958,58 @@ void D3D11Backend::ResizeSwap() {
     ctx_->OMSetRenderTargets(0, nullptr, nullptr);
     Unbind();
     bb_rtv_.Reset();
-    swap_->ResizeBuffers(kBuffers, w, h, kBgra, tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+    swap_->ResizeBuffers(kBuffers, w, h, kBgra, swap_flags_);
     CreateBackBufferView();
     bb_w_ = w;
     bb_h_ = h;
 }
 
 // the frame at its shape (16:9 or 4:3, ultrawide the screen's), centred on black
-void D3D11Backend::BlitFrame(Target& t) {
+ID3D11ShaderResourceView* D3D11Backend::SmaaFrame(Target& t) {
+    if (!smaa_area_) {
+        auto lookup = [&](DXGI_FORMAT fmt, uint32_t w, uint32_t h, const unsigned char* bytes, uint32_t pitch, ComPtr<ID3D11ShaderResourceView>& srv) {
+            D3D11_TEXTURE2D_DESC td = Texture2DDesc(fmt, w, h, D3D11_BIND_SHADER_RESOURCE);
+            D3D11_SUBRESOURCE_DATA init{bytes, pitch, 0};
+            ComPtr<ID3D11Texture2D> tex;
+            return SUCCEEDED(dev_->CreateTexture2D(&td, &init, &tex)) && SUCCEEDED(dev_->CreateShaderResourceView(tex.Get(), nullptr, &srv));
+        };
+        if (!lookup(DXGI_FORMAT_R8G8_UNORM, kSmaaAreaWidth, kSmaaAreaHeight, kSmaaArea, kSmaaAreaWidth * 2, smaa_area_) ||
+            !lookup(DXGI_FORMAT_R8_UNORM, kSmaaSearchWidth, kSmaaSearchHeight, kSmaaSearch, kSmaaSearchWidth, smaa_search_)) {
+            smaa_area_.Reset();
+            return nullptr;
+        }
+    }
+    if (smaa_w_ != t.w || smaa_h_ != t.h) {
+        smaa_w_ = t.w;
+        smaa_h_ = t.h;
+        for (auto& p : smaa_) {
+            ComPtr<ID3D11Texture2D> tex;
+            D3D11_TEXTURE2D_DESC td = Texture2DDesc(kBgra, t.w, t.h, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+            if (FAILED(dev_->CreateTexture2D(&td, nullptr, &tex)) || FAILED(dev_->CreateRenderTargetView(tex.Get(), nullptr, &p.rtv)) ||
+                FAILED(dev_->CreateShaderResourceView(tex.Get(), nullptr, &p.srv))) {
+                smaa_w_ = 0;
+                return nullptr;
+            }
+        }
+    }
+    const float c[8] = {0, 0, 1, 1, 1.0f / t.w, 1.0f / t.h, float(t.w), float(t.h)};
+    auto pass = [&](const char* vse, const char* pse, SmaaPass& dst, std::initializer_list<ID3D11ShaderResourceView*> srv) {
+        uint64_t h;
+        ID3D11VertexShader* vs = VertexShader(Compile(kSmaaHlsl, vse, "vs_5_0", h), h);
+        ID3D11PixelShader* ps = PixelShader(Compile(kSmaaHlsl, pse, "ps_5_0", h), h);
+        if (!vs || !ps) return false;
+        SetPassTarget(dst.rtv.Get(), nullptr, t.w, t.h);
+        FullScreen(vs, ps, c, 8, srv.begin(), uint32_t(srv.size()), opaque_.Get(), no_depth_.Get());
+        return true;
+    };
+    if (!pass("vsedge", "psedge", smaa_[0], {t.srv.Get()}) ||
+        !pass("vsweight", "psweight", smaa_[1], {smaa_[0].srv.Get(), smaa_area_.Get(), smaa_search_.Get()}) ||
+        !pass("vsblend", "psblend", smaa_[2], {t.srv.Get(), smaa_[1].srv.Get()}))
+        return nullptr;
+    return smaa_[2].srv.Get();
+}
+
+void D3D11Backend::BlitFrame(ID3D11ShaderResourceView* frame) {
     float aspect = app::FrameAspect();
     float w = float(bb_w_), h = float(bb_h_);
     float vw = std::min(w, h * aspect);
@@ -1929,7 +2019,7 @@ void D3D11Backend::BlitFrame(Target& t) {
     ctx_->RSSetViewports(1, &vp);
     ctx_->RSSetScissorRects(1, &sc);
     float uv[4] = {0, 0, 1, 1};
-    Blit(t.srv.Get(), uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
+    Blit(frame, uv, {.gamma = gamma_, .final = true});
 }
 
 void D3D11Backend::RenderUi() {
@@ -1975,10 +2065,20 @@ void D3D11Backend::Present(const Surface& front) {
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Settle(*t);
     if (ramp_dirty_) UploadGammaRamp();
+    ID3D11ShaderResourceView* frame = t ? t->srv.Get() : nullptr;
+    if (t && app::Get().smaa)
+        if (ID3D11ShaderResourceView* smoothed = SmaaFrame(*t)) frame = smoothed;
     float black[4] = {0, 0, 0, 1};
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
     SetPassTarget(bb_rtv_.Get(), nullptr, bb_w_, bb_h_);
-    if (t) BlitFrame(*t);
+    if (frame) BlitFrame(frame);
+    // F12: the frame as shown, before the interface
+    if (app::TakeScreenshotRequest()) {
+        ComPtr<ID3D11Texture2D> back;
+        std::vector<uint8_t> px;
+        if (SUCCEEDED(swap_->GetBuffer(0, IID_PPV_ARGS(&back))) && ReadBack(back.Get(), bb_w_, bb_h_, px))
+            app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
+    }
     D3D11_VIEWPORT vp{0, 0, float(bb_w_), float(bb_h_), 0, 1};
     ctx_->RSSetViewports(1, &vp);
     RenderUi();
@@ -1992,6 +2092,7 @@ void D3D11Backend::Present(const Surface& front) {
                  (unsigned long long)presents_);
         }
     }
+    if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
     // the flip model unbinds the back buffer
     Unbind();
     DeliverReports(false);
@@ -2003,9 +2104,9 @@ void D3D11Backend::Present(const Surface& front) {
 }
 
 void D3D11Backend::ApplySettings() {
-    // antialiasing 2, 3, 4: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
-    static const uint32_t kSamples[] = {1, 1, 2, 4, 8};
-    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().antialiasing, 4)];
+    // the msaa setting 1, 2, 3: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
+    static const uint32_t kSamples[] = {1, 2, 4, 8};
+    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().msaa, 3)];
     if (want_ms != msaa_) {
         for (auto& [key, t] : targets_) DropMs(t);
         msaa_ = want_ms;
@@ -2060,6 +2161,7 @@ void D3D11Backend::RescaleTargets() {
         t.sig = old.sig;
         t.drawn = old.drawn;
         t.linear32 = old.linear32;
+        t.swizzled32 = old.swizzled32;
         t.read = std::move(old.read);
         old = std::move(t);
         ++it;

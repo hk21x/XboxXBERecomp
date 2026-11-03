@@ -77,12 +77,12 @@ if(WIN32)
     endif()
     file(READ ${LAUNCHER_GAME}/game.json GJ)
     string(JSON SHORT GET "${GJ}" short)
-    add_executable(launcher WIN32 win/main.cpp win/platform_win.cpp ${RC}
+    add_executable(launcher WIN32 win/main.cpp win/screen.cpp win/platform_win.cpp ${RC}
         ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp ${imgui_SOURCE_DIR}/imgui_tables.cpp
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
         ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp)
     set_target_properties(launcher PROPERTIES OUTPUT_NAME "${SHORT}Launcher")
-    target_include_directories(launcher PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+    target_include_directories(launcher PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends win ${CMAKE_CURRENT_SOURCE_DIR}/..)
     target_compile_definitions(launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(launcher PRIVATE launcher_core winhttp d3d11 dxgi shell32 ole32 comdlg32 dwmapi)
     if(MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -92,4 +92,15 @@ if(WIN32)
 else()
     add_executable(launcher_cli test/cli.cpp test/posix.cpp)
     target_link_libraries(launcher_cli PRIVATE launcher_core)
+    # the screen as PNGs, with no window or GPU (test/screen_preview.cpp)
+    FetchContent_Declare(imgui_preview GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.0 GIT_SHALLOW TRUE)
+    FetchContent_GetProperties(imgui_preview)
+    if(NOT imgui_preview_POPULATED)
+        FetchContent_Populate(imgui_preview)
+    endif()
+    add_executable(screen_preview test/screen_preview.cpp win/screen.cpp test/posix.cpp
+        ${imgui_preview_SOURCE_DIR}/imgui.cpp ${imgui_preview_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_preview_SOURCE_DIR}/imgui_tables.cpp ${imgui_preview_SOURCE_DIR}/imgui_widgets.cpp)
+    target_include_directories(screen_preview PRIVATE ${imgui_preview_SOURCE_DIR} win ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    target_link_libraries(screen_preview PRIVATE launcher_core)
 endif()

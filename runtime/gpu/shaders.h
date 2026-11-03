@@ -54,6 +54,7 @@ struct PixelKey {
     uint32_t proj = 0;       // fixed function: bit per stage sampled at coordinates divided by w
     uint32_t quad = 0;       // a screen quad: QuadHlsl
     uint32_t wbuf = 0;       // D3DZB_USEW: the depth written is the pixel's w (DrawConstants::wdepth)
+    uint32_t coverage = 0;   // Settings::alpha_coverage: the target's samples, an alpha test becomes partial coverage
     bool operator==(const PixelKey& o) const;
 };
 
@@ -79,6 +80,8 @@ struct FixedKey {
                            // diffuse, specular, ambient, emissive (material when the vertex lacks that colour)
     uint32_t types = 0;    // D3DLIGHTTYPE per light, 2 bits each, 0 off
     uint32_t tex[4] = {};  // per stage: coordinate set, texgen at bit 4, D3DTTFF count at bit 8, projected bit 11, set size at bit 12
+    uint32_t blend = 0;    // D3DRS_VERTEXBLEND, the skin mode: 1, 3, 5 that many weights and one matrix more (the last
+                           // takes what is left); 2, 4, 6 half that many matrices, a weight each
 };
 FixedKey MakeFixedKey(const State& s);
 std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode = 0, const FixedKey& f = {});
@@ -123,6 +126,9 @@ struct DrawConstants {
     // fixed function, lit in view space
     float wv[16];
     float wvn[16];       // normals: inverse transpose of wv
+    float bwv[3][16];    // FixedKey::blend: WORLD1 to 3 by the view
+    float bwvn[3][16];   // their normals
+    float vpj[16];       // view space to the target: projection, then the viewport
     float tm[4][16];     // texture transforms
     float mat[5][4];     // material diffuse, ambient, specular, emissive, power
     float amb[4];        // D3DRS_AMBIENT

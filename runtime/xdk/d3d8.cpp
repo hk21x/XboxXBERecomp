@@ -22,6 +22,10 @@
 #include "xdk/layout.h"
 #include "xdk/state_numbering.h"
 
+namespace dispatch {
+bool InCode(uint32_t va);  // cpu/dispatch.cpp
+}
+
 using namespace kernel;
 
 // configs written before the SDK knew the name
@@ -59,6 +63,18 @@ using namespace kernel;
 #ifndef SYM_D3DDevice_SetVertexShaderConstant
 #define SYM_D3DDevice_SetVertexShaderConstant FFFFFE0C
 #define HAS_D3DDevice_SetVertexShaderConstant 0
+#endif
+#ifndef SYM_D3DDevice_GetRasterStatus
+#define SYM_D3DDevice_GetRasterStatus FFFFFE13
+#define HAS_D3DDevice_GetRasterStatus 0
+#endif
+#ifndef SYM_D3D_BlockOnNonSurfaceResource
+#define SYM_D3D_BlockOnNonSurfaceResource FFFFFE14
+#define HAS_D3D_BlockOnNonSurfaceResource 0
+#endif
+#ifndef SYM_D3DDevice_GetVisibilityTestResult
+#define SYM_D3DDevice_GetVisibilityTestResult FFFFFE15
+#define HAS_D3DDevice_GetVisibilityTestResult 0
 #endif
 #ifndef SYM_D3DDevice_BeginPushBuffer
 #define SYM_D3DDevice_BeginPushBuffer FFFFFE11
@@ -222,7 +238,7 @@ uint32_t ScratchPush(uint32_t bytes = 0) {
     uint32_t need = std::max<uint32_t>(0x10000, (bytes + 0x1FFF) & ~0xFFFu);
     if (need > g_scratch_size) {
         if (g_scratch_push) mem::FreeContiguous(g_scratch_push);
-        g_scratch_push = mem::AllocContiguous(need, 0, 0xFFFFFFFF, 0x1000);
+        g_scratch_push = mem::AllocHostContiguous(need, 0x1000);
         g_scratch_size = need;
     }
     SetDev(kDevPush, g_scratch_push);
@@ -245,14 +261,19 @@ gpu::Surface SurfaceOf(uint32_t header) {
 
 // hdr: where the surface object goes, 0 for a new one; keep: a title's own surface there keeps its memory when it
 // holds this one (the title may find that memory again another way: 007: Everything or Nothing's GetTile)
-uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0, bool keep = false) {
+// host: memory the title never sees (mem::AllocHostContiguous), for the renderer's own surfaces
+uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp, uint32_t hdr = 0, bool keep = false, bool host = false) {
     uint32_t pitch = (w * bpp + 63) & ~63u;
     uint32_t phys = 0;
     if (keep && hdr && R32(hdr + 4) && R32(hdr + 16)) {
         uint32_t size = R32(hdr + 16), had = ((size >> 24) + 1) * 64 * (((size >> 12) & 0xFFF) + 1);
         if (had >= pitch * h) phys = R32(hdr + 4) & 0x0FFFFFFF;
     }
-    if (!phys) phys = mem::PhysicalFromVirtual(mem::AllocContiguous(pitch * h, 0, 0xFFFFFFFF, 0x1000));
+    if (!phys)
+        // a row to spare: Agent Under Fire's driving levels write one row past the back buffer while loading, which
+        // reached the game's heap when the heap lay right above it
+        phys = mem::PhysicalFromVirtual(host ? mem::AllocHostContiguous(pitch * (h + 1), 0x1000)
+                                             : mem::AllocContiguous(pitch * (h + 1), 0, 0xFFFFFFFF, 0x1000));
     if (!hdr) hdr = mem::AllocSystem(24);
     W32(hdr + 0, 0x000D0001);  // surface, one reference, one internal reference held by the device
     W32(hdr + 4, phys);
@@ -271,6 +292,11 @@ void SyncDeferred() {
     for (int s = 0; s < 4; s++)
         for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++)
             g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + n.tss[i]) * 4);
+    // a vertex stream over a target the GPU drew is read back first, as the console's vertices read that memory
+    // (NightFire's scope colours 16384 points from a 128x128 swizzled target a pass before drew)
+    if (g_backend)
+        for (const auto& st : g_state.streams)
+            if (st.vb) g_backend->Sync(mem::VirtualFromPhysical(R32(st.vb + 4)), 0);
 }
 
 float ZScale(const gpu::Surface& zs) {
@@ -366,6 +392,9 @@ void ApplyDefaultStates(X86Context& ctx) {
 constexpr bool kVBlank = XDK_CDevice_VBlankCount != xdk::kUnknown && XDK_CDevice_VBlankEvent != xdk::kUnknown &&
                          XDK_CDevice_VBlankCallback != xdk::kUnknown;
 
+// when the last vertical blank began (steady clock nanoseconds), for the raster position
+std::atomic<int64_t> g_vblank_time{0};
+
 // what the library's vertical blank interrupt leaves for the title: count, event, callback
 void VerticalBlank(X86Context& ctx) {
     using clock = std::chrono::steady_clock;
@@ -376,6 +405,7 @@ void VerticalBlank(X86Context& ctx) {
         std::this_thread::sleep_until(next);
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
+        g_vblank_time = clock::now().time_since_epoch().count();
         ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
         SetEvent(*event);
         if (uint32_t callback = Dev(XDK_CDevice_VBlankCallback); callback && XDK_VBlankCallback_Count) {
@@ -466,7 +496,7 @@ bool MakeFrameBuffers(uint32_t pp) {
                                       : XDK_CDevice_FrameSurfaces == xdk::kUnknown ? 0
                                                                                    : kDevice + XDK_CDevice_FrameSurfaces + kSlot[i] * 24,
                                       given[kSlot[i]] != 0);
-        g_copy_target = NewSurface(w, h, color_fmt, 4);
+        g_copy_target = NewSurface(w, h, color_fmt, 4, 0, false, true);
         g_depth = 0;
         if (auto_depth || given_depth) {
             uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
@@ -501,6 +531,13 @@ bool MakeFrameBuffers(uint32_t pp) {
     return fresh;
 }
 }  // namespace
+
+// the ramp in the device's two slots too, where the library's own GetGammaRamp copies it from (NightFire saves it
+// once and scales it for every fade: a ramp never put there made every fade black on the GPU renderers)
+void StoreGammaRamp(const uint8_t* ramp) {
+    if (XDK_CDevice_GammaRamps == xdk::kUnknown) return;
+    for (uint32_t i = 0; i < 2; i++) std::memcpy(HostPtr(kDevice + XDK_CDevice_GammaRamps + i * 0x300), ramp, 768);
+}
 
 HLE_STDCALL(Direct3D_CreateDevice, 6) {
     XDK_REQUIRE("d3d", XDK_DATA(D3D_Device), XDK_DATA(D3D_pDevice), XDK_DATA(D3D_DirtyFlags),
@@ -537,6 +574,12 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
             std::memcpy(HostPtr(kDevice + XDK_CDevice_AutoDepthSurface), auto_depth_surface, sizeof auto_depth_surface);
     }
     W32(kDevicePtr, kDevice);
+    // the console starts with a linear gamma ramp, which a title reads back (GetGammaRamp) before it sets its own
+    {
+        uint8_t ramp[768];
+        for (uint32_t i = 0; i < 768; i++) ramp[i] = uint8_t(i & 0xFF);
+        StoreGammaRamp(ramp);
+    }
     ScratchPush();
 
     if (!g_backend) {
@@ -553,6 +596,7 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
             }
         }
         if (RenderThread()) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+        if (app::kGame.step_interpolation) g_backend = gpu::CreateInterpolating(std::move(g_backend));
     }
     g_state = gpu::State{};
     MakeFrameBuffers(pp);
@@ -623,7 +667,7 @@ HLE_STDCALL(D3D_BlockOnResource, 1) {
                 uint32_t code[4] = {}, n = 0;
                 for (uint32_t i = 0; i < 32 && n < 4; i++) {
                     uint32_t v = R32(ctx.esp + i * 4);
-                    if (v >= X86CodeBase && v < X86CodeEnd) code[n++] = v;
+                    if (dispatch::InCode(v)) code[n++] = v;
                 }
                 LOGI("d3d: BlockOnResource on surface %08X, stack %08X %08X %08X %08X", data, code[0], code[1], code[2], code[3]);
             }
@@ -645,6 +689,15 @@ HLE_WRAP(Lock2DSurface, 6) {
     }
 }
 HLE_STDCALL(D3DResource_BlockUntilNotBusy, 1) {
+    if (a[0] && g_backend) {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        g_backend->WaitResource(a[0]);
+    }
+    gpu::MarkDirty(a[0]);
+    return 0;
+}
+// the lock of a vertex or index buffer (no NOOVERWRITE) waits here: for the renderer to be done with it, as above
+HLE_STDCALL(D3D_BlockOnNonSurfaceResource, 1) {
     if (a[0] && g_backend) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         g_backend->WaitResource(a[0]);
@@ -697,6 +750,23 @@ HLE_STDCALL(D3D_SetFence, 1) {
     }
     return g_backend ? g_backend->Fence() : 0;
 }
+// XDK 4039's GetVisibilityTestResult only reads the report, without the fence above: a title polling it in a loop would
+// never see a report still waiting for the render thread (Agent Under Fire's driving levels froze). Only an image whose
+// library needs this names the function.
+#if HAS_D3DDevice_GetVisibilityTestResult
+X86_EXTERN_FUNC(GUEST_ORIG(D3DDevice_GetVisibilityTestResult));
+X86_FUNC(GUEST(D3DDevice_GetVisibilityTestResult)) {
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        Walk(Dev(kDevPush));
+        if (g_backend && g_report_asked) {
+            g_report_asked = false;
+            g_backend->Kick();
+        }
+    }
+    GUEST_ORIG(D3DDevice_GetVisibilityTestResult)(ctx, base);
+}
+#endif
 HLE_STDCALL(D3D_KickOffAndWaitForIdle, 0) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_backend) g_backend->Flush();
@@ -717,6 +787,18 @@ HLE_STDCALL(D3D_MakeRequestedSpace, 2) {
 
 HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    return 0;
+}
+// (D3DRASTER_STATUS*): InVBlank, ScanLine. The library reads the CRTC's raster register through the GPU register base
+// the host device does not have (NightFire's XMV player polls it); the position is the time since the host's last
+// vertical blank over a 525 line frame, 480 of them shown, ScanLine 0 within the blank as the library reports it
+HLE_STDCALL(D3DDevice_GetRasterStatus, 1) {
+    constexpr int64_t kFrameNs = 16666667, kLines = 525, kShown = 480;
+    int64_t since = std::chrono::steady_clock::now().time_since_epoch().count() - g_vblank_time.load();
+    int64_t line = std::clamp<int64_t>(since, 0, kFrameNs - 1) * kLines / kFrameNs;
+    bool blank = line >= kShown;
+    W32(a[0], blank ? 1 : 0);
+    W32(a[0] + 4, blank ? 0 : uint32_t(line));
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
@@ -751,6 +833,7 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
     WalkBeforeState();
     uint8_t ramp[768];
     std::memcpy(ramp, HostPtr(a[1]), 768);
+    StoreGammaRamp(ramp);
     if (g_backend) g_backend->SetGamma(ramp);
     return 0;
 }
@@ -1802,7 +1885,7 @@ uint32_t g_up_ring = 0, g_up_pos = 0, g_up_header = 0, g_up_fence[2] = {};
 
 uint32_t UpVertices(const void* src, uint32_t bytes) {
     if (!g_up_ring) {
-        g_up_ring = mem::AllocContiguous(kUpRing, 0, 0xFFFFFFFF, 0x1000);
+        g_up_ring = mem::AllocHostContiguous(kUpRing, 0x1000);
         g_up_header = mem::AllocSystem(20);
         std::memset(HostPtr(g_up_header), 0, 20);
         W32(g_up_header, 1);  // a vertex buffer, one reference

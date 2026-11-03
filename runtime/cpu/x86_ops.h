@@ -21,17 +21,36 @@ typedef double __attribute__((aligned(1), may_alias)) x86_f64u;
 #define X86_MEMF64(a) (*(x86_f64u*)(base + (uint32_t)(a)))
 #define X86_PTR(T, a) ((T*)(base + (uint32_t)(a)))
 
-#define X86_FUNC(name) extern "C" void name(X86Context& __restrict ctx, uint8_t* base)
-#define X86_EXTERN_FUNC(name) extern "C" void name(X86Context& __restrict ctx, uint8_t* base)
+// The recompiled code is built on the player's PC into a DLL beside the executable (app/game_code.cpp). The executable
+// exports the runtime and its overrides, which the DLL imports; a function with no override links to its body.
+#ifdef X86_GAME_CODE
+#define X86_HOST_API __declspec(dllimport)
+#define X86_HOST_EXPORT
+#define X86_WEAK_FUNC(name, impl) __pragma(comment(linker, "/alternatename:" #name "=" #impl))
+// the DLL links without a C runtime: the two symbols clang expects from one
+extern "C" __attribute__((used)) inline int _fltused = 0;
+#pragma comment(linker, "/alternatename:??_7type_info@@6B@=_fltused")  // catch clauses only compare type names
+#elif defined(XBE_GAME_DLL)
+#define X86_HOST_API __declspec(dllexport)
+#define X86_HOST_EXPORT __declspec(dllexport)
+#else
+// the generated code links into the executable: the launcher's whole build, and the headless harness
+#define X86_HOST_API
+#define X86_HOST_EXPORT
 #define X86_WEAK_FUNC(name, impl) \
     extern "C" __attribute__((weak, noinline)) void name(X86Context& __restrict ctx, uint8_t* base) { impl(ctx, base); }
+#endif
+
+#define X86_FUNC(name) extern "C" X86_HOST_EXPORT void name(X86Context& __restrict ctx, uint8_t* base)
+#define X86_EXTERN_FUNC(name) extern "C" void name(X86Context& __restrict ctx, uint8_t* base)
 // [xbe] trace: logs the caller and arguments on entry, eax on return
-#define X86_TRACED_FUNC(name, impl, va)                                                                    \
-    extern "C" __attribute__((weak, noinline)) void name(X86Context& __restrict ctx, uint8_t* base) {      \
-        uint32_t x86_ret = x86_trace(ctx, va, 0);                                                         \
-        impl(ctx, base);                                                                                  \
-        x86_trace(ctx, va, x86_ret);                                                                      \
-    }
+#define X86_TRACED_FUNC(name, impl, va)                                       \
+    extern "C" void name##_traced(X86Context& __restrict ctx, uint8_t* base) { \
+        uint32_t x86_ret = x86_trace(ctx, va, 0);                             \
+        impl(ctx, base);                                                      \
+        x86_trace(ctx, va, x86_ret);                                          \
+    }                                                                         \
+    X86_WEAK_FUNC(name, name##_traced)
 
 #define X86_PUSH32(v)            \
     do {                         \
@@ -47,19 +66,20 @@ typedef double __attribute__((aligned(1), may_alias)) x86_f64u;
 
 #define X87_ST(i) ctx.st[(ctx.top + (i)) & 7]
 
-// runtime services, implemented in src/cpu/dispatch.cpp
-void x86_icall(X86Context& ctx, uint8_t* base, uint32_t target);
+// runtime services, implemented in cpu/dispatch.cpp
+X86_HOST_API void x86_icall(X86Context& ctx, uint8_t* base, uint32_t target);
 // a jump to a C++ catch continuation unwinds the host stack to the frame that resumes there (esp as the CRT set it)
 struct X86Resume {
     uint32_t target, esp;
 };
-void x86_resume(X86Context& ctx, uint8_t* base, const X86Resume& r);
-void x86_kernel(X86Context& ctx, uint8_t* base, uint32_t ordinal);
-[[noreturn]] void x86_trap(X86Context& ctx, uint32_t va, const char* what);
-void x86_priv(X86Context& ctx, uint32_t va, const char* what);
-uint32_t x86_trace(X86Context& ctx, uint32_t va, uint32_t ret);  // ret 0 on entry, returns the return address
-uint64_t x86_rdtsc();
-void x86_cpuid(X86Context& ctx);
+X86_HOST_API void x86_resume(X86Context& ctx, uint8_t* base, const X86Resume& r);
+X86_HOST_API void x86_kernel(X86Context& ctx, uint8_t* base, uint32_t ordinal);
+[[noreturn]] X86_HOST_API void x86_trap(X86Context& ctx, uint32_t va, const char* what);
+X86_HOST_API void x86_priv(X86Context& ctx, uint32_t va, const char* what);
+// ret 0 on entry, returns the return address
+X86_HOST_API uint32_t x86_trace(X86Context& ctx, uint32_t va, uint32_t ret);
+X86_HOST_API uint64_t x86_rdtsc();
+X86_HOST_API void x86_cpuid(X86Context& ctx);
 
 inline void x87_push(X86Context& ctx, double v) {
     ctx.top = (ctx.top - 1) & 7;

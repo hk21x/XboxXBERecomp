@@ -30,8 +30,8 @@ std::filesystem::path File() { return ExeDir() / kGame.settings; }
 
 const char* kAspects[] = {"auto", "4:3", "16:9", "screen"};
 constexpr uint32_t kAspectCount = 4;
-const char* kAntialiasing[] = {"off", "fxaa", "msaa2", "msaa4", "msaa8"};
-constexpr uint32_t kAntialiasingCount = 5;
+const char* kMsaa[] = {"off", "msaa2", "msaa4", "msaa8"};
+constexpr uint32_t kMsaaCount = 4;
 const char* kRenderers[] = {"d3d12", "d3d11"};
 constexpr uint32_t kRendererCount = 2;
 
@@ -213,9 +213,20 @@ void Load() {
     s.pause_unfocused = t["pause_unfocused"].value_or(s.pause_unfocused);
     s.show_fps = t["show_fps"].value_or(s.show_fps);
     s.sharp_2d = t["sharp_2d"].value_or(s.sharp_2d);
-    std::string aa = t["antialiasing"].value_or(std::string(kAntialiasing[s.antialiasing % kAntialiasingCount]));
-    for (uint32_t i = 0; i < kAntialiasingCount; i++)
-        if (aa == kAntialiasing[i]) s.antialiasing = i;
+    s.language = t["language"].value_or(s.language);
+    // a settings file from when these were one choice: "antialiasing" off, fxaa, msaa2, msaa4 or msaa8
+    std::string aa = t["antialiasing"].value_or(std::string());
+    if (aa == "fxaa") s.fxaa = true;
+    std::string msaa = t["msaa"].value_or(aa);
+    for (uint32_t i = 0; i < kMsaaCount; i++)
+        if (msaa == kMsaa[i]) s.msaa = i;
+    s.fxaa = t["fxaa"].value_or(s.fxaa);
+    s.smaa = t["smaa"].value_or(s.smaa);
+    s.scale_filter = t["scale_filter"].value_or(s.scale_filter);
+    s.alpha_coverage = t["alpha_coverage"].value_or(s.alpha_coverage);
+    s.world_textures = t["world_textures"].value_or(s.world_textures);
+    s.low_latency = t["low_latency"].value_or(s.low_latency);
+    s.sharpen = std::min<uint32_t>(t["sharpen"].value_or(s.sharpen), 100);
     std::string renderer = t["renderer"].value_or(std::string(kRenderers[s.renderer % kRendererCount]));
     for (uint32_t i = 0; i < kRendererCount; i++)
         if (renderer == kRenderers[i]) s.renderer = i;
@@ -301,7 +312,15 @@ toml::table Table() {
                   {"pause_unfocused", s.pause_unfocused},
                   {"show_fps", s.show_fps},
                   {"sharp_2d", s.sharp_2d},
-                  {"antialiasing", kAntialiasing[s.antialiasing % kAntialiasingCount]},
+                  {"language", int64_t(s.language)},
+                  {"msaa", kMsaa[s.msaa % kMsaaCount]},
+                  {"fxaa", s.fxaa},
+                  {"smaa", s.smaa},
+                  {"scale_filter", int64_t(s.scale_filter)},
+                  {"alpha_coverage", s.alpha_coverage},
+                  {"world_textures", s.world_textures},
+                  {"low_latency", s.low_latency},
+                  {"sharpen", int64_t(s.sharpen)},
                   {"renderer", kRenderers[s.renderer % kRendererCount]},
                   {"wheel_range", int64_t(s.wheel_range)},
                   {"wheel_lock", int64_t(s.wheel_lock)},
@@ -417,7 +436,7 @@ bool Widescreen() {
 
 float FrameAspect() {
     if (!Widescreen()) return 4.0f / 3.0f;
-    if (Get().aspect != 3) return 16.0f / 9.0f;
+    if (Get().aspect != 3 && !(Get().aspect == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
     Mode m = Output();
     return m.height ? std::max(16.0f / 9.0f, float(m.width) / float(m.height)) : 16.0f / 9.0f;
 }

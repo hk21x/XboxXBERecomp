@@ -7,7 +7,11 @@ constexpr uint32_t kPage = 0x1000;
 constexpr uint32_t kUserLow = 0x00010000;
 constexpr uint32_t kUserHigh = 0x7FFE0000;
 constexpr uint32_t kContiguousBase = 0x80000000;  // guest VA = kContiguousBase | physical
-constexpr uint32_t kPhysicalSize = 64u << 20;
+constexpr uint32_t kPhysicalSize = 64u << 20;     // the console's memory, all of it the title's
+// physical memory past it, as a development kit has: only the host's own buffers (the renderer's copy target, the
+// DrawVerticesUP ring, the scratch push buffer) are made there, so a title has the console's whole 64 MB
+constexpr uint32_t kHostPhysicalSize = 64u << 20;
+constexpr uint32_t kMappedPhysical = kPhysicalSize + kHostPhysicalSize;
 constexpr uint32_t kWriteCombineBase = 0xF0000000;
 constexpr uint32_t kKernelDataBase = 0x80000000;   // first physical megabyte holds kernel variables
 constexpr uint32_t kKernelDataSize = 0x00100000;
@@ -36,7 +40,12 @@ bool QueryVirtual(uint32_t addr, RegionInfo& out);
 void ReserveImage(uint32_t base, uint32_t size);
 
 uint32_t AllocContiguous(uint32_t size, uint32_t lowest, uint32_t highest, uint32_t align);
+// contiguous memory for a host buffer the title never sees, in the physical memory past the console's (a title's
+// MmQueryStatistics and allocations do not count it); FreeContiguous frees it
+uint32_t AllocHostContiguous(uint32_t size, uint32_t align);
 void FreeContiguous(uint32_t va);
+// XBE_MEM_LOG: 0 off, 1 contiguous allocations of a megabyte or more, 2 all of them and their guest callers
+int MemLogLevel();
 uint32_t AllocationSize(uint32_t va);  // any allocator, 0 if unknown
 
 uint32_t AllocSystem(uint32_t size, uint32_t align = 16);

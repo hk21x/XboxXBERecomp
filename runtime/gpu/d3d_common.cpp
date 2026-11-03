@@ -128,31 +128,70 @@ float4 psmix(O i) : SV_Target {
     if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c.rgb, 1);
 }
-// the finished frame with fast approximate antialiasing: where the luma of a pixel and its four neighbours differs
-// enough to be an edge, the colour is averaged along the edge's direction, found from the diagonal neighbours
+// the finished frame, the settings' passes in one (the plain blit without them): opts.y bit 0 for FXAA, bit 1 for the
+// sharp scaling filter, opts.z the sharpening 0 to 1. The filter: Catmull-Rom over source pixels going up; going down, the
+// output pixel's area (four taps, even at a ratio that is not whole) less a little of its neighbours. FXAA: where the luma of a pixel and its four neighbours differs enough to be an edge, the colour is
+// averaged along the edge's direction, found from the diagonal neighbours. Sharpening, contrast adaptive (as AMD's CAS):
+// the pixel less its neighbours, weighted down where they already span much of the range, so strong edges get no halos;
+// a source pixel or an output pixel apart, whichever is larger, so it still shows on a frame rendered above the screen's
 float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
 float3 tap(float2 uv) { return img.SampleLevel(ls, uv, 0).rgb; }
-float4 psfxaa(O i) : SV_Target {
+float3 scaled(float2 uv, float2 t, float2 px) {
+    float2 r = px / t;
+    if (abs(r.x - 1) < 0.01 && abs(r.y - 1) < 0.01) return tap(uv);
+    float3 c = 0;
+    if (r.x > 1 || r.y > 1) {
+        float2 stride = max(t, px);
+        c = 0.25 * (tap(uv + stride * float2(-0.25, -0.25)) + tap(uv + stride * float2(0.25, -0.25)) +
+                    tap(uv + stride * float2(-0.25, 0.25)) + tap(uv + stride * float2(0.25, 0.25)));
+        float3 ring = tap(uv + float2(stride.x, 0)) + tap(uv - float2(stride.x, 0)) + tap(uv + float2(0, stride.y)) + tap(uv - float2(0, stride.y));
+        c = c * 1.32 - ring * 0.08;
+        return saturate(c);
+    }
+    float2 p = uv / t - 0.5, b = floor(p), f = p - b;
+    float2 w0 = f * (-0.5 + f * (1 - 0.5 * f)), w1 = 1 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 p0 = (b - 0.5) * t, p12 = (b + 0.5 + w2 / w12) * t, p3 = (b + 2.5) * t;
+    c += w0.x * w0.y * tap(float2(p0.x, p0.y)) + w12.x * w0.y * tap(float2(p12.x, p0.y)) + w3.x * w0.y * tap(float2(p3.x, p0.y));
+    c += w0.x * w12.y * tap(float2(p0.x, p12.y)) + w12.x * w12.y * tap(float2(p12.x, p12.y)) + w3.x * w12.y * tap(float2(p3.x, p12.y));
+    c += w0.x * w3.y * tap(float2(p0.x, p3.y)) + w12.x * w3.y * tap(float2(p12.x, p3.y)) + w3.x * w3.y * tap(float2(p3.x, p3.y));
+    return saturate(c);
+}
+float3 fxaa(float3 m, float2 uv, float2 t) {
+    float lm = luma(m);
+    float ln = luma(tap(uv + float2(0, -t.y))), ls_ = luma(tap(uv + float2(0, t.y)));
+    float le = luma(tap(uv + float2(t.x, 0))), lw = luma(tap(uv + float2(-t.x, 0)));
+    float lo = min(lm, min(min(ln, ls_), min(le, lw))), hi = max(lm, max(max(ln, ls_), max(le, lw)));
+    if (hi - lo < max(0.0312, hi * 0.125)) return m;
+    float lnw = luma(tap(uv + float2(-t.x, -t.y))), lne = luma(tap(uv + float2(t.x, -t.y)));
+    float lsw = luma(tap(uv + float2(-t.x, t.y))), lse = luma(tap(uv + float2(t.x, t.y)));
+    float2 dir = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
+    float reduce = max((lnw + lne + lsw + lse) * (0.25 / 8), 1.0 / 128);
+    dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8, 8) * t;
+    float3 a = 0.5 * (tap(uv + dir * (1.0 / 3 - 0.5)) + tap(uv + dir * (2.0 / 3 - 0.5)));
+    float3 b = a * 0.5 + 0.25 * (tap(uv - dir * 0.5) + tap(uv + dir * 0.5));
+    float lb = luma(b);
+    return lb < lo || lb > hi ? a : b;
+}
+float3 sharpen(float3 c, float2 uv, float2 t, float amount) {
+    float3 n = tap(uv + float2(0, -t.y)), s = tap(uv + float2(0, t.y));
+    float3 e = tap(uv + float2(t.x, 0)), w = tap(uv + float2(-t.x, 0));
+    float3 m = tap(uv);
+    float3 lo = min(m, min(min(n, s), min(e, w))), hi = max(m, max(max(n, s), max(e, w)));
+    float3 amp = sqrt(saturate(min(lo, 1 - hi) / max(hi, 1e-4)));
+    float3 k = amp * amount * -0.2;  // from nothing: CAS's own scale starts at -0.125, grainy on the road textures
+    return saturate(((n + s + e + w) * k + c) / (1 + 4 * k));
+}
+float4 psfinal(O i) : SV_Target {
     float2 size;
     img.GetDimensions(size.x, size.y);
     float2 t = 1 / size;
-    float3 m = tap(i.uv);
-    float lm = luma(m);
-    float ln = luma(tap(i.uv + float2(0, -t.y))), ls_ = luma(tap(i.uv + float2(0, t.y)));
-    float le = luma(tap(i.uv + float2(t.x, 0))), lw = luma(tap(i.uv + float2(-t.x, 0)));
-    float lo = min(lm, min(min(ln, ls_), min(le, lw))), hi = max(lm, max(max(ln, ls_), max(le, lw)));
-    float3 c = m;
-    if (hi - lo >= max(0.0312, hi * 0.125)) {
-        float lnw = luma(tap(i.uv + float2(-t.x, -t.y))), lne = luma(tap(i.uv + float2(t.x, -t.y)));
-        float lsw = luma(tap(i.uv + float2(-t.x, t.y))), lse = luma(tap(i.uv + float2(t.x, t.y)));
-        float2 dir = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
-        float reduce = max((lnw + lne + lsw + lse) * (0.25 / 8), 1.0 / 128);
-        dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8, 8) * t;
-        float3 a = 0.5 * (tap(i.uv + dir * (1.0 / 3 - 0.5)) + tap(i.uv + dir * (2.0 / 3 - 0.5)));
-        float3 b = a * 0.5 + 0.25 * (tap(i.uv - dir * 0.5) + tap(i.uv + dir * 0.5));
-        float lb = luma(b);
-        c = lb < lo || lb > hi ? a : b;
-    }
+    float2 px = max(t, fwidth(i.uv));
+    int mode = (int)opts.y;
+    float3 c = (mode & 2) != 0 ? scaled(i.uv, t, fwidth(i.uv)) : tap(i.uv);
+    if ((mode & 1) != 0) c = fxaa(c, i.uv, t);
+    if (opts.z > 0) c = sharpen(c, i.uv, px, opts.z);
     c *= opts.w;
     if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c, 1);
@@ -615,6 +654,16 @@ void FillTransformConstants(const State& s, GuestExtent size, DrawConstants& c) 
     float n[16] = {};
     InverseTranspose3x3(wv, n);
     Transpose(n, c.wvn);
+    for (int m = 0; m < 3; m++) {
+        float bv[16], bn[16] = {};
+        MatMul(s.transforms[kTsWorld + 1 + size_t(m)].data(), s.transforms[kTsView].data(), bv);
+        Transpose(bv, c.bwv[m]);
+        InverseTranspose3x3(bv, bn);
+        Transpose(bn, c.bwvn[m]);
+    }
+    float pv[16];
+    MatMul(s.transforms[kTsProjection].data(), vpm, pv);
+    Transpose(pv, c.vpj);
     for (int t = 0; t < 4; t++) Transpose(s.transforms[kTsTexture0 + size_t(t)].data(), c.tm[t]);
 }
 
@@ -834,7 +883,7 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
     if (program && s.vs->screen != 1 && k < 0) return kSpanFrame;
-    float lo = 1e30f, hi = -1e30f;
+    float lo = 1e30f, hi = -1e30f, top = 1e30f, bottom = -1e30f;  // top and bottom: screen y, without a matrix
     count = std::min<uint32_t>(count, 4096);
     for (uint32_t i = 0; i < count; i++) {
         float p[4] = {0, 0, 0, 1};
@@ -852,12 +901,18 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
         }
         lo = std::min(lo, x);
         hi = std::max(hi, x);
+        top = std::min(top, p[1]);
+        bottom = std::max(bottom, p[1]);
     }
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
     // radar's tiles) do not
     if (!s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
+        return kSpanFrame;
+    // a textured bar the viewport's full height so (GameInfo::edge_bars)
+    if (app::kGame.edge_bars && s.textures[0] && k < 0 && lo >= -kEdgeSlack && hi <= width + kEdgeSlack &&
+        (lo <= 0.5f || hi >= width - 0.5f) && top <= s.viewport.y + 0.5f && bottom >= s.viewport.y + s.viewport.h - 0.5f)
         return kSpanFrame;
     const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
     if (right - left < width - 1 && lo <= left + 0.5f && hi >= right - 0.5f) return kSpanViewport;

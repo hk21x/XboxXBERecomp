@@ -214,12 +214,35 @@ struct State {
     // ultrawide it showed at the sides, or a stale picture did without it (the title clears nothing)
     uint32_t blank_format = 0;
     float squeeze_shift = 0;
+    // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
+    // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
+    int squeeze_margin = 0;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
     // 1 / the projection's far w, as the XDK's SetTransform derives it (0x1C34A0). W-buffered, the fixed function and
     // pretransformed vertices have w scaled by zscale * inv_wfar (0x1C0FC0 folds it into the matrix, 0x1C0300 into
     // the pass-through program's c0.w); a vertex program's w is its own
     float inv_wfar = 1.0f;
 };
+
+// Xbox point sprites (D3DRS_POINTSPRITEENABLE) give their coordinates to texture stage 3 alone, and a title drawing
+// them through the fixed function sets its texture and operations on stage 3 (NightFire's snow: stage 0 still held
+// the last draw's texture, which the flakes showed). The host draws such a draw with stage 3 as its first stage and
+// stage 3 off (Cxbx-Reloaded does the same); a pixel shader names its stages itself. Returns that draw's state
+// (a copy, per thread) or null when the draw is left as it is.
+inline const State* PointSpriteStages(const State& s, uint32_t prim) {
+    if (prim != 1 || !s.rs[kRsPointSpriteEnable] || s.ps || !s.textures[3]) return nullptr;
+    thread_local std::unique_ptr<State> t;
+    if (!t) t = std::make_unique<State>();
+    *t = s;
+    t->textures[0] = s.textures[3];
+    t->palettes[0] = s.palettes[3];
+    t->tss[0] = s.tss[3];
+    t->textures[3] = 0;
+    t->palettes[3] = 0;
+    t->tss[3][kTssColorOp] = 1;  // D3DTOP_DISABLE
+    t->tss[3][kTssAlphaOp] = 1;
+    return t.get();
+}
 
 // what a title's code may change about one draw: g_draw_filter, set before the first frame, sees each draw's state
 // (on the render thread when there is one) and may drop its depth test or the draw

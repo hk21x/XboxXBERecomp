@@ -1114,6 +1114,7 @@ void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t rects
 }
 
 void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
         Clear(s, 0, nullptr, 0xF0, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
         return;
@@ -1235,7 +1236,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             TextureDesc sd;
             if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], sd) && !FindReplacement(sd.data)) Sharpen2D(sd);
         }
-    if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && rt.h == 480 && rt.w >= rt.h &&
+    if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
     std::vector<uint8_t> squeezable(as.vertex_count, 0);  // squeezed below, once the draw's extent is known
@@ -1278,6 +1279,24 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                 mul(s.transforms[256].data(), s.transforms[2].data(), wv);
                 mul(wv, s.transforms[3].data(), wvp);
                 for (int j = 0; j < 4; j++) cp[j] = q[0] * wvp[j] + q[1] * wvp[4 + j] + q[2] * wvp[8 + j] + wvp[12 + j];
+                if (uint32_t blend = s.rs[kRsVertexBlend]; blend && blend <= 6 && slot[1] >= 0) {
+                    // vertex blending, as FixedVertexHlsl: in view space, each world matrix by its weight
+                    uint32_t matrices = (blend + 3) / 2;
+                    Vec bw = vp.in[1];
+                    if (blend & 1) {
+                        bw[matrices - 1] = 1;
+                        for (uint32_t m = 0; m + 1 < matrices; m++) bw[matrices - 1] -= bw[m];
+                    }
+                    float e[3] = {};
+                    for (uint32_t m = 0; m < matrices; m++) {
+                        float bv[16];
+                        mul(s.transforms[256 + m].data(), s.transforms[2].data(), bv);
+                        for (int j = 0; j < 3; j++)
+                            e[j] += bw[m] * (q[0] * bv[j] + q[1] * bv[4 + j] + q[2] * bv[8 + j] + bv[12 + j]);
+                    }
+                    const float* pm = s.transforms[3].data();
+                    for (int j = 0; j < 4; j++) cp[j] = e[0] * pm[j] + e[1] * pm[4 + j] + e[2] * pm[8 + j] + pm[12 + j];
+                }
                 float w = MagClamp(cp[3]);
                 const Viewport& v = s.viewport;
                 o.pos = V(v.x + (cp[0] / w + 1) * 0.5f * v.w, v.y + (1 - cp[1] / w) * 0.5f * v.h,
@@ -1300,6 +1319,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     // as the renderers: a draw spanning the frame's width (a full screen quad) keeps the vertices on or past its edges
     // where they are; any other is squeezed whole (EoN's driving radar: big tiles past the left edge only)
     // (positions here are already in aa_x pixels; the squeeze works in the draw's own, as it did per vertex)
+    float clip_squeeze = 1;  // squeezed whole: the viewport and scissor go with the picture (gpu::SqueezedX)
     if (squeeze != 1) {
         const float ax = float(s.aa_x), w = float(rt.w);
         float lo = 1e30f, hi = -1e30f;
@@ -1313,6 +1333,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
         const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
         if (!s.squeeze_beyond && !spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
+        if (!spans) clip_squeeze = squeeze;
         for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
             float x = verts[vi].pos[0] / ax;
             if (squeezable[vi] && !(spans && AtFrameEdge(x, w)))
@@ -1417,6 +1438,17 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         top = std::max(top, int(s.scissors[1]));
         right = std::min(right, int(s.scissors[2]));
         bottom = std::min(bottom, int(s.scissors[3]));
+    }
+    if (clip_squeeze != 1) {
+        const float c = float(rt.w) * 0.5f;
+        const float moved = s.squeeze_beyond ? s.squeeze_shift : 0.0f;  // the clip goes with the moved picture
+        left = int(c + (float(left) + moved - c) * clip_squeeze);
+        right = int(c + (float(right) + moved - c) * clip_squeeze + 0.999f);
+    }
+    if (s.squeeze_margin && squeeze != 1) {  // only the margin the squeezed picture leaves on that side
+        const float c = float(rt.w) * 0.5f, edge = c + (s.squeeze_margin < 0 ? -c : c) * squeeze;
+        left = s.squeeze_margin < 0 ? 0 : int(edge);
+        right = s.squeeze_margin < 0 ? int(edge + 0.999f) : int(rt.w);
     }
     left *= int(s.aa_x);
     right *= int(s.aa_x);

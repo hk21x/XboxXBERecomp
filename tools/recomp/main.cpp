@@ -83,6 +83,7 @@ static bool LoadConfig(const fs::path& path, Config& cfg, const fs::path& xdk_di
     if (auto a = t["xbe"]["trace"].as_array())
         for (auto& i : *a) cfg.trace.insert(uint32_t(i.value_or(int64_t(0))));
     if (auto v = t["xbe"]["out"].value<std::string>()) cfg.out_dir = *v;
+    if (auto v = t["xbe"]["library"].value<std::string>()) cfg.library = *v;
     if (auto v = t["xbe"]["partitions"].value<int64_t>()) cfg.partitions = uint32_t(*v);
     if (auto v = t["xbe"]["gap_fill"].value<bool>()) cfg.gap_fill = *v;
     if (auto v = t["xbe"]["pointer_seeds"].value<bool>()) cfg.pointer_seeds = *v;

@@ -30,7 +30,8 @@ struct Target {
     uint32_t data = 0, bytes = 0;
     uint64_t epoch = 0, sig = 0;  // last lock seen, guest memory as last matched
     bool drawn = false;           // the GPU wrote it since the last readback
-    bool linear32 = true;         // a 32 bit linear surface in guest memory, the only kind written back
+    bool linear32 = true;         // a 32 bit linear surface in guest memory, written back row by row
+    bool swizzled32 = false;      // a 32 bit swizzled one, written back in Morton order (a title reading it as data)
     std::vector<uint8_t> read;    // what Sync left in guest memory
     Microsoft::WRL::ComPtr<ID3D12Resource> fb;  // copy read by draws that sample the target they render to
     D3D12_RESOURCE_STATES fb_state = D3D12_RESOURCE_STATE_COPY_DEST;

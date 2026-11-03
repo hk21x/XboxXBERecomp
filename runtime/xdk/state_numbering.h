@@ -12,8 +12,8 @@
 #ifndef XDK_StateNumbering
 #define XDK_StateNumbering 5659
 #endif
-static_assert(XDK_StateNumbering == 5659 || XDK_StateNumbering == 3948,
-              "layout.toml StateNumbering: 5659 or 3948 (a new generation needs its table in xdk/state_numbering.h)");
+static_assert(XDK_StateNumbering == 5659 || XDK_StateNumbering == 3948 || XDK_StateNumbering == 4039,
+              "layout.toml StateNumbering: 5659, 4039 or 3948 (a new generation needs its table in xdk/state_numbering.h)");
 
 namespace xdk::states {
 constexpr uint32_t kNone = 0xFFFFFFFFu;
@@ -50,7 +50,22 @@ constexpr Numbering Make3948() {
     return n;
 }
 
-constexpr Numbering kNumbering = XDK_StateNumbering == 3948 ? Make3948() : Make5659();
+// 4039: 82 simple, 35 deferred and 29 complex states. Deferred as 3948's, with SwapFilter last (the frame buffer init
+// sets it); complex are 5659's less SampleAlpha. Texture stage states as 5659's.
+constexpr Numbering Make4039() {
+    Numbering n{82, 146, {}, {}};
+    for (auto& r : n.rs) r = kNone;
+    for (uint32_t i = gpu::kRsFogEnable; i <= gpu::kRsPointSizeMax + 2; i++) n.rs[i] = i - 10;
+    n.rs[gpu::kRsPresentationInterval - 1] = 116;
+    for (uint32_t i = gpu::kRsPsTextureModes; i <= gpu::kRsLineWidth; i++) n.rs[i] = i - 19;
+    for (uint32_t i = gpu::kRsDxt1NoiseEnable; i <= gpu::kRsDoNotCullUncompressed; i++) n.rs[i] = i - 20;
+    for (uint32_t i = 0; i < gpu::kTssCount; i++) n.tss[i] = i;
+    return n;
+}
+
+constexpr Numbering kNumbering = XDK_StateNumbering == 3948   ? Make3948()
+                                 : XDK_StateNumbering == 4039 ? Make4039()
+                                                              : Make5659();
 
 // the title's render state -> 5659's, kNone for a simple state or one 5659 lacks
 constexpr uint32_t RsFromTitle(uint32_t t) {

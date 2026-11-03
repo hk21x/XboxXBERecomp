@@ -88,6 +88,9 @@ struct Perf {
     // counts and bytes
     uint64_t draws = 0;
     uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
+    uint64_t stage_last = 0, stage_memo = 0, stage_target = 0, stage_full = 0;  // bound stages, by how they were found
+    uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
+    double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
     uint64_t upload = 0;
     uint64_t overflow = 0;
@@ -262,7 +265,7 @@ struct BlitOptions {
     float mul = 1;            // colour scale
     DXGI_FORMAT rtv = kBgra;  // the target's format
     bool over = false;        // premultiplied over the target, which keeps its alpha
-    bool fxaa = false;        // fast approximate antialiasing (the finished frame; taps and alpha unused)
+    bool final = false;       // the finished frame: psfinal with the settings' FXAA and sharpening (taps, alpha unused)
     uint32_t samples = 1;     // the target's (an MSAA twin's)
     ID3D12Resource* mix = nullptr;  // the last frame, the source over it at the weight mul (psmix)
 };
@@ -427,7 +430,7 @@ private:
     void CaptureShader(const char* kind, uint64_t key, const std::string& src);
     void SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages);
     uint32_t EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp);
-    void SetViewportScissor(const State& s, uint32_t gw);
+    void SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc);
     void SetBlendFactorStencilRef(const State& s);
     void DrawGeometry(const Assembled& a);
     void UploadVertexBuffers(const Assembled& a);
@@ -440,7 +443,7 @@ private:
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
     // Blit's pipeline
-    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool fxaa = false, uint32_t samples = 1, bool mix = false);
+    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool final = false, uint32_t samples = 1, bool mix = false);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC FullScreenPipelineDesc(ID3DBlob* vs, ID3DBlob* ps, DXGI_FORMAT rtv) const;
     // Init, in order, each callee right after its caller
     bool CreateDevice();
@@ -458,7 +461,9 @@ private:
     void ResizeSwap();
     void UploadGammaRamp();
     void DrawFrame(Target* t, uint32_t bi);
-    void BlitFrame(Target& t);
+    void BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt);
+    bool SmaaFrame(Target& t);  // Settings::smaa: the frame through SMAA's passes into smaa_[2], false when it cannot
+    bool EnsureSmaa(uint32_t w, uint32_t h);
     void HoldFrame(Target& t, const Surface& front);
     // HoldFrame: the last two images of a title blending its frames
     ComPtr<ID3D12Resource> hold_[2];
@@ -505,6 +510,27 @@ private:
         uint64_t tmade;
     };
     std::unordered_map<uint64_t, StageMemo> stage_memo_;
+    // each stage's last memo entry, and what it was asked for: most draws bind what the draw before them did
+    struct StageLast {
+        uint32_t words[8];
+        uint64_t valid = ~0ull;
+        StageMemo memo;
+    } stage_last_[4];
+    // the last draw's sampler table and what it was made from
+    struct SamplerInputs {
+        std::array<std::array<uint32_t, kTssCount>, 4> tss;
+        uint32_t mips[4], aniso, shadow_func;
+        uint8_t shadow[4], replaced[4];
+        uint8_t clamp, pad[3];
+    } samplers_last_{};
+    uint32_t samplers_last_slot_ = ~0u;
+    // the last draw's view table
+    struct ViewKey {
+        ID3D12Resource* res[4];
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv[4];
+    } views_last_{};
+    uint32_t views_last_slot_ = ~0u;
+    uint64_t views_last_gen_ = 0;
     uint64_t stage_memo_key_ = 0;  // frame and targets_gen_ the memo holds for
     bool draw_2d_ = false;  // the draw is 2D: its textures are sharpened (Sharpen2D)
     struct TargetMemo {
@@ -618,6 +644,17 @@ private:
     ComPtr<IDXGIAdapter3> adapter3_;  // for the video memory in use (logged when a pipeline cannot be made)
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_;
+    UINT swap_flags_ = 0;
+    HANDLE latency_wait_ = nullptr;  // Settings::low_latency: the swap chain's, waited on after each present
+    // SMAA on the finished frame: edges, weights, the result; its two lookups; the size they were made for
+    struct SmaaPass {
+        ComPtr<ID3D12Resource> res;
+        uint32_t view = 0;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    } smaa_[3];
+    ComPtr<ID3D12Resource> smaa_area_, smaa_search_;
+    uint32_t smaa_w_ = 0, smaa_h_ = 0;
+    ComPtr<ID3D12Resource> SmaaLookup(DXGI_FORMAT fmt, uint32_t w, uint32_t h, const unsigned char* bytes, uint32_t row);
     ComPtr<ID3D12Resource> bb_[kFrames];
     ComPtr<ID3D12Fence> fence_;
     HANDLE event_ = nullptr;
@@ -881,7 +918,8 @@ bool D3D12Backend::CreateSwapChain(HWND hwnd) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = kFrames;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    swap_flags_ = (tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (app::Get().low_latency ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
+    sd.Flags = swap_flags_;
     ComPtr<IDXGISwapChain1> sc1;
     if (FAILED(factory_->CreateSwapChainForHwnd(queue_.Get(), hwnd, &sd, nullptr, nullptr, &sc1))) {
         LOGE("d3d12: no swap chain");
@@ -889,6 +927,11 @@ bool D3D12Backend::CreateSwapChain(HWND hwnd) {
     }
     factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
     sc1.As(&swap_);
+    if (app::Get().low_latency) {
+        swap_->SetMaximumFrameLatency(1);
+        latency_wait_ = swap_->GetFrameLatencyWaitableObject();
+        LOGR("d3d12: low latency, a frame held");
+    }
     return true;
 }
 
@@ -1261,6 +1304,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     t.data = slot.data;
     TextureDesc d;
     t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
+    t.swizzled32 = !depth && !t.linear32 && Describe(s.header, d) && Format(d.format).swizzled &&
+                   !Format(d.format).compressed && Format(d.format).bits == 32;
     t.bytes = GuestPitch(slot.gw) * slot.gh;
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
@@ -1498,6 +1543,7 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
     if (it == samplers_.end()) {
         if (smp_used_ + 4 > kSamplerCount) {
             samplers_.clear();
+            samplers_last_slot_ = ~0u;
             smp_used_ = 0;
         }
         si = smp_used_;
@@ -1553,9 +1599,12 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     Alloc cb = Upload(256, 256);
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
+    const app::Settings& st = app::Get();
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     std::memcpy(cb.cpu, c, sizeof(c));
-    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, o.fxaa, o.samples, o.mix != nullptr);
-    if (!pso && o.fxaa) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
+    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples, o.mix != nullptr);
+    if (!pso && final) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
     if (pso) DrawFullScreen(pso, cb.gpu, slot, si);
 }
 
@@ -1639,12 +1688,12 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC D3D12Backend::FullScreenPipelineDesc(ID3DBlob
     return d;
 }
 
-ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool fxaa, uint32_t samples, bool mix) {
-    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(fxaa) << 33 | uint64_t(mix) << 34 | uint64_t(samples) << 40];
+ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool final, uint32_t samples, bool mix) {
+    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(final) << 33 | uint64_t(mix) << 34 | uint64_t(samples) << 40];
     if (pso) return pso.Get();
     uint64_t h;
     ID3DBlob* vs = Compile(kBlitHlsl, "vs", "vs_5_0", h);
-    ID3DBlob* ps = Compile(kBlitHlsl, mix ? "psmix" : fxaa ? "psfxaa" : "psmain", "ps_5_0", h);
+    ID3DBlob* ps = Compile(kBlitHlsl, mix ? "psmix" : final ? "psfinal" : "psmain", "ps_5_0", h);
     if (!vs || !ps) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, rtv);
     d.SampleDesc.Count = samples;
@@ -2032,15 +2081,17 @@ void ReadStagePalette(const State& s, int stage, const TextureDesc& d, StagePale
 ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                                DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
-    if (!d.linear && !d.cube && d.depth == 1 && !fi.depth) {
+    // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
+    if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && ((r->sharpened && !app::Get().sharp_2d) || !ReplacementFits(*r, d))) r = nullptr;
+        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
         }
     }
     if (draw_2d_) Sharpen2D(d);
+    else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
@@ -2097,6 +2148,10 @@ ID3D12Resource* D3D12Backend::BindReplacement(const Replacement& r, const Textur
                                               D3D12_SHADER_RESOURCE_VIEW_DESC& sv) {
     constexpr uint32_t kFmtA8R8G8B8 = 0x06;
     const uint64_t key = uint64_t(0xFFFFFFFFu) << 32 | d.data;  // no palette is at the top of memory
+    if (auto had = textures_.find(key); r.sharpened && (had == textures_.end() || !had->second.res || had->second.sig != r.version) &&
+                                        !TakePictureBudget(presents_, r))
+        return nullptr;
+    const auto load_start = std::chrono::steady_clock::now();
     Tex& tx = textures_[key];
     if (tx.frame != presents_ + 1 && !ReplacementHolds(r)) {
         if (tx.res) CurrentFrame().garbage.push_back(tx.res);
@@ -2130,6 +2185,9 @@ ID3D12Resource* D3D12Backend::BindReplacement(const Replacement& r, const Textur
         st = D3D12_RESOURCE_STATE_COPY_DEST;
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         tx.sig = r.version;
+        // how long a picture really takes, for a hitch to be read from the log
+        const double load_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_start).count();
+        if (load_ms > 4) LOG_FIRST(16, "d3d12: picture for %08X (%ux%u) took %.1f ms to load", d.data, r.width, r.height, load_ms);
         static bool said = false;
         if (!said) {
             said = true;
@@ -2190,13 +2248,30 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         stage_memo_key_ = memo_now;
     }
     uint32_t pal = s.palettes[size_t(stage)];
-    uint32_t words[8] = {header, kernel::R32(header), kernel::R32(header + 4), kernel::R32(header + 12),
-                         kernel::R32(header + 16), pal, pal ? kernel::R32(pal + 4) : 0, uint32_t(stage)};
-    uint64_t memo_key = Hash(words, sizeof(words));
+    // what the header says, not where it is: a title pointing one header at each material in turn gets a new copy in the
+    // render thread's header ring for each, and the Common word's low bits are its reference count. 2D draws apart:
+    // BindGuestTexture asks for their sharpened pictures
+    uint32_t words[8] = {kernel::R32(header) & 0xFFFF0000u, kernel::R32(header + 4), kernel::R32(header + 12),
+                         kernel::R32(header + 16), pal, pal ? kernel::R32(pal + 4) : 0, uint32_t(stage),
+                         uint32_t(draw_2d_)};
     bool memo_ok = !ext_ && !pal;  // a palette's colours may change without its header: checked every time
+    uint64_t memo_key = 0;
     if (memo_ok) {
+        StageLast& last = stage_last_[stage];
+        if (last.valid == memo_now && !std::memcmp(last.words, words, sizeof(words))) {
+            g_perf.stage_last++;
+            info = last.memo.info;
+            sv = last.memo.sv;
+            stages.replaced[stage] = last.memo.replaced;
+            return last.memo.res;
+        }
+        memo_key = Hash(words, sizeof(words));
         auto m = stage_memo_.find(memo_key);
         if (m != stage_memo_.end()) {
+            g_perf.stage_memo++;
+            std::memcpy(last.words, words, sizeof(words));
+            last.valid = memo_now;
+            last.memo = m->second;
             info = m->second.info;
             sv = m->second.sv;
             stages.replaced[stage] = m->second.replaced;
@@ -2260,31 +2335,51 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
                  d.height, d.pitch, tit->second.gw, tit->second.gh);
     }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
+        g_perf.stage_target++;
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
+    g_perf.stage_full++;
     ID3D12Resource* res = BindGuestTexture(s, stage, d, fi, stages);
     if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage], stage0_.tw, stage0_.th, stage0_.tl, stage0_.tf, stage0_.tu, stage0_.tmade};
     return res;
 }
 
 uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp) {
-    D3D12_SAMPLER_DESC sd[4];
     uint32_t aniso = app::Get().aniso;
+    // what StageSampler reads, against the last draw's
+    SamplerInputs in;
+    std::memset(&in, 0, sizeof(in));
+    in.tss = s.tss;
+    in.aniso = aniso;
+    in.shadow_func = s.rs[kRsShadowFunc];
+    in.clamp = clamp;
+    for (int i = 0; i < 4; i++) {
+        in.mips[i] = stages.sv[i].Texture2D.MipLevels;
+        in.shadow[i] = stages.info[i].shadow;
+        in.replaced[i] = stages.replaced[i];
+    }
+    if (samplers_last_slot_ != ~0u && !std::memcmp(&in, &samplers_last_, sizeof(in))) {
+        g_perf.same_samplers++;
+        return samplers_last_slot_;
+    }
+    samplers_last_ = in;
+    D3D12_SAMPLER_DESC sd[4];
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso,
                                                    stages.replaced[i]);
     stage0_.sd = sd[0];
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
-    if (it != samplers_.end()) return it->second;
+    if (it != samplers_.end()) return samplers_last_slot_ = it->second;
     if (smp_used_ + 4 > kSamplerCount) {
         samplers_.clear();
+        samplers_last_slot_ = ~0u;
         smp_used_ = 0;
     }
     uint32_t base = smp_used_;
     smp_used_ += 4;
     for (int i = 0; i < 4; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
     samplers_[key] = base;
-    return base;
+    return samplers_last_slot_ = base;
 }
 
 // sets sh.vh and sh.vs_code, compiling the shader on a cache miss
@@ -2326,7 +2421,10 @@ bool D3D12Backend::BindStageTexturesAndTargets(const State& s, DrawTextures& sta
     for (int i = 0; i < 4; i++) stages.res[i] = BindTexture(s, i, stages);
     g_perf.bind += PerfMs(perf_t);
     // textures may have recorded copies that unbound the targets
-    return BindTargets(s);
+    perf_t = PerfNow();
+    bool bound = BindTargets(s);
+    g_perf.t_targets += PerfMs(perf_t);
+    return bound;
 }
 
 // sets sh.ph and sh.ps_code, compiling the shader on a cache miss
@@ -2520,10 +2618,7 @@ D3D12_SRV_DIMENSION NullViewDimension(uint8_t kind) {
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
     // the four views, and a table made for the same four earlier in this ring generation
-    struct ViewKey {
-        ID3D12Resource* res[4];
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv[4];
-    } key;
+    ViewKey key;
     std::memset(&key, 0, sizeof(key));
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[i];
@@ -2538,17 +2633,25 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
         tables_.clear();
         tables_gen_ = ring_gen_;
     }
-    uint64_t h = Hash(&key, sizeof(key));
-    auto found = tables_.find(h);
     uint32_t slot;
-    if (found != tables_.end()) {
-        slot = found->second;
-        g_perf.reused_tables++;
+    if (views_last_slot_ != ~0u && views_last_gen_ == ring_gen_ && !std::memcmp(&key, &views_last_, sizeof(key))) {
+        slot = views_last_slot_;
+        g_perf.same_views++;
     } else {
-        slot = AllocSrvSlots(4);
-        for (int i = 0; i < 4; i++)
-            dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
-        if (tables_gen_ == ring_gen_) tables_[h] = slot;  // a wrap while allocating started a new generation
+        uint64_t h = Hash(&key, sizeof(key));
+        auto found = tables_.find(h);
+        if (found != tables_.end()) {
+            slot = found->second;
+            g_perf.reused_tables++;
+        } else {
+            slot = AllocSrvSlots(4);
+            for (int i = 0; i < 4; i++)
+                dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+            if (tables_gen_ == ring_gen_) tables_[h] = slot;  // a wrap while allocating started a new generation
+        }
+        views_last_ = key;
+        views_last_slot_ = slot;
+        views_last_gen_ = ring_gen_;
     }
     SetRootTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
     uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
@@ -2556,7 +2659,7 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
 }
 
 // viewport covers the target, the guest viewport is in the shader; scissor clips to it
-void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
+void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc) {
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
     float W = float(b->w);
     float H = float(b->h);
@@ -2564,15 +2667,20 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     DrawStateCache& c = ds_cache_;
     if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) cl_->RSSetViewports(1, &vp);
     float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
-    LONG x0 = LONG(s.viewport.x * sx);
+    LONG x0 = LONG(SqueezedX(dc.hud, s.viewport.x) * sx);
     LONG y0 = LONG(s.viewport.y * sy);
-    LONG x1 = LONG((s.viewport.x + s.viewport.w) * sx);
+    LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
     if (s.scissor_count) {
-        x0 = std::max(x0, LONG(s.scissors[0] * sx));
+        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
         y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(s.scissors[2] * sx));
+        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
         y1 = std::min(y1, LONG(s.scissors[3] * sy));
+    }
+    if (s.squeeze_margin) {  // only the margin the squeezed picture leaves on that side
+        const LONG edge = LONG(SqueezedX(dc.hud, s.squeeze_margin < 0 ? 0.0f : dc.hud[1] * 2) * sx);
+        x0 = s.squeeze_margin < 0 ? 0 : edge;
+        x1 = s.squeeze_margin < 0 ? edge : LONG(W);
     }
     D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
                     std::clamp<LONG>(x1, 0, LONG(W)), std::clamp<LONG>(y1, 0, LONG(H))};
@@ -2712,6 +2820,7 @@ void D3D12Backend::DeliverReports() {
 }
 
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
         Clear(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
         return;
@@ -2798,6 +2907,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     bool tested = test.vs && s.vs_handle == test.vs;
     if (tested && test.alphakill) pk.alphakill = 0;
     pk.quad = sh.quad;
+    // alpha tested, not blended, onto MSAA twins: Settings::alpha_coverage (not quads, whose shader is rewritten)
+    if (app::Get().alpha_coverage && bound_ms_ && !sh.quad && SimpleState(s, kMAlphaTestEnable) && !SimpleState(s, kMBlendEnable))
+        pk.coverage = msaa_;
     // D3DZB_USEW draws write w as their depth, as the console does (a Z buffer lost the showroom car's panels to its
     // interior); XBE_WBUFFER=0 goes back to z / w
     static const bool wbuffer = [] {
@@ -2868,7 +2980,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     SetTextureViewsAndSamplers(s, a, stages);
     g_perf.tables += PerfMs(perf_step);
     perf_step = PerfNow();
-    SetViewportScissor(s, size.w);
+    SetViewportScissor(s, size.w, c);
     SetBlendFactorStencilRef(s);
     g_perf.setup += PerfMs(perf_step);
 
@@ -3186,7 +3298,7 @@ void D3D12Backend::ResizeSwap() {
         if (f.fence) WaitFence(f.fence);
     }
     for (auto& b : bb_) b.Reset();
-    swap_->ResizeBuffers(kFrames, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+    swap_->ResizeBuffers(kFrames, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, swap_flags_);
     CreateBackBufferViews();
     bb_w_ = w;
     bb_h_ = h;
@@ -3265,7 +3377,105 @@ void D3D12Backend::UploadGammaRamp() {
     CopyRegion(&dl, 0, 0, &sl, nullptr);
 }
 
-void D3D12Backend::BlitFrame(Target& t) {
+// a lookup texture of SMAA's, copied in on this frame's list
+ComPtr<ID3D12Resource> D3D12Backend::SmaaLookup(DXGI_FORMAT fmt, uint32_t w, uint32_t h, const unsigned char* bytes, uint32_t row) {
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC td = Texture2DDesc(fmt, w, h);
+    ComPtr<ID3D12Resource> tex;
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)))) return nullptr;
+    const uint32_t pitch = (row + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    Alloc a = Upload(uint64_t(pitch) * h + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+    for (uint32_t y = 0; y < h; y++) std::memcpy(a.cpu + size_t(y) * pitch, bytes + size_t(y) * row, row);
+    D3D12_TEXTURE_COPY_LOCATION dl{tex.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+    sl.PlacedFootprint.Offset = a.off;
+    sl.PlacedFootprint.Footprint = {fmt, w, h, 1, pitch};
+    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
+    Transition(tex.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    return tex;
+}
+
+bool D3D12Backend::EnsureSmaa(uint32_t w, uint32_t h) {
+    if (!smaa_area_) {
+        smaa_area_ = SmaaLookup(DXGI_FORMAT_R8G8_UNORM, kSmaaAreaWidth, kSmaaAreaHeight, kSmaaArea, kSmaaAreaWidth * 2);
+        smaa_search_ = SmaaLookup(DXGI_FORMAT_R8_UNORM, kSmaaSearchWidth, kSmaaSearchHeight, kSmaaSearch, kSmaaSearchWidth);
+        if (!smaa_area_ || !smaa_search_) {
+            smaa_area_.Reset();
+            return false;
+        }
+    }
+    if (smaa_w_ == w && smaa_h_ == h) return true;
+    for (SmaaPass& p : smaa_) {
+        if (p.res) {
+            CurrentFrame().garbage.push_back(p.res);
+            p.res.Reset();
+            free_rtv_.push_back(p.view);
+        }
+    }
+    smaa_w_ = smaa_h_ = 0;
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+    for (SmaaPass& p : smaa_) {
+        D3D12_RESOURCE_DESC td = Texture2DDesc(kBgra, w, h);
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        p.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        if (free_rtv_.empty() ||
+            FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, p.state, nullptr, IID_PPV_ARGS(&p.res)))) {
+            LOG_FIRST(4, "d3d12: no SMAA targets at %ux%u", w, h);
+            for (SmaaPass& q : smaa_)
+                if (q.res) q.res.Reset(), free_rtv_.push_back(q.view);
+            return false;
+        }
+        p.view = free_rtv_.back();
+        free_rtv_.pop_back();
+        dev_->CreateRenderTargetView(p.res.Get(), nullptr, Cpu(rtv_heap_.Get(), p.view, rtv_inc_));
+    }
+    smaa_w_ = w;
+    smaa_h_ = h;
+    return true;
+}
+
+bool D3D12Backend::SmaaFrame(Target& t) {
+    if (!EnsureSmaa(t.w, t.h)) return false;
+    const float c[8] = {0, 0, 1, 1, 1.0f / t.w, 1.0f / t.h, float(t.w), float(t.h)};
+    struct View {
+        ID3D12Resource* res;
+        DXGI_FORMAT fmt;
+    };
+    auto pass = [&](const char* vse, const char* pse, SmaaPass& dst, std::initializer_list<View> views) {
+        auto& pso = blit_psos_[Hash(pse, std::strlen(pse), Hash("smaa", 4))];
+        if (!pso) {
+            uint64_t h;
+            ID3DBlob* vs = Compile(kSmaaHlsl, vse, "vs_5_0", h);
+            ID3DBlob* ps = Compile(kSmaaHlsl, pse, "ps_5_0", h);
+            if (!vs || !ps) return false;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, kBgra);
+            if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
+        }
+        Transition(dst.res.Get(), dst.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        SetBlitTarget(Cpu(rtv_heap_.Get(), dst.view, rtv_inc_), t.w, t.h);
+        uint32_t slot = AllocSrvSlots(uint32_t(views.size()));
+        uint32_t i = 0;
+        for (const View& v : views) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = v.fmt;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            dev_->CreateShaderResourceView(v.res, &sv, Cpu(srv_heap_.Get(), slot + i++, srv_inc_));
+        }
+        Alloc cb = Upload(256, 256);
+        std::memcpy(cb.cpu, c, sizeof(c));
+        DrawFullScreen(pso.Get(), cb.gpu, slot);
+        Transition(dst.res.Get(), dst.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        return true;
+    };
+    return pass("vsedge", "psedge", smaa_[0], {{t.res.Get(), t.fmt}}) &&
+           pass("vsweight", "psweight", smaa_[1], {{smaa_[0].res.Get(), kBgra}, {smaa_area_.Get(), DXGI_FORMAT_R8G8_UNORM}, {smaa_search_.Get(), DXGI_FORMAT_R8_UNORM}}) &&
+           pass("vsblend", "psblend", smaa_[2], {{t.res.Get(), t.fmt}, {smaa_[1].res.Get(), kBgra}});
+}
+
+void D3D12Backend::BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt) {
     // 16:9 when the console reports a widescreen display, else 4:3; ultrawide the screen's shape
     float aspect = app::FrameAspect();
     float w = float(bb_w_);
@@ -3278,12 +3488,12 @@ void D3D12Backend::BlitFrame(Target& t) {
     ForgetDrawState();
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
-    Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // a title blending its frames (HoldFrame): the last two images mixed, gamma after; every other frame the final pass
     if (hold_live_ && hold_w_ < 1) {
-        Blit(hold_[hold_last_].Get(), t.fmt, uv, {.gamma = gamma_, .mul = hold_w_, .mix = hold_[!hold_last_].Get()});
+        Blit(hold_[hold_last_].Get(), fmt, uv, {.gamma = gamma_, .mul = hold_w_, .mix = hold_[!hold_last_].Get()});
         return;
     }
-    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .fxaa = app::Get().antialiasing == 1});
+    Blit(frame, fmt, uv, {.gamma = gamma_, .final = true});
 }
 
 // a title blending its frames: the last two images kept, the newest copied when it changes
@@ -3347,6 +3557,14 @@ void D3D12Backend::RenderUi() {
 }
 
 void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
+    ID3D12Resource* frame = nullptr;
+    DXGI_FORMAT frame_fmt = kBgra;
+    if (t) {
+        Transition(t->res.Get(), t->state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        frame = t->res.Get();
+        frame_fmt = t->fmt;
+        if (app::Get().smaa && SmaaFrame(*t)) frame = smaa_[2].res.Get(), frame_fmt = kBgra;
+    }
     D3D12_RESOURCE_STATES bs = D3D12_RESOURCE_STATE_PRESENT;
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), kRtvCount + bi, rtv_inc_);
@@ -3354,7 +3572,15 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     cl_->ClearRenderTargetView(rh, black, 0, nullptr);
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
-    if (t) BlitFrame(*t);
+    if (frame) BlitFrame(frame, frame_fmt);
+    // F12: the frame as shown, before the interface; the read submits, so the target is set again
+    if (app::TakeScreenshotRequest()) {
+        Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        std::vector<uint8_t> px;
+        if (ReadBack(bb_[bi].Get(), bb_w_, bb_h_, px)) app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
+        Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    }
     RenderUi();
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
 }
@@ -3430,11 +3656,14 @@ void LogPerf() {
              g_perf_sync_late.exchange(0) / n);
         LOGR("perf: per frame %.0f draws (%.0f raw) %.0fk verts %.1f MB upload %.1f overflow | %.0f checks %.2f MB "
              "hashed | %.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f shrinks, "
-             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables",
+             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables | "
+             "stages: %.0f last %.0f memo %.0f target %.0f full | same as last draw: %.0f samplers %.0f views | targets %.2f ms",
              p.draws / n, p.raw / n, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n, p.sigs / n,
              p.sig_bytes / n / 1048576.0, p.texups / n, p.texup_bytes / n / 1048576.0, p.newtex / n,
              p.targets / n, p.rtups / n, p.shrinks / n, p.syncs / n, p.lates / n,
-             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n);
+             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
+             p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
+             p.same_views / n, p.t_targets / n);
         g_perf = Perf{};
         perf_start = PerfClock::now();
         perf_frames = 0;
@@ -3727,6 +3956,7 @@ void D3D12Backend::Present(const Surface& front) {
     if (FAILED(swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)))
         ReportRemoved("presenting");
     g_perf.swap += PerfMs(perf_swap);
+    if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
 
     presents_++;
     // every 5 seconds, kept in release builds: video memory and what the renderer holds (a build-up before a hang)
@@ -3756,9 +3986,9 @@ void D3D12Backend::Present(const Surface& front) {
 }
 
 void D3D12Backend::ApplySettings() {
-    // antialiasing 2, 3, 4: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
-    static const uint32_t kSamples[] = {1, 1, 2, 4, 8};
-    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().antialiasing, 4)];
+    // the msaa setting 1, 2, 3: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
+    static const uint32_t kSamples[] = {1, 2, 4, 8};
+    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().msaa, 3)];
     if (want_ms != msaa_) {
         for (auto& [key, t] : targets_) DropMs(t);
         msaa_ = want_ms;
@@ -3856,6 +4086,7 @@ void D3D12Backend::RescaleTargets() {
         t.sig = old.sig;
         t.drawn = old.drawn;
         t.linear32 = old.linear32;
+        t.swizzled32 = old.swizzled32;
         t.read = std::move(old.read);
         t.range = old.range;
         t.tag = old.tag;
@@ -4037,9 +4268,9 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
     if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
-    // pixels written back are 32 bit linear rows: over a narrower or swizzled surface they would run past it
-    if (!it->second.linear32) {
-        LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit linear surface", data);
+    // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
+    if (!it->second.linear32 && !it->second.swizzled32) {
+        LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit surface", data);
         return;
     }
     PerfScope perf_sync{g_perf.sync};
@@ -4059,7 +4290,13 @@ void D3D12Backend::Sync(uint32_t data, uint32_t) {
     // color targets are 32 bit linear in guest memory, the pitch rounds to 64 bytes
     uint32_t pitch = GuestPitch(t.gw);
     uint8_t* guest = static_cast<uint8_t*>(kernel::HostPtr(data));
-    for (uint32_t y = 0; y < t.gh; y++) std::memcpy(guest + size_t(y) * pitch, &px[size_t(y) * t.gw * 4], t.gw * 4);
+    if (t.swizzled32) {
+        for (uint32_t y = 0; y < t.gh; y++)
+            for (uint32_t x = 0; x < t.gw; x++)
+                std::memcpy(guest + size_t(SwizzledOffset(x, y, t.gw, t.gh)) * 4, &px[(size_t(y) * t.gw + x) * 4], 4);
+    } else {
+        for (uint32_t y = 0; y < t.gh; y++) std::memcpy(guest + size_t(y) * pitch, &px[size_t(y) * t.gw * 4], t.gw * 4);
+    }
     t.read = std::move(px);
     t.drawn = false;
     t.sig = MemSig(t.data, t.bytes);

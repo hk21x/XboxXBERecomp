@@ -332,6 +332,9 @@ void AuditDraw(const State& s, uint32_t prim, uint32_t start, uint32_t count, co
     }
     PixelKey pk = MakePixelKey(s, info);
     pk.quad = quad;
+    // AUDIT_COVERAGE=samples: the shaders as Settings::alpha_coverage makes them, for scripts/shadercheck.sh
+    static const uint32_t coverage = std::getenv("AUDIT_COVERAGE") ? uint32_t(std::atoi(std::getenv("AUDIT_COVERAGE"))) : 0;
+    pk.coverage = quad ? 0 : coverage;
     // as the D3D12 backend: W-buffered unless XBE_WBUFFER=0
     static const bool wbuffer = !(std::getenv("XBE_WBUFFER") && *std::getenv("XBE_WBUFFER") == '0');
     pk.wbuf = wbuffer && s.rs[kRsZEnable] == 2 ? 1 : 0;

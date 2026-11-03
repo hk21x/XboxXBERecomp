@@ -42,7 +42,17 @@ bool Analysis::Decode(uint32_t va, ZydisDecodedInstruction& insn, ZydisDecodedOp
     uint32_t avail = 0;
     const uint8_t* p = Bytes(va, avail);
     if (!p || !avail) return false;
-    return ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec_, p, std::min<uint32_t>(avail, 15), &insn, ops));
+    uint32_t n = std::min<uint32_t>(avail, 15);
+    // an instruction may end in the section's zero filled tail, which the loader maps past the file's bytes
+    // (NightFire's D3DX ends with ret 0xC, its last byte past the raw data)
+    uint8_t padded[15] = {};
+    const xbe::Section* s = img.SectionAt(va);
+    if (n < 15 && s && s->vsize > s->rsize && va + n < s->va + s->vsize) {
+        std::memcpy(padded, p, n);
+        n = std::min<uint32_t>(15, s->va + s->vsize - va);
+        p = padded;
+    }
+    return ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec_, p, n, &insn, ops));
 }
 
 bool Analysis::ReadTable(uint32_t jmp_va, const ZydisDecodedOperand& mem, JumpTable& jt) {
@@ -222,7 +232,13 @@ bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls) 
             if (conflict(va, insn.len)) {
                 // real control flow wins over a guessed entry decoded across these bytes: both decodes are kept
                 bool data = false;
-                for (uint32_t i = 0; i < insn.len; i++) data |= !IsCode(va + i) || cover_[va + i - lo_] == 3;
+                // its bytes are code, or (past the first) its own section's zero filled tail, which the loader maps
+                const xbe::Section* sec = img.SectionAt(va);
+                for (uint32_t i = 0; i < insn.len; i++) {
+                    uint32_t b = va + i;
+                    bool tail = i && sec && b >= sec->va + sec->rsize && b < sec->va + sec->vsize;
+                    data |= tail ? false : !IsCode(b) || cover_[b - lo_] == 3;
+                }
                 if (!trusted) return false;
                 if (data) break;
             }

@@ -111,6 +111,9 @@ Pad Poll(int port) {
         for (const Press& s : script)
             if (t >= s.at && t <= s.at + s.len) Apply(s.buttons, p);
         if (live.at >= 0 && t >= live.at && t <= live.at + live.len) Apply(live.buttons, p);
+        // PAD_WHEEL=N: from vertical blank N controller 1 is a steering wheel (as a bound wheel on Windows)
+        static const long wheel_from = harness::Env("PAD_WHEEL");
+        p.wheel = wheel_from > 0 && t >= double(wheel_from);
     }
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
@@ -126,6 +129,8 @@ bool TakeMouse(float& x, float& y) {
 bool UsingKeyboard() { return g_keyboard; }
 uint32_t MouseButtons() { return g_buttons; }
 // a held WHEELU or WHEELD gives one notch a poll
+void WheelSetup() {}
+
 int TakeWheel() {
     int w = g_wheel;
     g_wheel = 0;

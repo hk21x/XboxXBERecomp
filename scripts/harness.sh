@@ -16,6 +16,7 @@ else
 fi
 env "$@" bash sdk/harness/run.sh -x .local/harness/game -g "${GAME:-assets}" -o .local/run -t "$SECS" -s "$PAD"
 shopt -s nullglob
+mkdir -p captures
 for f in .local/run/*/cap/*.tga .local/run/*/*.tga; do
   convert "$f" "captures/$(date +%m%d-%H%M)-$(basename "${f%.tga}").png" || echo "cannot convert $f"
 done

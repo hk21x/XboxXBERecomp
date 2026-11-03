@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -22,6 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "app/app.h"
 #include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
@@ -34,6 +36,9 @@ namespace {
 
 // commands handed over at once, so the render thread keeps close behind and a wait is short
 constexpr uint32_t kBatchCommands = 64;
+
+// GameInfo::merge_draws: what one draw may grow to, so a long run still reaches the render thread in good time
+constexpr uint32_t kMergedIndices = 1u << 13;
 
 // resource headers the render thread reads: common, data, lock, format, size
 constexpr uint32_t kHeaderBytes = 20, kHeaderSlot = 32;
@@ -49,6 +54,7 @@ struct Cmd {
     float f = 0;
     uint32_t data = 0, size = 0;  // bytes in Batch::bytes
     int32_t vs = -1, ps = -1;     // index in Batch::vs / ps: the shader changed
+    bool joinable = false;        // a triangle list the next draw with the same state may add to (GameInfo::merge_draws)
     Surface s1, s2;
 };
 
@@ -75,7 +81,7 @@ std::vector<Range> StateRanges() {
         {At(s, &s.scissor_count), At(s, &s.transforms) - At(s, &s.scissor_count)},
         {At(s, &s.transforms[2]), 2 * sizeof(s.transforms[0])},
         {At(s, &s.transforms[16]), 4 * sizeof(s.transforms[0])},
-        {At(s, &s.transforms[256]), sizeof(s.transforms[0])},
+        {At(s, &s.transforms[256]), 4 * sizeof(s.transforms[0])},  // WORLD to WORLD3: vertex blending
         {At(s, &s.material), sizeof(State) - At(s, &s.material)},
     };
 }
@@ -117,15 +123,19 @@ public:
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
         auto t = Clock::now();
         SendState(s);
-        Cmd c{Op::Draw};
-        c.a = prim;
-        c.b = start;
-        c.c = count;
-        if (indices) {
-            c.d = 1;
-            c.data = Put(indices, size_t(count) * 2);
+        if (Mergeable(s, prim, count, indices)) {
+            PutMerged(prim, start, count, indices);
+        } else {
+            Cmd c{Op::Draw};
+            c.a = prim;
+            c.b = start;
+            c.c = count;
+            if (indices) {
+                c.d = 1;
+                c.data = Put(indices, size_t(count) * 2);
+            }
+            cur_->cmds.push_back(c);
         }
-        cur_->cmds.push_back(c);
         for (uint32_t tex : s.textures) Use(tex);
         for (uint32_t pal : s.palettes) Use(pal);
         for (const auto& st : s.streams) Use(st.vb);
@@ -251,6 +261,50 @@ private:
         }
         b->id = ++next_id_;
         return b;
+    }
+
+    // GameInfo::merge_draws: indexed triangles of the 3D world. Not 2D, whose squeezing looks at each draw's own vertices;
+    // not programs, which may be 2D; not a visibility test, counted per draw; not flat shading, whose colour comes from
+    // a vertex the list might not keep first
+    bool Mergeable(const State& s, uint32_t prim, uint32_t count, const uint8_t* indices) const {
+        constexpr uint32_t kFlat = 0x1D00;
+        return merge_ && indices && (prim == 5 || prim == 6) && count >= 3 && !(s.vs_handle & 1) && (s.vs_handle & 0xE) != 0x4 &&
+               !s.input_active && !s.blank_format && !s.simple[kMCountEnable >> 2] && s.simple[kMShadeMode >> 2] != kFlat;
+    }
+
+    // the draw as a triangle list, added to the command before it when nothing changed since: no state command came
+    // between them, so they differ only in which vertices they draw, and a list keeps their order and each one's winding
+    void PutMerged(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+        const uint32_t tris = prim == 5 ? count / 3 : count - 2;
+        const uint32_t n = tris * 3;
+        std::vector<uint8_t>& bytes = cur_->bytes;
+        Cmd* last = cur_->cmds.empty() ? nullptr : &cur_->cmds.back();
+        const bool join = last && last->joinable && last->b == start && last->c + n <= kMergedIndices &&
+                          bytes.size() == size_t(last->data) + size_t(last->c) * 2;
+        size_t at = join ? bytes.size() : (bytes.size() + 3) & ~size_t(3);
+        bytes.resize(at + size_t(n) * 2);
+        uint8_t* out = bytes.data() + at;
+        if (prim == 5) {
+            std::memcpy(out, indices, size_t(n) * 2);
+        } else {
+            for (uint32_t i = 0; i < tris; i++, out += 6) {
+                std::memcpy(out, indices + size_t(i + (i & 1)) * 2, 2);
+                std::memcpy(out + 2, indices + size_t(i + 1 - (i & 1)) * 2, 2);
+                std::memcpy(out + 4, indices + size_t(i + 2) * 2, 2);
+            }
+        }
+        if (join) {
+            last->c += n;
+            return;
+        }
+        Cmd c{Op::Draw};
+        c.a = 5;
+        c.b = start;
+        c.c = n;
+        c.d = 1;
+        c.data = uint32_t(at);
+        c.joinable = true;
+        cur_->cmds.push_back(c);
     }
 
     uint32_t Put(const void* p, size_t n) {
@@ -454,6 +508,12 @@ private:
 
     std::unique_ptr<Backend> inner_;
     std::vector<Range> ranges_;
+    const bool merge_ = [] {
+        const char* e = std::getenv("XBE_MERGE_DRAWS");
+        bool on = e && *e ? *e != '0' : app::kGame.merge_draws;
+        if (on) LOGR("gpu: runs of draws with the same state are merged");
+        return on;
+    }();
 
     // the title's thread
     struct HeaderCopy {

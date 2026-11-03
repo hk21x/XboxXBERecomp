@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <thread>
 
 #include "core/archive.h"
 #include "core/hash.h"
@@ -61,8 +64,43 @@ void Builder::Log(const std::string& line) {
     std::lock_guard lock(log_lock_);
     std::error_code ec;
     fs::create_directories(root_, ec);
-    std::ofstream(root_ / "launcher.log", std::ios::app) << line << "\n";
+    // the time on each line of the file: how long a build's steps took can be read from it
+    std::time_t now = std::time(nullptr);
+    char stamp[16] = "";
+    if (std::tm* local = std::localtime(&now)) std::strftime(stamp, sizeof(stamp), "%H:%M:%S ", local);
+    std::ofstream(root_ / "launcher.log", std::ios::app) << stamp << line << "\n";
     if (on_log) on_log(line);
+}
+
+void Builder::StartTiming() {
+    stages_.clear();
+    std::time_t now = std::time(nullptr);
+    char date[32] = "";
+    if (std::tm* local = std::localtime(&now)) std::strftime(date, sizeof(date), "%Y-%m-%d", local);
+    Log("build started " + std::string(date) + ", " + std::to_string(std::thread::hardware_concurrency()) + " logical processors");
+}
+
+bool Builder::Timed(const std::string& stage, const std::function<bool()>& step) {
+    auto start = std::chrono::steady_clock::now();
+    bool ok = step();
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    stages_.push_back({stage, seconds});
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.1f s", seconds);
+    Log("stage " + stage + ": " + text + (ok ? "" : " (stopped)"));
+    return ok;
+}
+
+void Builder::LogTiming() {
+    double total = 0;
+    for (const auto& [stage, seconds] : stages_) total += seconds;
+    char text[64];
+    std::snprintf(text, sizeof(text), "timing: %zu stages, %.1f s in all", stages_.size(), total);
+    Log(text);
+    for (const auto& [stage, seconds] : stages_) {
+        std::snprintf(text, sizeof(text), "%9.1f s %5.1f%%  ", seconds, total > 0 ? seconds * 100 / total : 0.0);
+        Log("timing: " + (text + stage));
+    }
 }
 
 void Builder::Say(const std::string& step, const std::string& detail, double fraction) {
@@ -73,7 +111,8 @@ fs::path Builder::GameExe() const { return PlayDir() / (game_.exe + platform_.Ex
 
 bool Builder::Built() const {
     std::error_code ec;
-    return fs::exists(GameExe(), ec);
+    if (!fs::exists(GameExe(), ec)) return false;
+    return !Prebuilt() || fs::exists(PlayDir() / (game_.exe + ".dll"), ec);  // the code is built after the package is in
 }
 
 fs::path Builder::SavedGame() const {
@@ -127,11 +166,12 @@ bool Builder::SetGame(const GameCheck& copy, std::string& error) {
         return false;
     }
     Remember("game", U8(copy.path));
+    Remember("game_sha1", copy.sha1);
     Log("game: " + U8(copy.path) + ", " + copy.release + ", sha1 " + copy.sha1);
     return true;
 }
 
-bool Builder::LoadToolchain(Plan& plan, std::string& error) {
+bool Builder::LoadToolchain(Plan& plan, std::string& error, bool microsoft) {
     Say("Looking up the build tools");
     std::string text;
     fs::path saved = root_ / "toolchain.json";
@@ -148,7 +188,7 @@ bool Builder::LoadToolchain(Plan& plan, std::string& error) {
     }
     plan = {};
     if (!LoadPlan(text, plan, error)) return false;
-    if (!ResolveMicrosoft(http_, text, plan, error)) return false;
+    if (microsoft && !ResolveMicrosoft(http_, text, plan, error)) return false;
     uint64_t bytes = 0;
     for (const Tool& t : plan.tools)
         if (!t.optional) bytes += t.Bytes();
@@ -280,7 +320,8 @@ bool Builder::PutXbe(std::string& error) {
         return false;
     }
     // every xbe the build recompiles (GameConfig::xbes), written where it is not there already
-    for (const std::string& name : game_.xbes) {
+    const auto own = game_.release_xbes.find(copy.sha1);
+    for (const std::string& name : own != game_.release_xbes.end() ? own->second : game_.xbes) {
         std::vector<uint8_t> xbe;
         if (!ReadXbeNamed(name, copy, xbe, error)) return false;
         fs::path to = root_ / "source" / "assets" / name;
@@ -311,6 +352,12 @@ std::map<std::string, std::string> Builder::BuildEnv(const Plan& plan) const {
                                   ToolPath("git") / "cmd", kits / "bin" / ver / "x64"};
     std::string inherited = platform_.GetEnv("PATH");
     env["PATH"] = join(path) + (inherited.empty() ? "" : std::string(1, sep) + inherited);
+    // a drive that records no owners (exFAT, FAT32, some network shares): git refuses its repositories as of "dubious
+    // ownership". These are the launcher's own clones; for its git, submodules and CMake's FetchContent alike, and the
+    // player's git settings stay as they are
+    env["GIT_CONFIG_COUNT"] = "1";
+    env["GIT_CONFIG_KEY_0"] = "safe.directory";
+    env["GIT_CONFIG_VALUE_0"] = "*";
     if (!msvc.empty()) {
         fs::path inc = kits / "Include" / ver, lib = kits / "Lib" / ver;
         env["INCLUDE"] = join({msvc / "include", inc / "ucrt", inc / "shared", inc / "um", inc / "winrt", inc / "cppwinrt"});
@@ -342,8 +389,12 @@ bool Builder::Compile(std::string& error) {
     }
     Say("Preparing the build", "the first time also downloads the libraries it uses");
     // clang links with lld (no Microsoft linker in the kit)
-    int code = platform_.Run({cmake, "--preset", "release", "-DCMAKE_LINKER_TYPE=LLD"}, src, env,
+    int code = 0;
+    Timed("configure (cmake)", [&] {
+        code = platform_.Run({cmake, "--preset", "release", "-DCMAKE_LINKER_TYPE=LLD"}, src, env,
                              [&](const std::string& line) { Log("cmake: " + line); }, &cancel);
+        return code == 0;
+    });
     if (code != 0) {
         error = "Preparing the build failed, see launcher.log";
         return false;
@@ -351,6 +402,7 @@ bool Builder::Compile(std::string& error) {
     fs::create_directories(build, ec);
     std::ofstream(seen) << tools;
     Say("Building " + game_.title, "the first build takes 30 to 90 minutes", 0);
+    Timed("compile and link (cmake --build)", [&] {
     code = platform_.Run({cmake, "--build", "out/build/release"}, src, env, [&](const std::string& line) {
             Log(line);
             // ninja: "[123/4567] Building CXX object ..."
@@ -362,6 +414,8 @@ bool Builder::Compile(std::string& error) {
                 }
             }
         }, &cancel);
+        return code == 0;
+    });
     if (code != 0) {
         error = cancel ? "cancelled" : "The build failed, see launcher.log";
         return false;
@@ -397,14 +451,250 @@ bool Builder::Install(std::string& error) {
     return true;
 }
 
+bool Builder::PathTooLong(std::string& message) const {
+    size_t length = root_.wstring().size();
+    if (length <= kMaxRootLength) return false;
+    message = "This folder's path is too long for Microsoft's Windows SDK installer (" + std::to_string(length) +
+              " characters, at most " + std::to_string(kMaxRootLength) + "): " + U8(root_) +
+              ". Move " + game_.short_name + "Launcher.exe to a short folder, such as C:\\Games\\" + game_.short_name +
+              ", and run it from there.";
+    return true;
+}
+
 bool Builder::BuildAll(std::string& error) {
+    if (Prebuilt()) return BuildPackage(error);
     cancel = false;
-    if (!LoadToolchain(plan_, error)) return false;
-    for (const Tool& t : plan_.tools)
-        if (!t.optional && !InstallTool(t, error)) return false;
-    if (!GetSource(error) || !PutXbe(error) || !Compile(error) || !Install(error)) return false;
+    StartTiming();
+    auto steps = [&] {
+        if ((!Built() && PathTooLong(error)) || !Timed("build tools list", [&] { return LoadToolchain(plan_, error); })) return false;
+        for (const Tool& t : plan_.tools)
+            if (!t.optional && !Timed("tool " + t.id, [&] { return InstallTool(t, error); })) return false;
+        return Timed("game source", [&] { return GetSource(error); }) && Timed("game's xbe", [&] { return PutXbe(error); }) &&
+               Compile(error) && Timed("install", [&] { return Install(error); });
+    };
+    bool ok = steps();
+    LogTiming();
+    if (!ok) {
+        if (error != "cancelled") Log("build stopped: " + error);
+        return false;
+    }
     Remember("built", game_.version);
     Say("Ready", "", 1);
+    return true;
+}
+
+std::string Builder::PackageName() const {
+    std::string text;
+    json j = ReadAll(root_ / "launcher.json", text) ? json::parse(text, nullptr, false) : json::object();
+    std::string sha = j.is_object() ? j.value("game_sha1", "") : "";
+    if (sha.empty() && !game_.packages.empty()) {  // an install from before the hash was kept: the disc tells
+        fs::path saved = SavedGame();
+        if (!saved.empty()) sha = CheckGame(game_, saved).sha1;
+    }
+    auto it = game_.packages.find(Lower(sha));
+    return it != game_.packages.end() ? it->second : game_.package;
+}
+
+bool Builder::BuildPackage(std::string& error) {
+    cancel = false;
+    StartTiming();
+    auto stopped = [&] {
+        step = Step::None;
+        LogTiming();
+        if (error != "cancelled") Log("build stopped: " + error);
+        return false;
+    };
+    std::error_code ec;
+    if (SavedGame().empty()) {
+        error = "Choose the game first.";
+        return stopped();
+    }
+    // a zip beside the launcher (a test's, or a release downloaded by hand) before the release's
+    const std::string package = PackageName();
+    if (package.empty()) {
+        error = "No package is known for this copy of the game: choose it again.";
+        return stopped();
+    }
+    fs::path downloads = root_ / "downloads", zip = root_.parent_path() / package;
+    std::string id;
+    step = Step::Package;
+    if (fs::exists(zip, ec)) {
+        Log("package beside the launcher: " + U8(zip));
+        id = std::to_string(fs::file_size(zip, ec)) + " " + std::to_string(fs::last_write_time(zip, ec).time_since_epoch().count());
+    } else if (!Timed("package download", [&] {
+                   std::string tag = game_.version;
+                   if (!IsReleaseVersion(tag)) {  // a dev launcher takes the newest release
+                       Release latest;
+                       if (!LatestRelease(http_, game_, latest, error)) {
+                           error = "Could not find the game's package: " + error;
+                           return false;
+                       }
+                       tag = latest.tag;
+                   }
+                   std::string repo = game_.repo;
+                   if (repo.size() > 4 && repo.compare(repo.size() - 4, 4, ".git") == 0) repo.resize(repo.size() - 4);
+                   std::string url = repo + "/releases/download/" + tag + "/" + package, text;
+                   if (!FetchText(http_, url + ".json", text, error)) {
+                       error = "Could not find the game's package for " + tag + ": " + error;
+                       return false;
+                   }
+                   json info = json::parse(text, nullptr, false);
+                   if (info.is_discarded() || !info.is_object() || !info.contains("sha256")) {
+                       error = "The package's description for " + tag + " could not be read.";
+                       return false;
+                   }
+                   std::string sha = info.value("sha256", "");
+                   uint64_t size = info.value("size", uint64_t(0));
+                   id = sha;
+                   fs::create_directories(downloads, ec);
+                   zip = downloads / package;
+                   // already unpacked: a build stopped after this point carries on
+                   std::string have;
+                   if (ReadAll(PlayDir() / "package.stamp", have) && have == id) return true;
+                   Say("Downloading the game's package", {}, 0);
+                   return Download(http_, url, zip, sha, size, [&](uint64_t done, uint64_t) {
+                           Say("Downloading the game's package", Megabytes(done) + " of " + Megabytes(size), size ? double(done) / double(size) : -1);
+                       }, &cancel, error);
+               })) {
+        if (cancel) error = "cancelled";
+        return stopped();
+    }
+    // the new version is unpacked and built beside the game, in play\.next, and only replaces it once it is built: a
+    // failed or stopped update leaves the game as it was, playable (its exe finds play\assets, a folder up)
+    step = Step::Unpack;
+    const fs::path next = PlayDir() / ".next";
+    std::string have;
+    if (!ReadAll(next / "package.stamp", have) || have != id) {
+        fs::remove_all(next, ec);  // another version's, half done
+        bool unpacked = Timed("package unpack", [&] {
+            Say("Unpacking the game's package", {}, 0);
+            fs::create_directories(next, ec);
+            // only ever the release's files: what the player has made stays
+            auto keep = [](std::string name) {
+                if (name.rfind("./", 0) == 0) name.erase(0, 2);  // Windows' tar writes them so
+                std::string low = Lower(name);
+                for (const char* mine : {"hdd/", "assets/", "logs/", "screenshots/", "captures/", "compiler/work/"})
+                    if (low.rfind(mine, 0) == 0) return std::string();
+                if (name.find("..") != std::string::npos || name.empty() || name[0] == '/' || name.find(':') != std::string::npos) return std::string();
+                if (low.size() > 5 && low.compare(low.size() - 5, 5, ".toml") == 0 && low.find('/') == std::string::npos) return std::string();  // the settings
+                return name;
+            };
+            return Unzip(zip, next, keep, [&](uint64_t done, uint64_t all) {
+                    Say("Unpacking the game's package", {}, all ? double(done) / double(all) : -1);
+                }, &cancel, error);
+        });
+        if (!unpacked) {
+            if (cancel) error = "cancelled";
+            return stopped();
+        }
+        std::ofstream(next / "package.stamp", std::ios::binary) << id;
+        if (fs::path(zip).parent_path() == downloads) fs::remove(zip, ec);
+    }
+    step = Step::Compile;
+    std::string failed;
+    bool compiled = Timed("compile game code", [&] {
+        Say("Building " + game_.title + " for this PC", "Starting", -1);
+        const auto start = std::chrono::steady_clock::now();
+        int code = platform_.Run({U8(next / GameExe().filename()), "--prepare-code"}, next, {}, [&](const std::string& line) {
+                if (line.rfind("progress ", 0) == 0) {
+                    int stage = 0;
+                    unsigned long long files = 0, all = 0, bytes = 0, total = 0;
+                    if (std::sscanf(line.c_str(), "progress %d %llu %llu %llu %llu", &stage, &files, &all, &bytes, &total) != 5) return;
+                    if (!all) return;
+                    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                    std::string detail = std::to_string(files) + " of " + std::to_string(all) + " files";
+                    if (files >= all) detail = "Finishing the build";
+                    else if (bytes && seconds > 5) {
+                        int left = int(seconds * double(total - bytes) / double(bytes) + 0.5);
+                        detail += left < 60 ? ", under a minute left" : ", about " + std::to_string((left + 30) / 60) + " min left";
+                    }
+                    Say("Building " + game_.title + " for this PC", detail, total ? double(bytes) / double(total) : -1);
+                } else {
+                    // the game's own log has its startup and settings: only what the build says belongs here
+                    if (line.rfind("[", 0) != 0 || line.find("Game code:") != std::string::npos) Log("game: " + line);
+                    if (line.rfind("failed ", 0) == 0) failed = line.substr(7);
+                }
+            }, &cancel);
+        return code == 0;
+    });
+    if (!compiled) {
+        error = cancel ? "cancelled" : failed.empty() ? "The game's code could not be built, see launcher.log" : failed;
+        return stopped();
+    }
+    if (!fs::exists(next / (game_.exe + ".dll"), ec)) {
+        error = "The build finished without " + game_.exe + ".dll, see launcher.log";
+        return stopped();
+    }
+    // into place: the release's files and what was built from them; the game's settings and logs stay the game's
+    if (!Timed("replace the game", [&] {
+            for (const auto& e : fs::directory_iterator(next, ec)) {
+                std::string name = Lower(U8(e.path().filename()));
+                if (name == "logs" || (name.size() > 5 && name.compare(name.size() - 5, 5, ".toml") == 0)) continue;
+                fs::path to = PlayDir() / e.path().filename();
+                std::error_code move;
+                if (e.is_directory(move)) fs::remove_all(to, move);
+                fs::rename(e.path(), to, move);
+                if (move) {
+                    error = "Could not put " + U8(e.path().filename()) + " in place (is the game still running?): " + move.message();
+                    return false;
+                }
+            }
+            return true;
+        }))
+        return stopped();
+    fs::remove_all(next, ec);
+    if (!Built()) {
+        error = "The game was put in place but is not complete, see launcher.log";
+        return stopped();
+    }
+    step = Step::Ready;
+    LogTiming();
+    Remember("built", game_.version);
+    Say("Ready", "", 1);
+    return true;
+}
+
+bool Builder::Legacy() const {
+    std::error_code ec;
+    return Prebuilt() && fs::exists(GameExe(), ec) && !fs::exists(PlayDir() / (game_.exe + ".dll"), ec);
+}
+
+// what the old way of building left: tools (FFmpeg stays, for the music), the source and its build, the downloads
+std::vector<fs::path> Builder::OldBuildPaths() const {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    if (!Prebuilt()) return out;
+    for (const auto& e : fs::directory_iterator(root_ / "tools", ec))
+        if (Lower(U8(e.path().filename())) != "ffmpeg") out.push_back(e.path());
+    for (const char* name : {"source", "downloads", "agreed.txt"})
+        if (fs::exists(root_ / name, ec)) out.push_back(root_ / name);
+    return out;
+}
+
+uint64_t Builder::OldBuildBytes() const {
+    uint64_t n = 0;
+    std::error_code ec;
+    for (const fs::path& p : OldBuildPaths()) {
+        if (fs::is_regular_file(p, ec)) {
+            n += fs::file_size(p, ec);
+            continue;
+        }
+        for (auto it = fs::recursive_directory_iterator(p, ec); it != fs::recursive_directory_iterator(); it.increment(ec))
+            if (it->is_regular_file(ec)) n += it->file_size(ec);
+    }
+    return n;
+}
+
+bool Builder::RemoveOldBuild(std::string& error) {
+    std::error_code ec;
+    for (const fs::path& p : OldBuildPaths()) {
+        fs::remove_all(p, ec);
+        if (ec) {
+            error = "Could not remove " + U8(p) + ": " + ec.message();
+            return false;
+        }
+        Log("removed " + U8(p));
+    }
     return true;
 }
 
@@ -431,7 +721,7 @@ bool Builder::Launch(std::string& error) { return platform_.Start(GameExe(), Pla
 uint64_t Builder::BuildFilesBytes() const {
     uint64_t n = 0;
     std::error_code ec;
-    fs::path out = root_ / "source" / "out";
+    fs::path out = Prebuilt() ? PlayDir() / "compiler" / "work" : root_ / "source" / "out";
     if (!fs::exists(out, ec)) return 0;
     for (auto it = fs::recursive_directory_iterator(out, ec); it != fs::recursive_directory_iterator(); it.increment(ec))
         if (it->is_regular_file(ec)) n += it->file_size(ec);
@@ -474,7 +764,7 @@ bool Builder::ImportMusic(const fs::path& folder, std::string& summary, std::str
     // ffmpeg and ffprobe: the portable ones in tools\ffmpeg (toolchain.json, optional), else on the PATH (Linux tests)
     std::string ffmpeg = "ffmpeg", ffprobe = "ffprobe";
     if (!platform_.ExeSuffix().empty()) {
-        if (!LoadToolchain(plan_, error)) return false;
+        if (!LoadToolchain(plan_, error, false)) return false;  // FFmpeg alone: no need to ask Microsoft
         auto it = std::find_if(plan_.tools.begin(), plan_.tools.end(), [](const Tool& t) { return t.id == "ffmpeg"; });
         if (it == plan_.tools.end()) {
             error = "toolchain.json lists no ffmpeg, which converts the music";
@@ -615,6 +905,11 @@ bool Builder::ImportMusic(const fs::path& folder, std::string& summary, std::str
 
 bool Builder::RemoveBuildFiles(std::string& error) {
     std::error_code ec;
+    if (Prebuilt()) {  // the compiled pieces: the compiler stays for updates, which then build everything again
+        fs::remove_all(PlayDir() / "compiler" / "work", ec);
+        if (ec) error = "Could not remove the build files: " + ec.message();
+        return !ec;
+    }
     fs::remove_all(root_ / "source" / "out", ec);  // the build's own output folder
     if (ec) error = "Could not remove the build files: " + ec.message();
     return !ec;

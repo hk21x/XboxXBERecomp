@@ -1193,7 +1193,13 @@ size_t ArgCount(const Sig& s) {
     return args;
 }
 
-// a different ret size or other entry registers than the reference: arguments moved
+// a different ret size or other entry registers than the reference (s, with a shape) at c: arguments moved
+bool Moved(const Sig& s, const Sig& c) {
+    // a function that leaves by jump does not tell its stack bytes
+    bool same_ret = c.ret == s.ret || c.ret.empty() || s.ret.empty();
+    return s.shape && !(c.regs == s.regs && same_ret);
+}
+
 std::map<std::string, std::string> CheckConventions(const Image& img, const std::vector<uint32_t>& bounds,
                                                     SigFile& sf, const std::map<std::string, uint32_t>& symbols,
                                                     const std::set<std::string>& loose,
@@ -1202,10 +1208,7 @@ std::map<std::string, std::string> CheckConventions(const Image& img, const std:
     for (auto& k : loose) {
         auto& s = sf.symbols[k];
         Sig c = ShapeAt(img, bounds, symbols.at(k));
-        // a function that leaves by jump does not tell its stack bytes
-        bool same_ret = c.ret == s.ret || c.ret.empty() || s.ret.empty();
-        bool same_convention = c.regs == s.regs && same_ret;
-        if (!s.shape || same_convention) continue;
+        if (!Moved(s, c)) continue;
         size_t args = ArgCount(s);
         abi[k] = "[\"?\"";
         for (size_t i = 1; i < args; i++) abi[k] += ", \"?\"";
@@ -1324,7 +1327,17 @@ int Scan(const fs::path& xbe_path, const fs::path& xdk, const fs::path& out, con
     std::map<uint32_t, uint32_t> claimed = Claimed(sf, found, symbols);
     std::vector<uint32_t> bounds = Bounds(img, symbols);
     std::set<std::string> loose = Loose(symbols, found);  // found, but not by their bytes
+    bool ltcg = false;
+    for (auto& l : x.libraries) ltcg |= l.name.size() > 4 && l.name.compare(l.name.size() - 4, 4, "LTCG") == 0;
     for (auto& [k, va] : FindByConstants(img, sf, symbols, bounds, claimed, report)) {
+        // without link time code generation a library function keeps its convention: a start found by constants
+        // that pops other bytes or reads other registers is another function (an image may not link this one)
+        Sig c = ShapeAt(img, bounds, va);
+        if (!ltcg && Moved(sf.symbols[k], c)) {
+            report.push_back("  " + k + " not taken at " + Hex(va) + ": " + Convention(c) + ", the reference " +
+                             Convention(sf.symbols[k]));
+            continue;
+        }
         symbols[k] = va;
         loose.insert(k);
     }

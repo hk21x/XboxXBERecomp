@@ -564,10 +564,11 @@ void WheelInit(void* hwnd) {
     std::thread(Run).detach();
 }
 
-bool WheelRead(float* v) {
+bool WheelRead(float* v, bool* steers) {
     std::lock_guard lock(g_lock);
     const Config& c = s.config;
     bool active = false;
+    if (steers) *steers = StateOf(s.devs, c.steer) != nullptr;
     if (const DIJOYSTATE2* st = StateOf(s.devs, c.steer)) {
         float steer = SteerValue(s.devs, c);
         v[kLSLeft] = std::max(-steer, 0.0f);

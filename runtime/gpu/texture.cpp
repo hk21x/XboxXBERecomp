@@ -1,4 +1,5 @@
 #include "gpu/texture.h"
+#include "gpu/upscale.h"
 
 #include <algorithm>
 #include <atomic>
@@ -270,6 +271,12 @@ uint64_t g_epoch = 1;
 
 }  // namespace
 
+uint32_t SwizzledOffset(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    uint32_t mx, my, mz;
+    SwizzleMasks(w, h, 1, mx, my, mz);
+    return Deposit(x, mx) | Deposit(y, my);
+}
+
 const FormatInfo& Format(uint32_t f) {
     for (auto& e : kFormats)
         if (e.id == f) return e.info;
@@ -494,8 +501,28 @@ bool ReplacementFits(const Replacement& r, const TextureDesc& d) {
     return !r.format || (r.format == d.format && r.src_width == d.width && r.src_height == d.height);
 }
 
+// up to 64 KB whole, beyond that 64 evenly spaced runs of 64 bytes
+static uint64_t SampledHash(const uint8_t* p, uint32_t n) {
+    constexpr uint32_t kWhole = 65536, kRuns = 64, kRun = 64;
+    if (n <= kWhole) return Hash(p, n);
+    uint64_t h = n;
+    for (uint32_t i = 0; i < kRuns; i++) h = Hash(p + uint64_t(n - kRun) * i / (kRuns - 1), kRun, h);
+    return h;
+}
+
+bool TakePictureBudget(uint64_t frame, const Replacement& r) {
+    constexpr uint64_t kBytesPerFrame = 6ull << 20;
+    static uint64_t now = ~0ull, spent = 0;  // the render thread's alone
+    if (now != frame) now = frame, spent = 0;
+    const uint64_t cost = uint64_t(r.width) * r.height * 4 * 4 / 3;
+    if (spent && spent + cost > kBytesPerFrame) return false;
+    spent += cost;
+    return true;
+}
+
 bool ReplacementHolds(const Replacement& r) {
-    if (Hash(kernel::HostPtr(r.data), r.guest_bytes) == r.guest_hash) return true;
+    const uint8_t* guest = static_cast<const uint8_t*>(kernel::HostPtr(r.data));
+    if ((r.sampled ? SampledHash(guest, r.guest_bytes) : Hash(guest, r.guest_bytes)) == r.guest_hash) return true;
     if (r.sharpened) {
         std::lock_guard<std::mutex> lock(g_sharp_lock);
         g_sharp_drops[r.data]++;
@@ -686,10 +713,37 @@ std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t
     return out;
 }
 
+// the levels below a picture, each a box filter of the one above
+static std::vector<std::vector<uint32_t>> MakeMips(const std::vector<uint32_t>& top, uint32_t w, uint32_t h) {
+    std::vector<std::vector<uint32_t>> levels;
+    while (w > 1 || h > 1) {
+        uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
+        const std::vector<uint32_t>& up = levels.empty() ? top : levels.back();
+        std::vector<uint32_t> down(size_t(nw) * nh);
+        for (uint32_t y = 0; y < nh; y++)
+            for (uint32_t x = 0; x < nw; x++) {
+                uint32_t sum[4] = {};
+                for (uint32_t dy = 0; dy < 2; dy++)
+                    for (uint32_t dx = 0; dx < 2; dx++) {
+                        uint32_t c = up[size_t(std::min(y * 2 + dy, h - 1)) * w + std::min(x * 2 + dx, w - 1)];
+                        for (int i = 0; i < 4; i++) sum[i] += c >> (i * 8) & 0xFF;
+                    }
+                uint32_t c = 0;
+                for (int i = 0; i < 4; i++) c |= (sum[i] + 2) / 4 << (i * 8);
+                down[size_t(y) * nw + x] = c;
+            }
+        levels.push_back(std::move(down));
+        w = nw;
+        h = nh;
+    }
+    return levels;
+}
+
 namespace {
 struct SharpJob {
     TextureDesc d;
     std::vector<uint8_t> bytes;  // level 0 as the game had it
+    bool world = false, wrap_u = false, wrap_v = false;  // SharpenWorld's
 };
 std::condition_variable g_sharp_cv;
 std::deque<SharpJob> g_sharp_jobs;
@@ -710,18 +764,36 @@ void SharpWorker() {
         // would be 4 MB here and 5 MB of video memory
         uint32_t big = std::max(job.d.width, job.d.height);
         bool text = job.d.format == 0x19 || job.d.format == 0x1F;  // A8
-        uint32_t scale = big <= 128 || (text && big <= 512) ? 4 : 2;
+        uint32_t scale = job.world ? 2 : big <= 128 || (text && big <= 512) ? 4 : 2;
         auto r = std::make_shared<Replacement>();
         r->data = job.d.data;
         r->guest_bytes = uint32_t(job.bytes.size());
-        r->guest_hash = Hash(job.bytes.data(), job.bytes.size());
+        r->sampled = job.world;
+        r->guest_hash = job.world ? SampledHash(job.bytes.data(), uint32_t(job.bytes.size())) : Hash(job.bytes.data(), job.bytes.size());
         r->width = job.d.width * scale;
         r->height = job.d.height * scale;
         r->sharpened = true;
         r->format = job.d.format;
         r->src_width = job.d.width;
         r->src_height = job.d.height;
-        r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
+        r->world = job.world;
+        if (job.world) {
+            r->bgra = UpscaleEdgeDirected2x(px, job.d.width, job.d.height, job.wrap_u, job.wrap_v);
+            // cut-outs keep a hard edge, as UpscalePicture gives them
+            std::vector<uint8_t> alpha(px.size());
+            size_t seen = 0, partial = 0;
+            for (size_t i = 0; i < px.size(); i++) {
+                alpha[i] = uint8_t(px[i] >> 24);
+                seen += alpha[i] > 8;
+                partial += alpha[i] > 8 && alpha[i] < 247;
+            }
+            if (seen && seen < px.size() && partial * 4 < seen) {
+                std::vector<uint8_t> a = UpscaleMask(alpha.data(), job.d.width, job.d.height, 2);
+                for (size_t i = 0; i < r->bgra.size(); i++) r->bgra[i] = (r->bgra[i] & 0xFFFFFF) | uint32_t(a[i]) << 24;
+            }
+        } else {
+            r->bgra = UpscalePicture(px, job.d.width, job.d.height, scale);
+        }
         if (auto had = FindReplacement(job.d.data); had && !had->sharpened) continue;  // the title's own stays
         // XBE_SHARPEN_DUMP=folder: each picture as a TGA, the game's (orig_<texture>.tga) and enlarged (sharp_)
         if (const char* dir = std::getenv("XBE_SHARPEN_DUMP")) {
@@ -740,6 +812,7 @@ void SharpWorker() {
             tga("orig_", job.d.width, job.d.height, px);
             tga("sharp_", r->width, r->height, r->bgra);
         }
+        r->mips = MakeMips(r->bgra, r->width, r->height);
         RegisterReplacement(std::move(r));
         static std::atomic<int> told{0};
         if (told++ < 8)
@@ -772,29 +845,40 @@ void Sharpen2D(const TextureDesc& d) {
     g_sharp_cv.notify_one();
 }
 
+void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v) {
+    if (!app::Get().world_textures) return;
+    if (d.linear || d.cube || d.depth > 1) return;
+    // colour pictures only: L8, A8 and the bump formats are as often lookups and offsets
+    const bool colour = (d.format >= 0x02 && d.format <= 0x07) || d.format == 0x0C || d.format == 0x0E || d.format == 0x0F;
+    if (!colour || d.width < 16 || d.height < 16 || d.width > 512 || d.height > 512) return;
+    constexpr uint64_t kBudget = 768ull << 20;  // the pictures' memory, with their mip levels counted as a third more
+    static uint64_t used = 0;
+    const uint64_t cost = uint64_t(d.width) * d.height * 4 * 4 * 4 / 3;
+    std::lock_guard<std::mutex> lock(g_sharp_lock);
+    int drops = g_sharp_drops[d.data];
+    if (drops >= 2) return;
+    auto [it, fresh] = g_sharp_queued.emplace(d.data, drops);
+    if (!fresh && it->second == drops) return;
+    if (used + cost > kBudget) {
+        g_sharp_queued.erase(it);
+        return;
+    }
+    used += cost;
+    it->second = drops;
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(SharpWorker).detach(); });
+    SharpJob job{d, {}, true, wrap_u, wrap_v};
+    uint32_t size = LevelSize(d, 0);
+    const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
+    job.bytes.assign(p, p + size);
+    g_sharp_jobs.push_back(std::move(job));
+    g_sharp_cv.notify_one();
+}
+
 std::vector<std::vector<uint32_t>> ReplacementLevels(const Replacement& r) {
     std::vector<std::vector<uint32_t>> levels{r.bgra};
-    uint32_t w = r.width, h = r.height;
-    while (w > 1 || h > 1) {
-        uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
-        const std::vector<uint32_t>& up = levels.back();
-        std::vector<uint32_t> down(size_t(nw) * nh);
-        for (uint32_t y = 0; y < nh; y++)
-            for (uint32_t x = 0; x < nw; x++) {
-                uint32_t sum[4] = {};
-                for (uint32_t dy = 0; dy < 2; dy++)
-                    for (uint32_t dx = 0; dx < 2; dx++) {
-                        uint32_t c = up[size_t(std::min(y * 2 + dy, h - 1)) * w + std::min(x * 2 + dx, w - 1)];
-                        for (int i = 0; i < 4; i++) sum[i] += c >> (i * 8) & 0xFF;
-                    }
-                uint32_t c = 0;
-                for (int i = 0; i < 4; i++) c |= (sum[i] + 2) / 4 << (i * 8);
-                down[size_t(y) * nw + x] = c;
-            }
-        levels.push_back(std::move(down));
-        w = nw;
-        h = nh;
-    }
+    std::vector<std::vector<uint32_t>> below = r.mips.empty() ? MakeMips(r.bgra, r.width, r.height) : r.mips;
+    for (auto& m : below) levels.push_back(std::move(m));
     return levels;
 }
 

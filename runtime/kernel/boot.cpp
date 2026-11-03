@@ -21,6 +21,7 @@
 
 namespace dispatch {
 void Init();
+uint32_t EntryPoint();
 uint32_t KernelThunkAddress(uint32_t ordinal);
 }  // namespace dispatch
 
@@ -94,9 +95,9 @@ bool Boot(std::vector<uint8_t> xbe, const std::string& xbe_name, const std::stri
     }
     g_image = &g_xbe;
     const xbe::Image& img = g_xbe;
-    if (img.entry != X86EntryPoint) {
+    if (img.entry != dispatch::EntryPoint()) {
         LOGE("boot: %s entry %08X does not match the recompiled entry %08X, wrong executable", xbe_name.c_str(), img.entry,
-             X86EntryPoint);
+             dispatch::EntryPoint());
         return false;
     }
     LOGI("boot: title %08X, entry %08X, %zu sections", img.title_id, img.entry, img.sections.size());
@@ -181,28 +182,39 @@ void Relaunch(const char* exe) {
     size_t args = line[0] == L'"' ? line.find(L'"', 1) + 1 : line.find(L' ');
     line = L"\"" + path + L"\"" + (args == std::wstring::npos ? L"" : line.substr(args));
     if (line.find(L"--relaunched") == std::wstring::npos) line += L" --relaunched";  // no boot splash again
-    // the handover event is named after this process, given to the new one on its command line (an earlier
-    // --handover is replaced). The new process is not started suspended: Microsoft Defender took a suspended start
-    // then resumed for process hollowing and quarantined the exe (Behavior:Win32/DefenseEvasion.A!ml)
-    if (size_t h = line.find(L" --handover="); h != std::wstring::npos) line.erase(h, line.find(L' ', h + 1) - h);
+    // this window stays up until the new instance shows its first frames (HandoverEvent), so no gap shows: the event
+    // is named by this process, made before the new one starts and passed to it, which then starts as any program
+    // does (started suspended and resumed, it looked to Windows Defender like code injected into another process)
+    if (size_t from = line.find(L" --handover="); from != std::wstring::npos) {  // the one this process was given
+        size_t to = line.find(L' ', from + 1);
+        line.erase(from, to == std::wstring::npos ? std::wstring::npos : to - from);
+    }
     line += L" --handover=" + std::to_wstring(GetCurrentProcessId());
+    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, HandoverEvent(GetCurrentProcessId()).c_str());
     // this process lives on through the handover: the new one binds the same ports
     xnet::CloseSockets();
-    // this window stays up until the new instance shows its first frames (HandoverEvent), so no gap shows
-    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, HandoverEvent(GetCurrentProcessId()).c_str());
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
-    g_relaunching = true;
     if (CreateProcessW(path.c_str(), line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
         AllowSetForegroundWindow(pi.dwProcessId);
+        g_relaunching = true;
         HANDLE wait[] = {ready, pi.hProcess};
         if (ready) WaitForMultipleObjects(2, wait, FALSE, 15000);
+        if (ready) ::CloseHandle(ready);
         ::CloseHandle(pi.hThread);
         ::CloseHandle(pi.hProcess);
     } else {
-        LOGE("relaunch: cannot start %s.exe (%lu)", exe, GetLastError());
+        unsigned long error = GetLastError();
+        LOGE("relaunch: cannot start %s.exe (%lu)", exe, error);
+        if (ready) ::CloseHandle(ready);
+        // without it the title cannot go on: say why rather than close without a word
+        std::wstring text = L"The game could not start " + std::wstring(exe, exe + std::strlen(exe)) + L".exe";
+        text += error == ERROR_FILE_NOT_FOUND
+                    ? L": it is not beside this program. Antivirus software may have removed it (Windows Security, "
+                      L"Protection history), or a build did not finish: restore it or build again."
+                    : L" (Windows error " + std::to_wstring(error) + L").";
+        MessageBoxW(nullptr, text.c_str(), app::kGame.short_title, MB_OK | MB_ICONERROR);
     }
-    if (ready) ::CloseHandle(ready);
     std::_Exit(0);
 #else
     char self[4096] = {};
