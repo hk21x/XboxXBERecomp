@@ -96,6 +96,87 @@ void KeepShader(uint64_t hash, ID3DBlob* code) {
     std::fflush(c.out);
 }
 
+namespace {
+constexpr char kPipelineCacheMagic[8] = {'X', 'B', 'E', 'P', 'S', 'O', '1', 0};
+constexpr size_t kPipelineCacheMax = size_t(512) << 20;  // past this it starts again
+struct PipelineCache {
+    std::mutex m;
+    bool loaded = false;
+    std::unordered_map<uint64_t, std::string> blobs;
+    FILE* out = nullptr;
+    size_t bytes = 0;
+};
+PipelineCache& Pipelines() {
+    static PipelineCache c;
+    return c;
+}
+std::filesystem::path PipelineCacheFile() { return app::ExeDir() / "pipelinecache.bin"; }
+void StartPipelineCache(PipelineCache& c) {
+    if (c.out) std::fclose(c.out);
+    c.blobs.clear();
+    c.out = std::fopen(PipelineCacheFile().string().c_str(), "wb");
+    if (c.out) std::fwrite(kPipelineCacheMagic, 1, sizeof kPipelineCacheMagic, c.out);
+    c.bytes = sizeof kPipelineCacheMagic;
+}
+// the records up to the first that is cut short, as the shader cache
+void LoadPipelineCache(PipelineCache& c) {
+    c.loaded = true;
+    const auto file = PipelineCacheFile();
+    std::string all;
+    if (std::ifstream in{file, std::ios::binary}) all.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    if (all.size() > kPipelineCacheMax || all.size() < sizeof kPipelineCacheMagic || std::memcmp(all.data(), kPipelineCacheMagic, sizeof kPipelineCacheMagic)) {
+        StartPipelineCache(c);
+    } else {
+        size_t good = sizeof kPipelineCacheMagic;
+        while (good + 12 <= all.size()) {
+            uint64_t k;
+            uint32_t n;
+            std::memcpy(&k, all.data() + good, 8);
+            std::memcpy(&n, all.data() + good + 8, 4);
+            if (good + 12 + size_t(n) > all.size()) break;
+            c.blobs[k].assign(all.data() + good + 12, n);
+            good += 12 + size_t(n);
+        }
+        std::error_code ec;
+        if (good != all.size()) std::filesystem::resize_file(file, good, ec);
+        c.out = std::fopen(file.string().c_str(), "ab");
+        c.bytes = good;
+    }
+    LOGR("pipelines: %zu built pipelines kept from earlier runs, %.1f MB (%s)%s", c.blobs.size(), double(c.bytes) / 1048576.0,
+         file.filename().string().c_str(), c.out ? "" : ", not writable: built again next run");
+}
+}  // namespace
+
+const std::string* CachedPipeline(uint64_t key) {
+    PipelineCache& c = Pipelines();
+    std::lock_guard lock(c.m);
+    if (!c.loaded) LoadPipelineCache(c);
+    auto it = c.blobs.find(key);
+    return it == c.blobs.end() || it->second.empty() ? nullptr : &it->second;
+}
+
+void KeepPipeline(uint64_t key, const void* data, size_t size) {
+    if (!data || !size || size > 0xFFFFFFFFu) return;
+    PipelineCache& c = Pipelines();
+    std::lock_guard lock(c.m);
+    if (!c.loaded) LoadPipelineCache(c);
+    if (c.bytes + 12 + size > kPipelineCacheMax) StartPipelineCache(c);
+    if (!c.out || !c.blobs.emplace(key, std::string(static_cast<const char*>(data), size)).second) return;
+    const uint32_t n = uint32_t(size);
+    std::fwrite(&key, 8, 1, c.out);
+    std::fwrite(&n, 4, 1, c.out);
+    std::fwrite(data, 1, size, c.out);
+    std::fflush(c.out);
+    c.bytes += 12 + size;
+}
+
+void ForgetPipelines() {
+    PipelineCache& c = Pipelines();
+    std::lock_guard lock(c.m);
+    LOGR("pipelines: the driver refused a kept pipeline (a new driver or another GPU): %zu dropped, built again", c.blobs.size());
+    StartPipelineCache(c);
+}
+
 const char* kBlitHlsl = R"(
 cbuffer B : register(b1) { float4 uvrect; float4 opts; };
 Texture2D img : register(t0);
@@ -538,6 +619,9 @@ void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
     c.surf[0] = float(size.w);
     c.surf[1] = float(size.h);
     c.surf[2] = 1.0f / s.zscale;
+    std::memcpy(c.vattr, s.vattr.data(), sizeof(c.vattr));
+    c.zclip[0] = s.depth_clip ? s.depth_clip_near / s.zscale : -2.0f;
+    c.zclip[1] = s.depth_clip ? s.depth_clip_far / s.zscale : 2.0f;
     Color(s.rs[kRsFogColor], c.fog_color);
     c.misc[0] = float(SimpleState(s, kMAlphaRef) & 0xFF);
     c.misc[1] = SimpleState(s, kMAlphaTestEnable) ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
@@ -812,6 +896,22 @@ UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 // screens' 2D W-buffered with LESSEQUAL at rhw 0.5 to 1, while light glows and their visibility probes lie in the
 // world (rhw about 0.01) and stay.
 // depth on with a comparison that can fail (PGR1 draws its HUD with depth on and the comparison ALWAYS)
+bool PresentUnsynced() {
+    static const bool uneven = [] {
+#ifdef _WIN32
+        DEVMODEW display{};
+        display.dmSize = sizeof(display);
+        if (std::getenv("XBE_VSYNC_ALWAYS") || !EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &display)) return false;
+        const bool u = display.dmDisplayFrequency > 60 && display.dmDisplayFrequency % 60 != 0;
+        if (u) LOGR("display: %u Hz is not a multiple of 60: frames are presented when paced, not at a refresh", unsigned(display.dmDisplayFrequency));
+        return u;
+#else
+        return false;
+#endif
+    }();
+    return uneven && app::Get().fps_cap != 0;
+}
+
 bool DepthTested(const State& s) { return s.rs[kRsZEnable] && SimpleState(s, kMZFunc) != 0x207; }
 
 // the depth buffer is one of the draw's textures and the draw leaves it alone (no test that fails, no depth or
