@@ -3,6 +3,9 @@
 // from the step before, by the time since it presented, at the rate of the frame cap, until the title has to go on. A
 // draw of the step before is found by what it draws, in order. Its memory is the title's until its next step, and the title is
 // waiting here. So the picture is up to one step late; nothing is drawn beyond what the title gave. No blend after a camera cut.
+// While steps blend, a step is only recorded as the title draws it: what is shown is its replays, so drawing it as well cost a whole
+// frame of the render thread's time. It is drawn at once, up to there, when the title asks after the GPU (a fence, a read-back, a
+// resource in use), and in full when a step is not blended. XBE_INTERP_DEFER=0 draws every step as it comes.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -86,8 +89,10 @@ public:
     explicit Interpolating(std::unique_ptr<Backend> inner) : inner_(std::move(inner)) {}
     bool Init(uint32_t w, uint32_t h) override { return inner_->Init(w, h); }
     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) override {
-        inner_->Clear(s, count, rects, flags, color, z, stencil);
-        if (!On()) return;
+        const bool on = On();
+        if (!on) DrawNow(kOff);
+        if (!on || !Deferring()) inner_->Clear(s, count, rects, flags, color, z, stencil);
+        if (!on) return;
         Rec& r = Next(Rec::Clear);
         Keep(r, s);
         r.a = count, r.b = flags, r.c = color, r.d = stencil, r.z = z;
@@ -95,8 +100,10 @@ public:
         if (rects) r.bytes.assign(rects, rects + size_t(count) * 16);
     }
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
-        inner_->Draw(s, prim, start, count, indices);
-        if (!On()) return;
+        const bool on = On();
+        if (!on) DrawNow(kOff);
+        if (!on || !Deferring()) inner_->Draw(s, prim, start, count, indices);
+        if (!on) return;
         Rec& r = Next(Rec::Draw);
         Keep(r, s);
         r.a = prim, r.b = start, r.c = count;
@@ -113,28 +120,57 @@ public:
         for (uint32_t p : s.palettes) add(p);
         r.has_bytes = indices != nullptr;
         if (indices) r.bytes.assign(indices, indices + size_t(count) * 2);
+        // vertices it could not keep: the draw needs the title's memory as it is now
+        if (kept_full_) DrawNow(kFull);
     }
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t rects, uint32_t points) override {
-        inner_->Copy(src, dst, count, rects, points);
-        if (!On()) return;
+        const bool on = On();
+        if (!on) DrawNow(kOff);
+        if (!on || !Deferring()) inner_->Copy(src, dst, count, rects, points);
+        if (!on) return;
         Rec& r = Next(Rec::Copy);
         r.s1 = src, r.s2 = dst, r.a = count, r.b = rects, r.c = points;
     }
     void Present(const Surface& front) override;
-    void Sync(uint32_t va, uint32_t size) override { inner_->Sync(va, size); }
-    void SyncLate(uint32_t va) override { inner_->SyncLate(va); }
-    bool DeliverLate(uint32_t va) override { return inner_->DeliverLate(va); }
-    void RecordLate(uint32_t va) override { inner_->RecordLate(va); }
+    // the title asks after the GPU's work: what it recorded so far is drawn first
+    void Sync(uint32_t va, uint32_t size) override {
+        if (Pending(va, size)) DrawNow(kRead);
+        inner_->Sync(va, size);
+    }
+    void SyncLate(uint32_t va) override {
+        if (Pending(va, 1)) DrawNow(kRead);
+        inner_->SyncLate(va);
+    }
+    bool DeliverLate(uint32_t va) override {
+        if (Pending(va, 1)) DrawNow(kRead);
+        return inner_->DeliverLate(va);
+    }
+    void RecordLate(uint32_t va) override {
+        if (Pending(va, 1)) DrawNow(kRead);
+        inner_->RecordLate(va);
+    }
     void Flush() override { inner_->Flush(); }
     void Kick() override { inner_->Kick(); }
     void SetGamma(const uint8_t* ramp) override { inner_->SetGamma(ramp); }
     void ClearReport() override { inner_->ClearReport(); }
-    void GetReport(uint32_t report) override { inner_->GetReport(report); }
-    uint32_t Fence() override { return inner_->Fence(); }
+    void GetReport(uint32_t report) override {
+        DrawNow(kRead);
+        inner_->GetReport(report);
+    }
+    uint32_t Fence() override {
+        DrawNow(kFence);
+        return inner_->Fence();
+    }
     bool FencePending(uint32_t f) override { return inner_->FencePending(f); }
     void WaitFence(uint32_t f) override { inner_->WaitFence(f); }
-    bool Busy(uint32_t r) override { return inner_->Busy(r); }
-    void WaitResource(uint32_t r) override { inner_->WaitResource(r); }
+    bool Busy(uint32_t r) override {
+        DrawNow(kBusy);
+        return inner_->Busy(r);
+    }
+    void WaitResource(uint32_t r) override {
+        DrawNow(kBusy);
+        inner_->WaitResource(r);
+    }
 
 private:
     static uint32_t Rate() {
@@ -194,7 +230,45 @@ private:
     }
     // finds each draw's last self; false when there is nothing to blend or the camera was cut
     bool Match();
-    void Replay(float alpha);
+    // the step's records from..to drawn, blended by alpha; the whole step times replay_seconds_
+    void Replay(float alpha, size_t from = 0, size_t to = SIZE_MAX);
+    // why a step recorded without drawing had to be drawn before it ended
+    enum Why { kOff, kFull, kRead, kFence, kBusy, kEnd, kWhys };
+    static bool DeferAllowed() {
+        static const bool on = [] {
+            const char* e = std::getenv("XBE_INTERP_DEFER");
+            return !(e && *e == '0');
+        }();
+        return on;
+    }
+    // at a step's first record: recorded only, when the step before was shown by its replays
+    bool Deferring() {
+        if (!count_) deferring_ = defer_next_, drawn_ = 0;
+        return deferring_;
+    }
+    // a surface a record not yet drawn draws to or copies into, at these bytes (the title touches its memory)
+    bool Pending(uint32_t va, uint32_t size) const {
+        if (!deferring_) return false;
+        const uint32_t lo = va & 0x0FFFFFFF, hi = lo + std::max(size, 1u);
+        const auto overlaps = [&](const Surface& f) {
+            if (!f.data) return false;
+            const uint32_t height = (f.size >> 12 & 0xFFF) + 1, pitch = ((f.size >> 24 & 0xFF) + 1) * 64;
+            const uint32_t at = f.data & 0x0FFFFFFF;
+            return lo < at + pitch * height && at < hi;
+        };
+        for (size_t i = drawn_; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind == Rec::Copy ? overlaps(r.s2) : overlaps(r.s->rt) || overlaps(r.s->zs)) return true;
+        }
+        return false;
+    }
+    void DrawNow(Why why) {
+        if (!deferring_) return;
+        deferring_ = false;
+        if (why != kEnd) drawn_now_[why]++;
+        if (drawn_ < count_ && UploadKept()) Replay(1, drawn_, count_);
+        drawn_ = count_;
+    }
 
     std::unique_ptr<Backend> inner_;
     std::vector<Rec> now_, before_;
@@ -207,6 +281,11 @@ private:
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
     int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience, late_ = 0;
     bool raised_ = false;
+    bool deferring_ = false, defer_next_ = false;
+    size_t drawn_ = 0;
+    uint32_t drawn_now_[kWhys] = {}, recorded_only_ = 0;
+    double replay_total_ = 0;
+    uint32_t replays_ = 0;
     Clock::time_point rest_until_{};
     bool logged_ = false;
     Clock::time_point reported_{};
@@ -523,13 +602,14 @@ bool Interpolating::Match() {
     return true;
 }
 
-void Interpolating::Replay(float alpha) {
+void Interpolating::Replay(float alpha, size_t from, size_t to) {
     const auto began = Clock::now();
+    to = std::min(to, count_);
     // as the title left them, afterwards
     std::vector<Rec::Header> left;
     std::unordered_map<uint32_t, bool> seen;
     uint32_t header = 0;
-    for (size_t i = 0; i < count_; i++)
+    for (size_t i = from; i < to; i++)
         for (const Rec::Header& h : now_[i].headers)
             if (!seen[h.va]) {
                 seen[h.va] = true;
@@ -537,7 +617,7 @@ void Interpolating::Replay(float alpha) {
                 std::memcpy(l.bytes, kernel::HostPtr(h.va), HeaderSize(h.va));
                 left.push_back(l);
             }
-    for (size_t i = 0; i < count_; i++) {
+    for (size_t i = from; i < to; i++) {
         Rec& r = now_[i];
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
@@ -591,7 +671,10 @@ void Interpolating::Replay(float alpha) {
     }
     for (const Rec::Header& l : left) std::memcpy(kernel::HostPtr(l.va), l.bytes, HeaderSize(l.va));
     region_fence_[region_] = inner_->Fence();
+    if (from || to != count_) return;
     replay_seconds_ = std::chrono::duration<double>(Clock::now() - began).count();
+    replay_total_ += replay_seconds_;
+    replays_++;
 }
 
 void Interpolating::Present(const Surface& front) {
@@ -600,7 +683,10 @@ void Interpolating::Present(const Surface& front) {
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
     const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
+    const bool undrawn = deferring_;  // nothing of this step drawn yet: only its replays will draw it
+    bool replayed = false;            // this step shown by its replays: the next can be recorded only
     if (Test() && blend) {
+        replayed = true;
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
             inner_->Present(front);
@@ -608,6 +694,7 @@ void Interpolating::Present(const Surface& front) {
         Replay(1);
         inner_->Present(front);
     } else if (!blend || step > kLongestStep || step < kShortestStep) {
+        DrawNow(kEnd);
         inner_->Present(front);
     } else {
         if (!logged_) LOGR("gpu: in-between frames, a step of %.1f ms at up to %u a second", step * 1000, Rate());
@@ -643,13 +730,16 @@ void Interpolating::Present(const Surface& front) {
         const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
         const double spacing = std::min(slot, usual / frames);
         if (t < rest_until_) {
+            DrawNow(kEnd);
             inner_->Present(front);
         } else if (replay_seconds_ > usual * kTooLong) {
             rest_until_ = t + std::chrono::seconds(2);
             replay_seconds_ = 0;
             LOGR("gpu: in-between frames: a replay takes too long, none for 2 s");
+            DrawNow(kEnd);
             inner_->Present(front);
         } else {
+            replayed = true;
             // the title's choice for what the player aims: the step shown at once and carried on from there, up to a step too far when
             // the aim stops, with none of the delay
             const bool ahead = app::kGame.step_ahead && app::kGame.step_ahead();
@@ -657,6 +747,7 @@ void Interpolating::Present(const Surface& front) {
             // full so does this. One begun that will not be done before the next step would make the title late
             if (ahead) {
                 const auto now = Clock::now();
+                DrawNow(kEnd);
                 inner_->Present(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() + replay_seconds_ - frame_seconds_) * 0.1;
             }
@@ -677,11 +768,22 @@ void Interpolating::Present(const Surface& front) {
     }
     shown_++;
     steps_++;
+    if (undrawn && deferring_) recorded_only_++;
+    deferring_ = false;
+    defer_next_ = replayed && DeferAllowed();
     if (t - reported_ > std::chrono::seconds(10)) {
-        if (reported_ != Clock::time_point{} && blended_steps_)
-            LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s", shown_, steps_, blended_steps_);
+        if (reported_ != Clock::time_point{} && blended_steps_) {
+            LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s, a replay %.2f ms", shown_, steps_,
+                 blended_steps_, replays_ ? replay_total_ / replays_ * 1000 : 0.0);
+            if (DeferAllowed())
+                LOGR("gpu: in-between frames: %u steps drawn only by their replays; drawn early for: %u title off, %u vertices not kept, "
+                     "%u read-backs, %u fences, %u resources in use", recorded_only_, drawn_now_[kOff], drawn_now_[kFull],
+                     drawn_now_[kRead], drawn_now_[kFence], drawn_now_[kBusy]);
+        }
         reported_ = t;
-        shown_ = steps_ = blended_steps_ = 0;
+        shown_ = steps_ = blended_steps_ = replays_ = recorded_only_ = 0;
+        replay_total_ = 0;
+        for (uint32_t& n : drawn_now_) n = 0;
     }
     now_.swap(before_);
     before_count_ = count_;
