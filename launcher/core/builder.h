@@ -55,7 +55,14 @@ public:
     // then the game's code compiled there. BuildAll takes this way when there is one
     bool BuildPackage(std::string& error);
     bool Prebuilt() const { return !game_.package.empty() || !game_.packages.empty(); }
-    std::string PackageName() const;  // the chosen disc's zip, empty when none is known for it
+    std::string PackageName() const;
+    // a game built the old way (its exe with no code DLL beside it): the next build installs the package over it, keeping
+    // saves, music and settings
+    bool Legacy() const;
+    // the old way's tools (FFmpeg stays), source and downloads, which a prebuilt install no longer needs
+    std::vector<std::filesystem::path> OldBuildPaths() const;
+    uint64_t OldBuildBytes() const;
+    bool RemoveOldBuild(std::string& error);  // the chosen disc's zip, empty when none is known for it
     std::atomic<Step> step{Step::None};
     // the launcher's folder is too deep for the Windows SDK: msiexec (which unpacks it) fails past 260 characters, and
     // the SDK's deepest headers lie about 130 below tools\; message: what to do

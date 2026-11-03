@@ -55,6 +55,17 @@ int main(int argc, char** argv) {
     Shot(app, big, out + "/p1_first_run.png", W, H);
     app.copy.ok = true, app.copy.release = "NTSC (USA)", app.copy.path = "C:\\Games\\PGR2\\PGR2_USA.iso";
     Shot(app, big, out + "/p2_game_chosen.png", W, H);
+    // an install from before: the old exe, the old tools
+    fs::create_directories(prebuilt.PlayDir(), ec);
+    std::ofstream(prebuilt.GameExe()) << "x";
+    fs::create_directories(app.root / "tools" / "llvm", ec);
+    std::ofstream(app.root / "tools" / "llvm" / "clang") << std::string(5 << 20, 'x');
+    app.old_bytes = prebuilt.OldBuildBytes();
+    Shot(app, big, out + "/p2b_update_from_old.png", W, H);
+    app.page = 2;
+    Shot(app, big, out + "/p2c_old_tools.png", W, H);
+    app.page = 0;
+    fs::remove(prebuilt.GameExe(), ec);
     app.busy = true, prebuilt.step = Step::Package, app.status = {"Downloading the game's package", "61 of 280 MB", 0.22};
     Shot(app, big, out + "/p3_download.png", W, H);
     prebuilt.step = Step::Compile, app.status = {"Building Project Gotham Racing 2 for this PC", "38 of 65 files, under a minute left", 0.58};

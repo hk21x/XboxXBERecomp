@@ -103,6 +103,15 @@ int main(int argc, char** argv) {
         std::printf("prebuilt ok, built=%d\n", int(b.Built()));
         return 0;
     }
+    if (cmd == "upgrade") {  // the install in <root> as it is (its remembered game), then the old tools removed
+        std::string err;
+        std::printf("legacy=%d old=%llu\n", int(b.Legacy()), (unsigned long long)b.OldBuildBytes());
+        if (!b.BuildPackage(err)) return std::printf("upgrade: %s\n", err.c_str()), 1;
+        std::printf("built=%d legacy=%d\n", int(b.Built()), int(b.Legacy()));
+        if (!b.RemoveOldBuild(err)) return std::printf("remove: %s\n", err.c_str()), 1;
+        std::printf("old after=%llu\n", (unsigned long long)b.OldBuildBytes());
+        return 0;
+    }
     if (cmd == "timing") {
         b.StartTiming();
         b.Timed("short", [] { std::this_thread::sleep_for(std::chrono::milliseconds(300)); return true; });

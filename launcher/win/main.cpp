@@ -234,6 +234,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (!saved.empty()) app.copy = CheckGame(app.game, saved);
     app.music = app.builder->SavedMusic();
     app.build_bytes = app.builder->BuildFilesBytes();
+    app.old_bytes = app.builder->OldBuildBytes();
     // a new version: a newer release's launcher looked for once at start (a release launcher only), and the game
     // when it was built before
     app.Start([&app](std::string& err) {

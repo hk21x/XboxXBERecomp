@@ -41,6 +41,7 @@ struct App {
     std::string error, done_message;
     std::deque<std::string> log;
     uint64_t build_bytes = 0;
+    uint64_t old_bytes = 0;    // Builder::OldBuildBytes, counted with build_bytes
     int page = 0;              // the section shown: ScreenPage
     fs::path music;            // the music folder imported last
     bool music_job = false;    // the job running or last run imports the music: its result shows under Your music
@@ -64,6 +65,7 @@ struct App {
             else done_message = done;
             status = {};
             build_bytes = builder->BuildFilesBytes();
+            old_bytes = builder->OldBuildBytes();
             busy = false;
         });
     }

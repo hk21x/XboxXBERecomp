@@ -93,8 +93,14 @@ void InstallSection(App& app, ImFont* heading, const Status& st, const std::stri
     Step at = app.builder->step;
     if (built && !busy && !app.update) at = Step::Ready;
     auto mark = [&](Step s) { return at == s && busy ? Mark::Working : int(at) > int(s) ? Mark::Done : Mark::Waiting; };
-    Section(built && !app.update ? "Ready to play" : "Getting the game ready", heading);
-    if (!built) {
+    const bool legacy = !built && app.builder->Legacy();
+    Section(built && !app.update ? "Ready to play" : legacy ? "A faster way to play" : "Getting the game ready", heading);
+    if (legacy && !busy) {
+        ImGui::TextWrapped("This version comes ready-made: your PC only builds the game's own code, in a minute or two, "
+                           "with no build tools to download. Your saves, settings and music are kept, and the game you have "
+                           "keeps working until the new one is ready.");
+        ImGui::Spacing();
+    } else if (!built) {
         ImGui::TextWrapped("The program comes ready to go, and your PC builds the game's code from your own disc, once. "
                            "Nothing is installed in Windows, and it all stays in one folder.");
         ImGui::Spacing();
@@ -117,7 +123,7 @@ void InstallSection(App& app, ImFont* heading, const Status& st, const std::stri
     if (!built || app.update) {
         TextIn(kDim, "Free on this drive: " + Megabytes(FreeBytes(app.root)));
         ImGui::BeginDisabled(!app.copy.ok);
-        if (Primary(built ? "Update" : "Get the game ready", ImVec2(14 * em, 0))) {
+        if (Primary(built || legacy ? "Update" : "Get the game ready", ImVec2(14 * em, 0))) {
             app.update = false;
             app.music_job = false;
             app.Start([&app](std::string& e) { return app.builder->BuildAll(e); }, "The game is ready. Press Play.");
@@ -220,7 +226,8 @@ void GamePage(App& app, void* window, ImFont* heading, const Status& st, const s
     }
 
     Section("Play", heading);
-    ImGui::BeginDisabled(busy || !built || !app.copy.ok);
+    // a game built the old way plays as it is until its update is in place
+    ImGui::BeginDisabled(busy || !(built || app.builder->Legacy()) || !app.copy.ok);
     ImGui::PushFont(heading);
     if (Primary("Play", ImVec2(10 * em, 0))) {
         std::string e;
@@ -288,7 +295,8 @@ void ManagePage(App& app, ImFont* heading) {
         };
         row("Launcher", app.game.version);
         std::string version = app.builder->BuiltVersion();
-        row("Game", !built ? "not ready yet" : version.empty() ? "ready" : version);
+        row("Game", app.builder->Legacy() ? (version.empty() ? std::string("an earlier version") : version) + ", built the old way: update it on Game"
+                    : !built ? "not ready yet" : version.empty() ? "ready" : version);
         row("Your copy", app.copy.ok ? app.copy.release + ", " + U8(app.copy.path) : "not chosen");
         row("Folder", U8(app.root));
         row("Free on this drive", Megabytes(FreeBytes(app.root)));
@@ -313,6 +321,23 @@ void ManagePage(App& app, ImFont* heading) {
                   "Build files removed. An update builds everything again.");
     ImGui::EndDisabled();
     TextIn(kDim, "Frees space once the game is built. Your saves, settings and music are not touched.");
+    if (app.builder->Prebuilt()) {
+        uint64_t old_bytes;
+        {
+            std::lock_guard l(app.lock);
+            old_bytes = app.old_bytes;
+        }
+        if (old_bytes > 0) {
+            ImGui::BeginDisabled(busy || !built);
+            std::string old = "Remove the old build tools (" + Megabytes(old_bytes) + ")";
+            if (ImGui::Button(old.c_str()))
+                app.music_job = false, app.Start([&app](std::string& e) { return app.builder->RemoveOldBuild(e); },
+                          "The old build tools are removed.");
+            ImGui::EndDisabled();
+            TextIn(kDim, built ? "The earlier versions built the game with these; this one does not need them. FFmpeg, for your music, stays."
+                               : "Once the game is updated: the earlier versions built it with these.");
+        }
+    }
     if (app.builder->Prebuilt()) {
         ImGui::BeginDisabled(busy || !built || !app.copy.ok);
         if (ImGui::Button("Build the game again")) {

@@ -487,6 +487,10 @@ std::string Builder::PackageName() const {
     std::string text;
     json j = ReadAll(root_ / "launcher.json", text) ? json::parse(text, nullptr, false) : json::object();
     std::string sha = j.is_object() ? j.value("game_sha1", "") : "";
+    if (sha.empty() && !game_.packages.empty()) {  // an install from before the hash was kept: the disc tells
+        fs::path saved = SavedGame();
+        if (!saved.empty()) sha = CheckGame(game_, saved).sha1;
+    }
     auto it = game_.packages.find(Lower(sha));
     return it != game_.packages.end() ? it->second : game_.package;
 }
@@ -555,12 +559,16 @@ bool Builder::BuildPackage(std::string& error) {
         if (cancel) error = "cancelled";
         return stopped();
     }
+    // the new version is unpacked and built beside the game, in play\.next, and only replaces it once it is built: a
+    // failed or stopped update leaves the game as it was, playable (its exe finds play\assets, a folder up)
     step = Step::Unpack;
+    const fs::path next = PlayDir() / ".next";
     std::string have;
-    if (!ReadAll(PlayDir() / "package.stamp", have) || have != id) {
+    if (!ReadAll(next / "package.stamp", have) || have != id) {
+        fs::remove_all(next, ec);  // another version's, half done
         bool unpacked = Timed("package unpack", [&] {
             Say("Unpacking the game's package", {}, 0);
-            fs::create_directories(PlayDir(), ec);
+            fs::create_directories(next, ec);
             // only ever the release's files: what the player has made stays
             auto keep = [](std::string name) {
                 if (name.rfind("./", 0) == 0) name.erase(0, 2);  // Windows' tar writes them so
@@ -571,7 +579,7 @@ bool Builder::BuildPackage(std::string& error) {
                 if (low.size() > 5 && low.compare(low.size() - 5, 5, ".toml") == 0 && low.find('/') == std::string::npos) return std::string();  // the settings
                 return name;
             };
-            return Unzip(zip, PlayDir(), keep, [&](uint64_t done, uint64_t all) {
+            return Unzip(zip, next, keep, [&](uint64_t done, uint64_t all) {
                     Say("Unpacking the game's package", {}, all ? double(done) / double(all) : -1);
                 }, &cancel, error);
         });
@@ -579,7 +587,7 @@ bool Builder::BuildPackage(std::string& error) {
             if (cancel) error = "cancelled";
             return stopped();
         }
-        std::ofstream(PlayDir() / "package.stamp", std::ios::binary) << id;
+        std::ofstream(next / "package.stamp", std::ios::binary) << id;
         if (fs::path(zip).parent_path() == downloads) fs::remove(zip, ec);
     }
     step = Step::Compile;
@@ -587,7 +595,7 @@ bool Builder::BuildPackage(std::string& error) {
     bool compiled = Timed("compile game code", [&] {
         Say("Building " + game_.title + " for this PC", "Starting", -1);
         const auto start = std::chrono::steady_clock::now();
-        int code = platform_.Run({U8(GameExe()), "--prepare-code"}, PlayDir(), {}, [&](const std::string& line) {
+        int code = platform_.Run({U8(next / GameExe().filename()), "--prepare-code"}, next, {}, [&](const std::string& line) {
                 if (line.rfind("progress ", 0) == 0) {
                     int stage = 0;
                     unsigned long long files = 0, all = 0, bytes = 0, total = 0;
@@ -613,14 +621,80 @@ bool Builder::BuildPackage(std::string& error) {
         error = cancel ? "cancelled" : failed.empty() ? "The game's code could not be built, see launcher.log" : failed;
         return stopped();
     }
-    if (!Built()) {
+    if (!fs::exists(next / (game_.exe + ".dll"), ec)) {
         error = "The build finished without " + game_.exe + ".dll, see launcher.log";
+        return stopped();
+    }
+    // into place: the release's files and what was built from them; the game's settings and logs stay the game's
+    if (!Timed("replace the game", [&] {
+            for (const auto& e : fs::directory_iterator(next, ec)) {
+                std::string name = Lower(U8(e.path().filename()));
+                if (name == "logs" || (name.size() > 5 && name.compare(name.size() - 5, 5, ".toml") == 0)) continue;
+                fs::path to = PlayDir() / e.path().filename();
+                std::error_code move;
+                if (e.is_directory(move)) fs::remove_all(to, move);
+                fs::rename(e.path(), to, move);
+                if (move) {
+                    error = "Could not put " + U8(e.path().filename()) + " in place (is the game still running?): " + move.message();
+                    return false;
+                }
+            }
+            return true;
+        }))
+        return stopped();
+    fs::remove_all(next, ec);
+    if (!Built()) {
+        error = "The game was put in place but is not complete, see launcher.log";
         return stopped();
     }
     step = Step::Ready;
     LogTiming();
     Remember("built", game_.version);
     Say("Ready", "", 1);
+    return true;
+}
+
+bool Builder::Legacy() const {
+    std::error_code ec;
+    return Prebuilt() && fs::exists(GameExe(), ec) && !fs::exists(PlayDir() / (game_.exe + ".dll"), ec);
+}
+
+// what the old way of building left: tools (FFmpeg stays, for the music), the source and its build, the downloads
+std::vector<fs::path> Builder::OldBuildPaths() const {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    if (!Prebuilt()) return out;
+    for (const auto& e : fs::directory_iterator(root_ / "tools", ec))
+        if (Lower(U8(e.path().filename())) != "ffmpeg") out.push_back(e.path());
+    for (const char* name : {"source", "downloads", "agreed.txt"})
+        if (fs::exists(root_ / name, ec)) out.push_back(root_ / name);
+    return out;
+}
+
+uint64_t Builder::OldBuildBytes() const {
+    uint64_t n = 0;
+    std::error_code ec;
+    for (const fs::path& p : OldBuildPaths()) {
+        if (fs::is_regular_file(p, ec)) {
+            n += fs::file_size(p, ec);
+            continue;
+        }
+        for (auto it = fs::recursive_directory_iterator(p, ec); it != fs::recursive_directory_iterator(); it.increment(ec))
+            if (it->is_regular_file(ec)) n += it->file_size(ec);
+    }
+    return n;
+}
+
+bool Builder::RemoveOldBuild(std::string& error) {
+    std::error_code ec;
+    for (const fs::path& p : OldBuildPaths()) {
+        fs::remove_all(p, ec);
+        if (ec) {
+            error = "Could not remove " + U8(p) + ": " + ec.message();
+            return false;
+        }
+        Log("removed " + U8(p));
+    }
     return true;
 }
 
