@@ -583,7 +583,22 @@ void Interpolating::Replay(float alpha) {
                 } else {
                     d.vsc = r.vsc;
                 }
+                // a draw without a program takes the fixed function matrices: blended too, or what it draws (a car's light and
+                // shadow cast on the road, EoN) stays at the step's place while what is round it is blended, jumping back and forth
+                constexpr uint32_t kFixed[] = {2, 3, 16, 17, 18, 19, 256, 257, 258, 259};  // view, projection, texture 0-3, world 0-3
+                std::array<std::array<float, 16>, std::size(kFixed)> fixed_was;
+                const bool fixed = blend && !(d.vs_handle & 1) && before_[size_t(r.prev)].s;
+                if (fixed) {
+                    const State& p = *before_[size_t(r.prev)].s;
+                    for (size_t i = 0; i < std::size(kFixed); i++) {
+                        auto& m = d.transforms[kFixed[i]];
+                        fixed_was[i] = m;
+                        for (uint32_t e = 0; e < 16; e++) m[e] = p.transforms[kFixed[i]][e] + (m[e] - p.transforms[kFixed[i]][e]) * alpha;
+                    }
+                }
                 inner_->Draw(d, r.a, r.b, r.c, indices);
+                if (fixed)
+                    for (size_t i = 0; i < std::size(kFixed); i++) d.transforms[kFixed[i]] = fixed_was[i];
                 d.streams = streams;
                 break;
             }
