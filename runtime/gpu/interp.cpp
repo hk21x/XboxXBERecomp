@@ -75,7 +75,9 @@ uint64_t KeyOf(const Rec& r) {
     uint64_t h = 0xCBF29CE484222325ull;
     auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
     mix(r.a), mix(r.b), mix(r.c), mix(s.vs_handle), mix(s.rt.header);
-    for (uint32_t t : s.textures) mix(t);
+    // stage 0's texture only: the other stages can hold a binding the program does not read that changes from one step to the
+    // next (EoN's driving: stage 2 bound one step and not the next), and lost the match of a whole floor's scenery and its decals
+    mix(s.textures[0]);
     // not the buffers: a title hands a mesh another vertex buffer from one step to the next (what it draws is the same); the matrix tells alike apart
     mix(s.viewport.x), mix(s.viewport.y), mix(s.viewport.w), mix(s.viewport.h), mix(s.squeeze_beyond);
     return h;
