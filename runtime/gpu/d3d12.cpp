@@ -1259,8 +1259,8 @@ uint64_t D3D12Backend::SizedTargetKey(uint32_t data, bool depth, uint32_t gw, ui
     // a surface smaller than the frame keeps a target per size: titles draw small textures at one address at two sizes
     // in a frame (EoN's driving: 512x512 then 256x128 at 80F80000), which keyed by address alone were made again at
     // each change, hundreds of times a second once frames in between replay the step
-    bool small = gw != guest_w_ || gh != guest_h_;
-    if (!small) return key;
+    bool under_frame = gw != guest_w_ || gh != guest_h_;  // not "small": the Windows SDK's rpcndr.h defines it
+    if (!under_frame) return key;
     return key | uint64_t(gw) << kKeyWidthShift | uint64_t(gh) << kKeyHeightShift;
 }
 
