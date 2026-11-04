@@ -597,6 +597,8 @@ private:
     // EnsureTarget's steps, in call order
     TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt, uint32_t gw = 0, uint32_t gh = 0);
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
+    std::unordered_map<uint64_t, Target>::iterator ColourTargetAt(uint32_t data);
+    std::unordered_map<uint32_t, uint64_t> small_colour_;  // an address's colour target smaller than the frame, last made or found
     bool TargetStale(uint32_t data) const;
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
     bool CreateTargetResource(Target& t, const Surface& s);
@@ -1255,9 +1257,20 @@ constexpr int kKeyHeightShift = 48;
 // a smaller depth surface laid on the depth buffer's memory is a target of its own
 uint64_t D3D12Backend::SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const {
     uint64_t key = TargetMapKey(data, depth);
-    bool small_depth = depth && (gw != guest_w_ || gh != guest_h_);
-    if (!small_depth) return key;
+    // a surface smaller than the frame keeps a target per size: titles draw small textures at one address at two sizes
+    // in a frame (EoN's driving: 512x512 then 256x128 at 80F80000), which keyed by address alone were made again at
+    // each change, hundreds of times a second once frames in between replay the step
+    bool under_frame = gw != guest_w_ || gh != guest_h_;  // not "small": the Windows SDK's rpcndr.h defines it
+    if (!under_frame) return key;
     return key | uint64_t(gw) << kKeyWidthShift | uint64_t(gh) << kKeyHeightShift;
+}
+
+// the colour target at an address the CPU reads: the frame sized one, else the size last drawn there
+std::unordered_map<uint64_t, Target>::iterator D3D12Backend::ColourTargetAt(uint32_t data) {
+    auto it = targets_.find(TargetMapKey(data, false));
+    if (it != targets_.end()) return it;
+    auto last = small_colour_.find(data);
+    return last == small_colour_.end() ? targets_.end() : targets_.find(last->second);
 }
 
 // alt: the extension's bits of the key
@@ -1292,6 +1305,7 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (ext_ && !ext_->TargetKey(s, depth, alt)) return nullptr;
     TargetSlot slot = FindTargetSlot(s, depth, alt, gw, gh);
     target_used_[slot.data] = frame_;
+    if (!depth && (slot.gw != guest_w_ || slot.gh != guest_h_)) small_colour_[slot.data] = slot.key;
     if (slot.sized) return &slot.it->second;
     if (slot.it != targets_.end()) ReleaseTarget(slot.it);
     Target t;
@@ -2224,7 +2238,7 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
     tx.faces = presents_ + 1;
     for (uint32_t f = 0; f < 6; f++) {
         uint32_t face = d.data + f * FaceSize(d);
-        auto it = targets_.find(TargetMapKey(face, false));
+        auto it = targets_.find(SizedTargetKey(face, false, d.width, d.height));
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
@@ -2312,6 +2326,15 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    // a colour texture of another size than any target at its address: the frame sized target there, else the size
+    // last drawn there, as before targets were kept per size (EoN's Thermovision reads 640x480 target 8316CA00 as
+    // 320x240; a swizzled power of two header over a target)
+    if (tit == targets_.end() && !fi.depth) {
+        tit = targets_.find(TargetMapKey(d.data, false) | alt);
+        if (auto last = small_colour_.find(d.data); tit == targets_.end() && last != small_colour_.end())
+            if (auto t = targets_.find(last->second); t != targets_.end())
+                tit = targets_.find(SizedTargetKey(d.data, false, t->second.gw, t->second.gh) | alt);
+    }
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height) | alt);
@@ -4332,7 +4355,7 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
-    auto it = targets_.find(TargetMapKey(data, false));
+    auto it = ColourTargetAt(data);
     if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
     // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
     if (!it->second.linear32 && !it->second.swizzled32) {
@@ -4465,7 +4488,7 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
 }
 
 void D3D12Backend::RecordLate(uint32_t data) {
-    auto it = targets_.find(TargetMapKey(data, false));
+    auto it = ColourTargetAt(data);
     if (it == targets_.end() || TargetStale(data) || !it->second.linear32) return;
     Target& t = it->second;
     PerfScope perf_sync{g_perf.sync};
