@@ -2308,6 +2308,15 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    // a colour texture of another size than any target at its address: the frame sized target there, else the size
+    // last drawn there, as before targets were kept per size (EoN's Thermovision reads 640x480 target 8316CA00 as
+    // 320x240; a swizzled power of two header over a target)
+    if (tit == targets_.end() && !fi.depth) {
+        tit = targets_.find(TargetMapKey(d.data, false) | alt);
+        if (auto last = small_colour_.find(d.data); tit == targets_.end() && last != small_colour_.end())
+            if (auto t = targets_.find(last->second); t != targets_.end())
+                tit = targets_.find(SizedTargetKey(d.data, false, t->second.gw, t->second.gh) | alt);
+    }
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height) | alt);
