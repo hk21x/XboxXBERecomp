@@ -401,6 +401,7 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
                       g_top[0] * g_front[1] - g_top[1] * g_front[0]};
     float side = rel ? d[0] : d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
     float pan = dist > 1e-3f ? side / dist : 0.0f;
+    if (app::kGame.sound_x_left) pan = -pan;
     for (uint32_t c = 0; c < kMixChannels; c++) {
         g[c][0] *= att * std::min(1.0f, 1.0f - pan);
         g[c][1] *= att * std::min(1.0f, 1.0f + pan);
@@ -436,10 +437,20 @@ void Render(float* out, uint32_t frames) {
             n++;
             float g[kMixChannels][2];
             Levels(v, g);
-            if (g[0][0] + g[0][1] > 0.25f && top.size() < 600) {
-                char b[120];
-                std::snprintf(b, sizeof b, " [%08X tag %X %uHz freq %u vol %.2f head %.2f gain %.2f/%.2f%s]", obj, v.tag, v.rate,
-                              v.freq, v.volume, v.headroom, g[0][0], g[0][1], v.is3d ? " 3d" : "");
+            // a channel's left/right gains; a stereo voice's second channel too (its first is mostly left only)
+            float sum = 0;
+            for (uint32_t c = 0; c < std::min<uint32_t>(v.channels, 2); c++) sum = std::max(sum, g[c][0] + g[c][1]);
+            if (sum > 0.25f && top.size() < 900) {
+                char b[200];
+                int k = std::snprintf(b, sizeof b, " [%08X tag %X %uch %uHz freq %u vol %.2f head %.2f gain %.2f/%.2f", obj, v.tag,
+                                      v.channels, v.rate, v.freq, v.volume, v.headroom, g[0][0], g[0][1]);
+                if (v.channels > 1) k += std::snprintf(b + k, sizeof b - k, " %.2f/%.2f", g[1][0], g[1][1]);
+                if (v.is3d) k += std::snprintf(b + k, sizeof b - k, " 3d mode %u at %.1f %.1f %.1f", v.mode, v.p[0], v.p[1], v.p[2]);
+                // into a 3D submix buffer: where it is, as the title gave it (mode 1 head relative: +x right, +z ahead)
+                if (const Voice* to = v.out ? Find(v.out) : nullptr)
+                    k += std::snprintf(b + k, sizeof b - k, " into %08X mode %u at %.1f %.1f %.1f", v.out, to->mode, to->p[0],
+                                       to->p[1], to->p[2]);
+                std::snprintf(b + std::min<int>(k, int(sizeof b) - 2), 2, "]");
                 top += b;
             }
         }
