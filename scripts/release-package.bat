@@ -12,7 +12,7 @@ if not exist "%OUT%\compiler\clang.exe" (echo %OUT%\compiler\clang.exe is missin
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -property installationPath`) do set "VSDIR=%%i"
 for /d %%v in ("%VSDIR%\VC\Redist\MSVC\1*") do for /d %%c in ("%%v\x64\Microsoft.VC*.CRT") do set "VCRUNTIME=%%c"
-if not exist "%VCRUNTIME%\vcruntime140.dll" (echo The Visual C++ runtime was not found under %VSDIR%. & exit /b 1)
+if not exist "%VCRUNTIME%\vcruntime140.dll" (echo The Visual C++ runtime was not found under "%VSDIR%". & exit /b 1)
 if exist "%STAGE%" rd /s /q "%STAGE%"
 mkdir "%STAGE%"
 :exes
