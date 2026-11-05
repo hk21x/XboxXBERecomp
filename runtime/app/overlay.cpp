@@ -968,10 +968,15 @@ void DrawOverlay() {
         }
     }
 
-    // on a very wide screen the window keeps a readable shape
+    // on a very wide screen the window keeps a readable shape; placed again when the screen's size changes while it is
+    // open (a new resolution from the Display page left it partly off the screen)
+    static ImVec2 placed_for{0, 0};
+    const bool resized = vp->WorkSize.x != placed_for.x || vp->WorkSize.y != placed_for.y;
+    placed_for = vp->WorkSize;
+    const ImGuiCond place = resized ? ImGuiCond_Always : ImGuiCond_Appearing;
     float height = vp->WorkSize.y * 0.8f, width = std::min(vp->WorkSize.x * 0.6f, height * 1.5f);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(vp->GetCenter(), place, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(width, height), place);
     ImGui::SetNextWindowBgAlpha(1);
     bool open = !close;
     const float em = ImGui::GetFontSize();
