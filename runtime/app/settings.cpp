@@ -442,19 +442,33 @@ bool FillsNarrow() {
     const float r = ScreenAspect();
     return r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
 }
+
+// the aspect setting fills an ultrawide screen
+bool FillsWide() { return Get().aspect == 3 || (Get().aspect == 0 && kGame.auto_fills_screen); }
 }  // namespace
 
+// kept from the first ask: the title reads its TV setting once, as it boots, so a resolution changed in play (16:10 to
+// 16:9 from the Display page) must not tell the renderers another mode than the title is in
 bool Widescreen() {
-    const Settings& s = Get();
-    if (s.aspect == 1 || FillsNarrow()) return false;
-    if (s.aspect >= 2) return true;
-    return ScreenAspect() >= 1.5f - 1e-3f;  // 3:2 or wider
+    static const bool wide = [] {
+        const Settings& s = Get();
+        if (s.aspect == 1 || FillsNarrow()) return false;
+        if (s.aspect >= 2) return true;
+        return ScreenAspect() >= 1.5f - 1e-3f;  // 3:2 or wider
+    }();
+    return wide;
 }
 
 float FrameAspect() {
-    if (FillsNarrow()) return ScreenAspect();
-    if (!Widescreen()) return 4.0f / 3.0f;
-    if (Get().aspect != 3 && !(Get().aspect == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
+    const uint32_t a = Get().aspect;
+    if (!Widescreen()) {
+        // a title widening its 4:3 views fills the screen it is shown on now, as far as the setting reaches (16:10 at
+        // boot and 16:9 since: 16:9; an ultrawide only with FillsWide)
+        if (!kGame.fills_narrow_screens || (a != 0 && a != 3)) return 4.0f / 3.0f;
+        const float r = std::max(4.0f / 3.0f, ScreenAspect());
+        return FillsWide() ? r : std::min(r, 16.0f / 9.0f);
+    }
+    if (!FillsWide()) return 16.0f / 9.0f;
     return std::max(16.0f / 9.0f, ScreenAspect());
 }
 
