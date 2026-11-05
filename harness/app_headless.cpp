@@ -1,4 +1,5 @@
 // the host side without a window: settings at their defaults, the run folder as the exe folder
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -41,13 +42,23 @@ Mode Desktop() {
 }
 Mode Output() { return Desktop(); }
 float RenderScale(uint32_t) { return 1.0f; }
-bool Widescreen() { return Desktop().width * 2 >= Desktop().height * 3; }  // as on Windows: 3:2 or wider
+namespace {
+// as on Windows with "from the screen's shape": an OUTPUT between 4:3 and 16:9 (OUTPUT=1280x800) for a title that
+// widens its 4:3 views is filled (GameInfo::fills_narrow_screens)
+bool FillsNarrow() {
+    const float r = float(Desktop().width) / float(Desktop().height);
+    return kGame.fills_narrow_screens && r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
+}
+}  // namespace
+bool Widescreen() { return !FillsNarrow() && Desktop().width * 2 >= Desktop().height * 3; }  // as on Windows: 3:2 or wider
 // FRAME_ASPECT_X100=239 (a shape times 100): as the Windows aspect setting "screen" on an ultrawide display
 float FrameAspect() {
     static const float forced = float(harness::Env("FRAME_ASPECT_X100")) / 100;
     if (forced > 0) return forced;
+    if (FillsNarrow()) return float(Desktop().width) / float(Desktop().height);
     return Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
 }
+float HudAspect() { return Widescreen() ? kGame.hud_aspect : std::min(kGame.hud_aspect, 4.0f / 3.0f); }
 
 std::filesystem::path ExeDir() {
     static const std::filesystem::path dir = std::filesystem::current_path();
