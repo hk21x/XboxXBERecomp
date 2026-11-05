@@ -943,7 +943,9 @@ std::string PixelHlsl(const PixelKey& k) {
     }
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
-    s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
+    // D3DRS_SPECULARENABLE off: no specular added at the end; a texture stage's D3DTA_SPECULAR still reads it (True Crime's
+    // facades light the wall texture by it). A pixel shader's v1 stays 0 as before.
+    if (k.programmable) s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
     s += "    float4 fogin = float4(fogcolor.rgb, saturate(i.fogamt));\n";
     std::string body;
     if (k.programmable) {
@@ -1018,7 +1020,7 @@ std::string PixelHlsl(const PixelKey& k) {
             std::string a = f[4] <= 1 ? std::string("cur.a") : FfOp(f[4], FfArg(f[5], i, true), FfArg(f[6], i, true), FfArg(f[7], i, true), i, true);
             body += F("{ float3 c3 = saturate(%s); float c1 = saturate(%s); %s = float4(c3, c1); }\n", rgb.c_str(), a.c_str(), dst);
         }
-        body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
+        body += "if (misc.w != 0) cur.rgb = saturate(cur.rgb + v1.rgb);\n";
         body += "float4 outc = float4(lerp(fogin.rgb, cur.rgb, fogin.a), cur.a);\n";
     }
     body += (k.coverage ? F("cov = alphacover(outc.a, %u);\n", k.coverage) : std::string("alphatest(outc.a);\n")) + Hooks().Output() + "return outc;\n}\n";
