@@ -419,27 +419,46 @@ Mode Output() {
     return Desktop();
 }
 
-bool Widescreen() {
-    // asked per frame and per HUD quad: the desktop mode lookup only runs when the resolution setting changes
+namespace {
+// the output's shape, asked per frame and per HUD quad: the desktop mode lookup only runs when the resolution setting
+// changes
+float ScreenAspect() {
     static std::atomic<uint64_t> key{~0ull};
-    static std::atomic<bool> wide{true};
+    static std::atomic<float> aspect{16.0f / 9.0f};
     const Settings& s = Get();
-    if (s.aspect == 1) return false;
-    if (s.aspect >= 2) return true;
     uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;
     if (key.exchange(k) != k) {
         Mode m = Output();
-        wide = m.width * 2 >= m.height * 3;  // 3:2 or wider
+        aspect = m.height ? float(m.width) / float(m.height) : 16.0f / 9.0f;
     }
-    return wide;
+    return aspect;
+}
+
+// "from the screen's shape" or "fill the screen", on a screen wider than 4:3 and narrower than 16:9, for a title that
+// widens its 4:3 views (GameInfo::fills_narrow_screens)
+bool FillsNarrow() {
+    const uint32_t a = Get().aspect;
+    if (!kGame.fills_narrow_screens || (a != 0 && a != 3)) return false;
+    const float r = ScreenAspect();
+    return r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
+}
+}  // namespace
+
+bool Widescreen() {
+    const Settings& s = Get();
+    if (s.aspect == 1 || FillsNarrow()) return false;
+    if (s.aspect >= 2) return true;
+    return ScreenAspect() >= 1.5f - 1e-3f;  // 3:2 or wider
 }
 
 float FrameAspect() {
+    if (FillsNarrow()) return ScreenAspect();
     if (!Widescreen()) return 4.0f / 3.0f;
     if (Get().aspect != 3 && !(Get().aspect == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
-    Mode m = Output();
-    return m.height ? std::max(16.0f / 9.0f, float(m.width) / float(m.height)) : 16.0f / 9.0f;
+    return std::max(16.0f / 9.0f, ScreenAspect());
 }
+
+float HudAspect() { return Widescreen() ? kGame.hud_aspect : std::min(kGame.hud_aspect, 4.0f / 3.0f); }
 
 float RenderScale(uint32_t guest_height) {
     float h = Output().height * (Get().render_percent / 100.0f);

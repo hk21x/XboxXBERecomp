@@ -388,7 +388,7 @@ void Display(Settings& s) {
         ApplyDisplay();
     }
     int aspect = int(s.aspect % 4);
-    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide)"};
+    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide, 16:10)"};
     if (RowChoice("Aspect ratio", &aspect, aspects, 4, "Applies at the next start (the game reads its TV setting when it boots).")) {
         s.aspect = uint32_t(aspect);
         Save();
