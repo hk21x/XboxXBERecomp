@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -46,6 +47,11 @@ struct Settings {
     bool sharp_2d = true;            // GameInfo::sharpen_2d: the HUD's, menus' and text's pictures enlarged sharp
     uint32_t msaa = 0;               // 0 none, 1 2 3 MSAA 2x 4x 8x on the scene
     bool fxaa = false;               // FXAA on the finished frame
+    bool smaa = false;               // SMAA on the finished frame, in place of FXAA
+    uint32_t scale_filter = 0;       // the frame to the screen's size: 0 bilinear, 1 sharp (Catmull-Rom)
+    bool alpha_coverage = false;     // with MSAA, alpha tested edges (fences, leaves) get partial coverage
+    bool world_textures = false;     // the 3D scene's colour textures enlarged twice on a background thread
+    bool low_latency = false;        // a waitable swap chain holding one frame, at the next start
     uint32_t sharpen = 0;            // percent, contrast adaptive sharpening of the finished frame
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
     uint32_t language = 1;           // the console's language (XC_LANGUAGE, GameInfo::languages), at the next start
@@ -82,6 +88,7 @@ uint16_t KeyFromName(const std::string& name);
 bool OverlayOpen();
 void ToggleOverlay();
 void DrawOverlay();
+void OverlayInit();  // the fonts, after ImGui's context and before a renderer's first frame
 // a key pressed while the overlay waits for one to bind (window thread); true takes it
 bool OverlayKey(uint16_t vk);
 
@@ -97,7 +104,13 @@ struct Mode {
 Mode Desktop();
 void* Monitor();                  // HMONITOR of the monitor setting (the primary display when it is gone)
 std::vector<std::string> Monitors();  // the displays' names, in the monitor setting's order from 1
+std::vector<Mode> ListModes();        // the monitor setting's display modes, widest first, each size once
 bool Paused();                    // pause_unfocused and the window is not in front (Windows)
+// F12: the renderers save the next frame, before they draw the interface (app/screenshot.cpp)
+void RequestScreenshot();
+bool TakeScreenshotRequest();
+void SaveScreenshot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h);
+bool ScreenshotJustSaved();  // for a few seconds after one is written
 void DrawHud(double fps);         // the frame counter, inside the ImGui frame (overlay.cpp)
 void FeedPad();                   // controllers to the settings window's navigation, before each ImGui frame
 Mode Output();
@@ -115,6 +128,13 @@ struct GameFiles {
     std::vector<uint8_t> xbe;
 };
 bool FindGame(GameFiles& game);
+std::string Sha1(const std::vector<uint8_t>& data);  // lower case hex
+// the recompiled code, <exe>.dll, built from the game in assets when missing or out of date (game_code.cpp) and
+// loaded; false after telling the player why the game cannot start, or when they chose not to start it yet
+bool PrepareGameCode(const GameFiles& game);
+// the same with no window, its progress as lines on stdout for the launcher ("progress <stage> <files done> <files> <bytes
+// done> <bytes>", then "ready" or "failed <why>"), for --prepare-code; the process's exit code
+int PrepareGameCodeHeadless(const GameFiles& game);
 int Instance();  // --instance N on the command line, 0 without: a second copy on this PC for system link tests
 void* Window();  // HWND
 // leave the game as closing its window does (the settings window's Quit, a title's own quit item); from any thread
@@ -211,12 +231,22 @@ struct GameInfo {
     // title may change its texels in guest memory (EoN's button pictures), true when it did, and may give the
     // renderers a larger picture of its own for it (gpu::SetReplacement)
     bool (*texture_bound)(uint32_t header, uint32_t palette) = nullptr;
+    // the title draws one frame a step of its game, and the frame cap asks for more: frames in between (gpu/interp.cpp), while true
+    bool (*step_interpolation)() = nullptr;
+    // while true, those frames carry on past the step instead of leading up to it: no delay, for what the player aims
+    bool (*step_ahead)() = nullptr;
+    // the title draws its world a few vertices at a time with nothing changed between (Agent Under Fire: thousands of draws a
+    // frame, nine in ten alike): those runs reach the renderer as one draw, each costing its time per draw (render_thread.cpp)
+    bool merge_draws = false;
     // the aspect setting's "from the screen's shape" follows an ultrawide screen instead of stopping at 16:9
     bool auto_fills_screen = false;
     // a title's music decoded to PCM streams against its other sounds, read on the audio thread at each mix (effects the
     // DSP image would have balanced drown it out): the level of PCM streams and of every other voice; none is full level
     float (*pcm_stream_level)() = nullptr;
     float (*other_voice_level)() = nullptr;
+    // the title's 3D sound positions have +x to the left (DirectSound's is to the right): Project Gotham Racing's head relative
+    // ones do, so a car passing on the right was heard on the left
+    bool sound_x_left = false;
 };
 extern const GameInfo kGame;
 
@@ -224,9 +254,11 @@ extern const GameInfo kGame;
 // within the fps cap
 void Pace(uint32_t vblanks = 1);
 // frames a second for a title asking for vblanks within cap (0 unlimited); 0 unpaced
+// the display rate a present interval counts in: the console's 60, a title drawing faster sets more (its cap still applies)
+inline std::atomic<uint32_t> g_pace_hz{60};
 inline uint32_t PaceRate(uint32_t cap, uint32_t vblanks) {
     if (!vblanks) return cap;
-    uint32_t fps = 60 / vblanks;
+    uint32_t fps = g_pace_hz.load(std::memory_order_relaxed) / vblanks;
     return cap && cap < fps ? cap : fps;
 }
 

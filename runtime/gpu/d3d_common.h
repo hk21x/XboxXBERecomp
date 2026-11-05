@@ -8,6 +8,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "gpu/smaa.h"
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcommon.h>

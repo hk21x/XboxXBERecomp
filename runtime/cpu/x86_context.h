@@ -33,7 +33,7 @@ struct X86FuncMapping {
     X86Func* host;
 };
 
-// produced by the recompiler
-extern const X86FuncMapping X86FuncMappings[];
-extern const uint32_t X86Continuations[];  // zero terminated
-extern const uint32_t X86CodeBase, X86CodeEnd, X86ImageBase, X86ImageEnd, X86EntryPoint, X86KernelThunk;
+// produced by the recompiler, exported by the game code DLL
+extern "C" const X86FuncMapping X86FuncMappings[];
+extern "C" const uint32_t X86Continuations[];  // zero terminated
+extern "C" const uint32_t X86CodeBase, X86CodeEnd, X86ImageBase, X86ImageEnd, X86EntryPoint, X86KernelThunk;

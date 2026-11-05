@@ -173,6 +173,8 @@ void HoldCursor(HWND hwnd) {
     held = want;
 }
 
+constexpr UINT_PTR kCursorTimer = 0x5243;
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // mouse look: raw movement, the cursor kept hidden in the window
     if (msg == WM_INPUT && kGame.mouse_look) {
@@ -186,9 +188,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HoldCursor(hwnd);
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    if (msg == WM_SETCURSOR && kGame.mouse_look && LOWORD(lp) == HTCLIENT) {
-        HoldCursor(hwnd);
-        if (input::MouseLooking()) {
+    // no pointer over the game, only over the settings window: the game has none. Windows asks only when the mouse
+    // moves, so a timer takes it away from one left standing there
+    static bool cursor_timer = false;
+    if (!cursor_timer) {
+        cursor_timer = true;
+        SetTimer(hwnd, kCursorTimer, 500, nullptr);
+    }
+    if (msg == WM_TIMER && wp == kCursorTimer) {
+        if (GetForegroundWindow() == hwnd && !OverlayOpen()) {
+            POINT p;
+            RECT r;
+            if (GetCursorPos(&p) && ScreenToClient(hwnd, &p) && GetClientRect(hwnd, &r) && PtInRect(&r, p)) SetCursor(nullptr);
+        }
+        return 0;
+    }
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
+        if (kGame.mouse_look) HoldCursor(hwnd);
+        if (!OverlayOpen()) {
             SetCursor(nullptr);
             return TRUE;
         }
@@ -220,6 +237,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_KEYDOWN:
             if (wp == VK_F3) DumpThreads();
+            if (wp == VK_F12 && !(lp & (1 << 30))) RequestScreenshot();
             if (wp == VK_F4) {
                 LOGR("F4: frame log requested");
                 diag::g_framelog_request = true;
@@ -362,6 +380,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     app::GameFiles game;
     if (!app::FindGame(game)) return 1;
+    if (std::wcsstr(GetCommandLineW(), L"--prepare-code")) return app::PrepareGameCodeHeadless(game);
+    if (!app::PrepareGameCode(game)) return 1;
 
     bool splash = app::OpenSplash(), handover = app::StartHandover();
 
@@ -393,6 +413,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    app::OverlayInit();
     ImGui_ImplWin32_Init(app::g_hwnd);
 
     input::Init();

@@ -15,11 +15,20 @@ namespace app {
 
 Settings& Get() {
     static Settings s;
+    // FPS=N is the cap too, for what reads it (gpu/interp.cpp)
+    static const bool capped = [] {
+        if (const char* e = std::getenv("FPS"); e && *e) s.fps_cap = uint32_t(std::atol(e));
+        return true;
+    }();
+    (void)capped;
     return s;
 }
 void Load() {}
 void Save() {}
 void ApplyDisplay() {}
+std::array<uint16_t, 2> DefaultKeys(int) { return {0, 0}; }
+std::vector<std::string> Monitors() { return {}; }
+std::vector<Mode> ListModes() { return {{3440, 1440}, {1920, 1080}, {1280, 720}}; }
 // OUTPUT=WxH: the display the game is told about (1280x720 by default); narrower than 3:2 reports a 4:3 TV
 Mode Desktop() {
     static const Mode m = [] {

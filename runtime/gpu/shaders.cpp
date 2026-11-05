@@ -499,6 +499,19 @@ void alphatest(float a) {
     bool ok = f == 0 ? false : f == 1 ? v < r : f == 2 ? v == r : f == 3 ? v <= r : f == 4 ? v > r : f == 5 ? v != r : f == 6 ? v >= r : true;
     if (!ok) discard;
 }
+// a greater-than alpha test as coverage over a pixel's width of alpha, for an MSAA target; other tests stay as they are.
+// The alpha written does not change. Texels with no alpha at all stay out, whatever the reference
+uint alphacover(float a, uint samples) {
+    int f = (int)misc.y;
+    if (f != 4 && f != 6) {
+        alphatest(a);
+        return 0xFFFFFFFF;
+    }
+    float c = saturate((a - misc.x / 255) / max(fwidth(a), 1e-3) + 0.5);
+    if (a <= 0 || c <= 0) discard;
+    uint n = min((uint)ceil(c * samples), samples);
+    return (1u << n) - 1;
+}
 )";
 
 std::string PsHelpers() { return kPsSbyte + Hooks().Shadow() + kPsTail; }
@@ -921,12 +934,12 @@ std::string PixelHlsl(const PixelKey& k) {
     if (k.wbuf) {
         // the NV2A's Z_PERSPECTIVE: the pixel's w, the polygon offset in its units and its slope, stored whole (xemu
         // interpolates w linearly on the screen, which puts long triangles reaching the camera in front of everything)
-        s += "float4 main(VOut i, bool front : SV_IsFrontFace, out float depth : SV_Depth) : SV_Target {\n";
+        s += F("float4 main(VOut i, bool front : SV_IsFrontFace, out float depth : SV_Depth%s) : SV_Target {\n", k.coverage ? ", out uint cov : SV_Coverage" : "");
         s += "    float wl = i.wlin * wdepth.w;\n";
         s += "    float wz = wl + wdepth.x + wdepth.y * max(abs(ddx(wl)), abs(ddy(wl)));\n";
         s += "    depth = saturate(floor(max(wz, 0)) * wdepth.z);\n";
     } else {
-        s += F("float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n");
+        s += F("float4 main(VOut i, bool front : SV_IsFrontFace%s) : SV_Target {\n", k.coverage ? ", out uint cov : SV_Coverage" : "");
     }
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
@@ -1008,7 +1021,7 @@ std::string PixelHlsl(const PixelKey& k) {
         body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
         body += "float4 outc = float4(lerp(fogin.rgb, cur.rgb, fogin.a), cur.a);\n";
     }
-    body += "alphatest(outc.a);\n" + Hooks().Output() + "return outc;\n}\n";
+    body += (k.coverage ? F("cov = alphacover(outc.a, %u);\n", k.coverage) : std::string("alphatest(outc.a);\n")) + Hooks().Output() + "return outc;\n}\n";
     s += body;
     return k.quad ? QuadHlsl(std::move(s)) : s;
 }

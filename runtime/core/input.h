@@ -26,7 +26,8 @@ const char* ControlName(int c);  // settings file name, "dpad_up" ...
 const char* ControlLabel(int c); // shown to the player, "D-pad up" ...
 int ControlByName(const char* name);  // -1 when unknown
 
-void Init();  // window thread, before boot
+void Init();  // window thread, before boot; the game code window starts it earlier
+uint16_t HeldOnAnyController();  // face buttons as XINPUT_GAMEPAD_A/B/X/Y masks, GameInfo::pad left out
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
 // raw mouse movement, from the window thread (WM_INPUT): read into controller 1's right stick (Settings::mouse_look)
@@ -52,6 +53,8 @@ void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's
 // navigation)
 uint32_t HeldControls();
+// what is held now stays from the game until let go (what closed the settings window)
+void SwallowHeld();
 
 // a steering wheel and the rest of a rig through DirectInput (core/wheel.cpp): every game controller DirectInput lists
 // but Xbox pads (SDL's), each control bound to one of them (app::Settings::WheelBind), merged into controller 1
