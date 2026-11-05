@@ -224,6 +224,7 @@ struct Voice {
     std::vector<float> curve;  // rolloff
     bool is3d = false;
     uint32_t mode = 0;  // DS3DMODE: 1 head relative, 2 disabled
+    uint32_t out = 0;   // the submix buffer it plays into (SetOutputBuffer), 0 its own mix bins
     float p[3] = {}, min_dist = 1, max_dist = 1e9f;
     // ADPCM block cache
     int64_t block = -1;
@@ -237,6 +238,7 @@ struct Done {
 std::recursive_mutex g_lock;
 std::map<uint32_t, Voice> g_voices;
 float g_listener[3] = {}, g_front[3] = {0, 0, 1}, g_top[3] = {0, 1, 0};
+float g_rolloff = 1;  // the listener's rolloff factor (IDirectSound_SetRolloffFactor): 1 halves the level each doubling
 // Completed packets' callbacks, run as the XDK runs them: in DirectSoundDoWork on the title's thread, so they never
 // overlap the title's own stream code. A stream flushed or released runs its own at once, before it is gone.
 std::deque<Done> g_done;
@@ -323,7 +325,28 @@ constexpr float kMixBinGain = 1.0f / float(1u << XDK_DSound_MixBinHeadroom);
 // channels to front left, front right, centre, LFE, back left and back right in turn (EoN's driving missions mix
 // their music and speech into one 6 channel buffer, the speech in the centre).
 constexpr uint32_t kMixChannels = 6;
+Voice* Find(uint32_t obj);
+
 void Levels(Voice& v, float g[kMixChannels][2]) {
+    // into a submix buffer: the voice's own level, then the buffer's (its volume, mix bins and 3D place) for every channel,
+    // a mix of all the voice's channels in the buffer's one
+    if (v.out && v.out != v.obj) {
+        Voice* to = Find(v.out);
+        if (to && to->out != v.obj) {
+            float into[kMixChannels][2];
+            const uint32_t self = v.out;
+            v.out = 0;  // a chain of submixes is followed one step
+            Levels(*to, into);
+            v.out = self;
+            const uint32_t channels = std::min<uint32_t>(std::max<uint32_t>(v.channels, 1), kMixChannels);
+            const float own = v.volume * v.headroom / float(channels);
+            for (uint32_t c = 0; c < kMixChannels; c++) {
+                g[c][0] = c < channels ? own * into[0][0] : 0;
+                g[c][1] = c < channels ? own * into[0][1] : 0;
+            }
+            return;
+        }
+    }
     static const uint8_t kDefault[kMixChannels] = {0, 1, 2, 3, 4, 5};
     const uint8_t* bin = v.nbins ? v.bin : kDefault;
     const uint32_t channels = std::min<uint32_t>(std::max<uint32_t>(v.channels, 1), kMixChannels);
@@ -365,7 +388,8 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
     float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     float att = 1;
     if (dist > v.min_dist && v.curve.empty()) {
-        att = v.min_dist / std::min(dist, v.max_dist);
+        // DirectSound's rolloff: min / (min + rolloff x (distance - min)), as far as the maximum distance
+        att = v.min_dist / (v.min_dist + g_rolloff * (std::min(dist, v.max_dist) - v.min_dist));
     } else if (dist > v.min_dist && v.max_dist > v.min_dist) {
         // points spread evenly from min to max distance, 1.0 at min
         float at = (std::min(dist, v.max_dist) - v.min_dist) / (v.max_dist - v.min_dist) * v.curve.size();
@@ -758,7 +782,11 @@ HLE_STDCALL(IDirectSound_EnableHeadphones, 2) { return 0; }
 HLE_STDCALL(IDirectSound_SetMixBinHeadroom, 3) { return 0; }
 HLE_STDCALL(IDirectSound_CommitDeferredSettings, 1) { return 0; }
 HLE_STDCALL(IDirectSound_SetDopplerFactor, 3) { return 0; }
-HLE_STDCALL(IDirectSound_SetRolloffFactor, 3) { return 0; }
+HLE_STDCALL(IDirectSound_SetRolloffFactor, 3) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_rolloff = std::max(F32(a[1]), 0.0f);
+    return 0;
+}
 HLE_STDCALL(IDirectSound_SetDistanceFactor, 3) { return 0; }
 HLE_STDCALL(IDirectSound_SetVelocity, 5) { return 0; }
 HLE_STDCALL(IDirectSound_SetI3DL2Listener, 3) { return 0; }
@@ -1050,7 +1078,12 @@ BUFFER(SetRolloffCurve, 4) {
     for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
     return 0;
 }
-BUFFER(SetOutputBuffer, 2) { return 0; }  // the voice keeps its own mix bins
+// (this, the buffer): the voice plays into another buffer (a DSBCAPS_MIXIN one) instead of its own mix bins, and is heard
+// where that buffer is: Project Gotham Racing gives each car a 3D mixin buffer at the car and routes its engine there
+BUFFER(SetOutputBuffer, 2) {
+    v.out = a[1];
+    return 0;
+}
 BUFFER(SetFormat, 2) {
     ReadFormat(v, a[1]);
     v.freq = 0;
