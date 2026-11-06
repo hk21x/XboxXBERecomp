@@ -19,10 +19,13 @@ MEM=.local/soak-mem.txt
 rm -f $LOG $MEM
 "$SDK_SCRIPTS/harness.sh" "$SECS" "$PAD" > .local/soak.out 2>&1 &
 H=$!
-for i in $(seq 120); do pgrep -x game > /dev/null && break; timeout 1 tail -f /dev/null; done
+# this repository's game only: other sessions' harness binaries are called game too
+EXE=$(realpath -m .local/harness/game)
+ours() { for p in $(pgrep -x game); do [ "$(readlink /proc/$p/exe 2> /dev/null)" = "$EXE" ] && echo $p; done | head -1; }
+for i in $(seq 120); do [ -n "$(ours)" ] && break; timeout 1 tail -f /dev/null; done
 start=$(date +%s)
 while kill -0 $H 2> /dev/null; do
-  pid=$(pgrep -x game | head -1)
+  pid=$(ours)
   if [ -n "$pid" ]; then
     f=$(grep -o "renderer: frame [0-9]*" $LOG 2> /dev/null | tail -1 | awk '{print $3}')
     echo "$(( $(date +%s) - start )) ${f:-0} $(awk '/VmRSS|VmSize|VmData/{printf "%s ", $2}' /proc/$pid/status 2> /dev/null)" >> $MEM
