@@ -3768,7 +3768,12 @@ void D3D12Backend::CapSave(const CapImage& img, const char* name) {
 void D3D12Backend::CapSave(Target& t, const char* name) {
     DXGI_FORMAT fmt = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.fmt;
     float mul = t.depth ? 1 : t.range;
-    CapSave({.res = t.res.Get(), .state = &t.state, .fmt = fmt, .w = t.gw, .h = t.gh, .mul = mul}, name);
+    // XBE_CAPTURE_FULL=1: small colour targets (shadow maps, reflections) at their host size, every host row and
+    // column: shrunk to the console's size a capture samples one host row in each console row and hides the others
+    static const bool full = [] { const char* v = std::getenv("XBE_CAPTURE_FULL"); return v && *v == '1'; }();
+    const bool host = full && !t.depth && uint64_t(t.w) * t.h <= 1024u * 1024u;
+    CapSave({.res = t.res.Get(), .state = &t.state, .fmt = fmt, .w = host ? t.w : t.gw, .h = host ? t.h : t.gh, .mul = mul},
+            name);
 }
 
 // the frame moves to another target: save the one it leaves
