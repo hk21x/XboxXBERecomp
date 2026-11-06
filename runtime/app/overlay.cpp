@@ -389,7 +389,10 @@ void Display(Settings& s) {
     }
     int aspect = int(s.aspect % 4);
     const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide)"};
-    if (RowChoice("Aspect ratio", &aspect, aspects, 4, "Applies at the next start (the game reads its TV setting when it boots).")) {
+    const char* aspect_help = kGame.fill_follows_live
+                                  ? "16:9 and the two that fill an ultrawide screen apply at once; to or from 4:3 at the next start (the game reads its TV setting when it boots)."
+                                  : "Applies at the next start (the game reads its TV setting when it boots).";
+    if (RowChoice("Aspect ratio", &aspect, aspects, 4, aspect_help)) {
         s.aspect = uint32_t(aspect);
         Save();
     }
