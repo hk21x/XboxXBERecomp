@@ -1240,6 +1240,13 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
         app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
         squeeze = app::kGame.hud_aspect / app::FrameAspect();
+    // State::pillar_aspect: squeezed whole to that shape (the renderers' Pillarbox)
+    const bool pillar = s.pillar_aspect > 0 && (as.pretransformed || screen) && slot[0] >= 0 && rt.ok &&
+                        (rt.h == 480 || rt.h == 576) && rt.w >= rt.h && app::FrameAspect() > s.pillar_aspect + 1e-3f &&
+                        (!s.pillar_format ||
+                         (s.textures[0] && (kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.pillar_format));
+    const float hud_squeeze = squeeze;  // what a pillar draw not spanning the frame keeps
+    if (pillar) squeeze = s.pillar_aspect / app::FrameAspect();
     std::vector<uint8_t> squeezable(as.vertex_count, 0);  // squeezed below, once the draw's extent is known
     for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
         VertexProgram vp{s};
@@ -1321,24 +1328,27 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     // where they are; any other is squeezed whole (EoN's driving radar: big tiles past the left edge only)
     // (positions here are already in aa_x pixels; the squeeze works in the draw's own, as it did per vertex)
     float clip_squeeze = 1;  // squeezed whole: the viewport and scissor go with the picture (gpu::SqueezedX)
+    const float pivot = float(rt.w) * 0.5f;  // what the squeeze is about
     if (squeeze != 1) {
         const float ax = float(s.aa_x), w = float(rt.w);
         float lo = 1e30f, hi = -1e30f;
         for (uint32_t vi = 0; vi < as.vertex_count; vi++)
             if (squeezable[vi]) lo = std::min(lo, verts[vi].pos[0] / ax), hi = std::max(hi, verts[vi].pos[0] / ax);
         // State::squeeze_beyond: squeezed whole and moved by squeeze_shift
-        bool spans = !s.squeeze_beyond && ((lo <= 0.5f && hi >= w - 0.5f) ||
+        const bool pillared = pillar && lo <= 0.5f && hi >= w - 0.5f;  // only what spans the frame (the renderers' Pillarbox)
+        if (pillar && !pillared) squeeze = hud_squeeze;
+        bool spans = !s.squeeze_beyond && !pillared && ((lo <= 0.5f && hi >= w - 0.5f) ||
                                            // an untextured fill ending on one edge (the renderers' DrawSpan)
                                            (!s.textures[0] && lo >= -2.0f && hi <= w + 2.0f && (lo <= 0.5f || hi >= w - 0.5f)));
         const float shift = s.squeeze_beyond ? s.squeeze_shift : 0.0f;
         // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
         const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
-        if (!s.squeeze_beyond && !spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
+        if (!s.squeeze_beyond && !pillared && !spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
         if (!spans) clip_squeeze = squeeze;
         for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
             float x = verts[vi].pos[0] / ax;
             if (squeezable[vi] && !(spans && AtFrameEdge(x, w)))
-                verts[vi].pos[0] = (w * 0.5f + (x + shift - w * 0.5f) * squeeze) * ax;
+                verts[vi].pos[0] = (pivot + (x + shift - pivot) * squeeze) * ax;
         }
     }
 
@@ -1441,7 +1451,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         bottom = std::min(bottom, int(s.scissors[3]));
     }
     if (clip_squeeze != 1) {
-        const float c = float(rt.w) * 0.5f;
+        const float c = pivot;
         const float moved = s.squeeze_beyond ? s.squeeze_shift : 0.0f;  // the clip goes with the moved picture
         left = int(c + (float(left) + moved - c) * clip_squeeze);
         right = int(c + (float(right) + moved - c) * clip_squeeze + 0.999f);

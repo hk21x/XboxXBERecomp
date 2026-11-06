@@ -1892,6 +1892,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
     SqueezeBeyond(s, c.hud);
+    Pillarbox(s, a, aspect_, stretch, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
     SetViewportScissor(s, size.w, c);
