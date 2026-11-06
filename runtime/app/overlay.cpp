@@ -487,7 +487,16 @@ void GameOptions() {
         if (o.flag) {
             if (RowCheck(name, o.flag, o.help)) Save();
         } else if (o.value) {
-            if (RowNumber(name, o.value, o.help)) Save();
+            if (o.choices) {
+                int n = 0, v = int(*o.value);
+                while (o.choices[n]) n++;
+                if (RowChoice(name, &v, o.choices, n, o.help)) {
+                    *o.value = uint32_t(v);
+                    Save();
+                }
+            } else if (RowNumber(name, o.value, o.help)) {
+                Save();
+            }
         }
     }
 }

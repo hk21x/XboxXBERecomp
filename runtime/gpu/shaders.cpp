@@ -85,7 +85,8 @@ int mac_arl(float v) { return (int)floor(v + 1e-3); }
 float magclamp(float v) { float m = clamp(abs(v), 5.42101e-20, 1.84467e+19); return v < 0 ? -m : m; }
 float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }
 float4 ilu_rcc(float v) { return magclamp(1.0 / v).xxxx; }
-float4 ilu_rsq(float v) { return v == 0 ? (1.#INF).xxxx : (rsqrt(abs(v))).xxxx; }
+// the largest float for infinity: Wine's HLSL compiler (vkd3d) has no 1.#INF, and stops at it
+float4 ilu_rsq(float v) { return v == 0 ? (3.402823e38).xxxx : (rsqrt(abs(v))).xxxx; }
 // 2^floor(v), fraction, 2^v
 float4 ilu_exp(float v) {
     float whole = floor(v);
@@ -94,7 +95,7 @@ float4 ilu_exp(float v) {
 // exponent, mantissa, log2 of |v|; zero logs to negative infinity
 float4 ilu_log(float v) {
     float mag = abs(v), l2 = log2(mag), ex = floor(l2);
-    return mag == 0 ? float4(-1.#INF, 1, -1.#INF, 1) : float4(ex, mag / exp2(ex), l2, 1);
+    return mag == 0 ? float4(-3.402823e38, 1, -3.402823e38, 1) : float4(ex, mag / exp2(ex), l2, 1);
 }
 // power clamped to 128 less 1/256
 float4 ilu_lit(float4 s) {

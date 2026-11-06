@@ -67,6 +67,7 @@ Xbox's, copied over) is left alone.
 
 ## Testing on Linux
 
+
 `launcher_cli` (built on Linux from the same CMakeLists) runs the steps from a terminal: `plan` (resolves the tools
 from the manifests), `tool <id>` (downloads and unpacks one; not the SDK, which needs msiexec), `game <iso|folder>`,
 `source`, `xbes` (the game's xbes into the source's assets), `install` (the built exes into play), `env`,

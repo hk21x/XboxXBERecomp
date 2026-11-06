@@ -366,6 +366,7 @@ uint32_t OpenOnDisc(const Disc::Entry* e, const std::string& name, uint32_t hand
     f->xbox = Normalize(name);
     f->entry = e;
     f->dir = e->dir;
+    f->cdrom = true;  // its volume is the DVD's (QueryVolume): EoN took one for a hard disk and looked for loose files
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, 1);
     FILE_LOG(400, "open %s", name.c_str());

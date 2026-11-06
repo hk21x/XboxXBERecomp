@@ -2104,7 +2104,15 @@ void D3D11Backend::Present(const Surface& front) {
     RenderUi();
     bool vsync = app::Get().vsync;
     if (vsync && tearing_ && PresentUnsynced()) vsync = false;
-    swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (FAILED(swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0))) {
+        // a lost device draws nothing more: the last picture stays up
+        static bool told = false;
+        if (!told && FAILED(dev_->GetDeviceRemovedReason())) {
+            told = true;
+            LOGR("d3d11: the GPU device was lost: reason %08X (present %llu)", unsigned(dev_->GetDeviceRemovedReason()),
+                 (unsigned long long)presents_);
+        }
+    }
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
     // the flip model unbinds the back buffer
     Unbind();
