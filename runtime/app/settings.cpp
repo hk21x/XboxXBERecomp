@@ -434,33 +434,41 @@ float ScreenAspect() {
     return aspect;
 }
 
+// the aspect setting as the title booted with it: it reads its TV setting once, so a choice changed in play applies at the
+// next start, as the settings window says (changing it at once reshaped the frame around cameras set up for the old one:
+// PGR2 issue 33, ultrawide stretched until a restart); the screen's size stays live
+uint32_t AspectChoice() {
+    static const uint32_t choice = Get().aspect % 4;
+    return choice;
+}
+
 // "from the screen's shape" or "fill the screen", on a screen wider than 4:3 and narrower than 16:9, for a title that
 // widens its 4:3 views (GameInfo::fills_narrow_screens)
 bool FillsNarrow() {
-    const uint32_t a = Get().aspect;
+    const uint32_t a = AspectChoice();
     if (!kGame.fills_narrow_screens || (a != 0 && a != 3)) return false;
     const float r = ScreenAspect();
     return r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
 }
 
 // the aspect setting fills an ultrawide screen
-bool FillsWide() { return Get().aspect == 3 || (Get().aspect == 0 && kGame.auto_fills_screen); }
+bool FillsWide() { return AspectChoice() == 3 || (AspectChoice() == 0 && kGame.auto_fills_screen); }
 }  // namespace
 
 // kept from the first ask: the title reads its TV setting once, as it boots, so a resolution changed in play (16:10 to
 // 16:9 from the Display page) must not tell the renderers another mode than the title is in
 bool Widescreen() {
     static const bool wide = [] {
-        const Settings& s = Get();
-        if (s.aspect == 1 || FillsNarrow()) return false;
-        if (s.aspect >= 2) return true;
+        const uint32_t a = AspectChoice();
+        if (a == 1 || FillsNarrow()) return false;
+        if (a >= 2) return true;
         return ScreenAspect() >= 1.5f - 1e-3f;  // 3:2 or wider
     }();
     return wide;
 }
 
 float FrameAspect() {
-    const uint32_t a = Get().aspect;
+    const uint32_t a = AspectChoice();
     if (!Widescreen()) {
         // a title widening its 4:3 views fills the screen it is shown on now, as far as the setting reaches (16:10 at
         // boot and 16:9 since: 16:9; an ultrawide only with FillsWide)
