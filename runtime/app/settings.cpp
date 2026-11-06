@@ -419,13 +419,24 @@ Mode Output() {
     return Desktop();
 }
 
+namespace {
+// the aspect setting as the title booted with it: it reads its TV setting once, so a choice changed in play applies at the
+// next start, as the settings window says (changing it at once reshaped the frame around cameras set up for the old one:
+// PGR2 issue 33, ultrawide stretched until a restart); the screen's size stays live. First asked after Load (main.cpp).
+uint32_t AspectChoice() {
+    static const uint32_t choice = Get().aspect % 4;
+    return choice;
+}
+}  // namespace
+
 bool Widescreen() {
     // asked per frame and per HUD quad: the desktop mode lookup only runs when the resolution setting changes
     static std::atomic<uint64_t> key{~0ull};
     static std::atomic<bool> wide{true};
     const Settings& s = Get();
-    if (s.aspect == 1) return false;
-    if (s.aspect >= 2) return true;
+    const uint32_t a = AspectChoice();
+    if (a == 1) return false;
+    if (a >= 2) return true;
     uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;
     if (key.exchange(k) != k) {
         Mode m = Output();
@@ -436,7 +447,8 @@ bool Widescreen() {
 
 float FrameAspect() {
     if (!Widescreen()) return 4.0f / 3.0f;
-    if (Get().aspect != 3 && !(Get().aspect == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
+    const uint32_t a = AspectChoice();
+    if (a != 3 && !(a == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
     Mode m = Output();
     return m.height ? std::max(16.0f / 9.0f, float(m.width) / float(m.height)) : 16.0f / 9.0f;
 }
