@@ -245,6 +245,9 @@ struct GameInfo {
     bool merge_draws = false;
     // the aspect setting's "from the screen's shape" follows an ultrawide screen instead of stopping at 16:9
     bool auto_fills_screen = false;
+    // the title's 3D views follow FrameAspect when it changes (PGR2 reshapes its cameras): in a widescreen boot, a choice
+    // between 16:9 and filling the screen applies at once; 4:3 against widescreen still waits for the next start
+    bool fill_follows_live = false;
     // the title widens its 3D views to FrameAspect() from its 4:3 mode too (as from 16:9): a screen between 4:3 and 16:9
     // (16:10, the Steam Deck's 1280x800) is filled, the console reporting a 4:3 TV and the 2D kept 4:3 in the middle,
     // where the frame was 16:9 with bars above and below; set once the title's views follow it

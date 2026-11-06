@@ -451,8 +451,8 @@ bool FillsNarrow() {
     return r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
 }
 
-// the aspect setting fills an ultrawide screen
-bool FillsWide() { return AspectChoice() == 3 || (AspectChoice() == 0 && kGame.auto_fills_screen); }
+// the aspect choice a fills an ultrawide screen
+bool FillsWide(uint32_t a) { return a == 3 || (a == 0 && kGame.auto_fills_screen); }
 }  // namespace
 
 // kept from the first ask: the title reads its TV setting once, as it boots, so a resolution changed in play (16:10 to
@@ -474,9 +474,11 @@ float FrameAspect() {
         // boot and 16:9 since: 16:9; an ultrawide only with FillsWide)
         if (!kGame.fills_narrow_screens || (a != 0 && a != 3)) return 4.0f / 3.0f;
         const float r = std::max(4.0f / 3.0f, ScreenAspect());
-        return FillsWide() ? r : std::min(r, 16.0f / 9.0f);
+        return FillsWide(a) ? r : std::min(r, 16.0f / 9.0f);
     }
-    if (!FillsWide()) return 16.0f / 9.0f;
+    // the booted choice, or the current one for a title whose views follow (GameInfo::fill_follows_live): 16:9 against
+    // filling the screen at once; 4:3 stays for the next start (16:9 meanwhile)
+    if (!FillsWide(kGame.fill_follows_live ? Get().aspect % 4 : a)) return 16.0f / 9.0f;
     return std::max(16.0f / 9.0f, ScreenAspect());
 }
 
