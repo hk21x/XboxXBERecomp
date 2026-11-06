@@ -331,8 +331,8 @@ private:
     void KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k);
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
-    void ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
-    void ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
+    uint64_t ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);  // the geometry shader's hash, 0 without one
+    uint64_t ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
     float PointScale() const;  // host pixels per console pixel of the bound target
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                          GuestExtent size, DrawConstants& c);
@@ -1556,24 +1556,26 @@ void D3D12Backend::FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps,
 }
 
 // a point is drawn as its whole console pixel by a geometry shader, solid, front facing and never culled
-void D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
-    uint64_t hash;
+uint64_t D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
+    uint64_t hash = 0;
     ID3DBlob* gs = Compile(PointHlsl(), "main", "gs_5_0", hash);
-    if (!gs) return;
+    if (!gs) return 0;
     d.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
     d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     d.RasterizerState.FrontCounterClockwise = FALSE;
+    return hash;
 }
 
 // a line is drawn one console pixel wide by a geometry shader (LineHlsl), solid and never culled
-void D3D12Backend::ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
-    uint64_t hash;
+uint64_t D3D12Backend::ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
+    uint64_t hash = 0;
     ID3DBlob* gs = Compile(LineHlsl(), "main", "gs_5_0", hash);
-    if (!gs) return;
+    if (!gs) return 0;
     d.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
     d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    return hash;
 }
 
 float D3D12Backend::PointScale() const {
@@ -1591,11 +1593,15 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
     d.InputLayout = {el, n};
     FillPipelineDesc(k, vs, ps, d);
-    if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d);
-    if (k.topo == uint32_t(Topology::Lines)) ExpandLines(d);
+    // the kept blob's key: the state's, and the geometry shader's when there is one (a changed or new one must not
+    // take a blob built without it: a driver need not refuse it, and Harry's AMD did not)
+    uint64_t gs = 0;
+    if (k.topo == uint32_t(Topology::Points)) gs = ExpandPoints(d);
+    if (k.topo == uint32_t(Topology::Lines)) gs = ExpandLines(d);
+    const uint64_t cache_key = h ^ (gs * 0x9E3779B97F4A7C15ull);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
-    const std::string* kept = CachedPipeline(h);
+    const std::string* kept = CachedPipeline(cache_key);
     if (kept) {
         d.CachedPSO = {kept->data(), kept->size()};
         g_perf.psos_kept++;
@@ -1610,7 +1616,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
         hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
     }
     if (SUCCEEDED(hr) && !kept) {
-        if (ComPtr<ID3DBlob> blob; SUCCEEDED(pso->GetCachedBlob(&blob)) && blob) KeepPipeline(h, blob->GetBufferPointer(), blob->GetBufferSize());
+        if (ComPtr<ID3DBlob> blob; SUCCEEDED(pso->GetCachedBlob(&blob)) && blob) KeepPipeline(cache_key, blob->GetBufferPointer(), blob->GetBufferSize());
     }
     if (FAILED(hr)) {
         DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
