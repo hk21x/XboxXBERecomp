@@ -895,7 +895,15 @@ KERNEL_EXPORT(210, NtQueryFullAttributesFile, 2) {
     if (Hidden(name)) return kObjectNameNotFound;
     Target t = Resolve(name, R32(a[0]));
     std::error_code ec;
-    if (t.disc ? !t.entry : t.host.empty() || !fs::exists(t.host, ec)) {
+    bool there = t.disc ? t.entry != nullptr : !t.host.empty() && fs::exists(t.host, ec);
+    // an error is not an answer (a network share's moment, a sharing clash): asked again a few times, then told
+    for (int i = 0; !there && ec && i < 5; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        ec.clear();
+        there = fs::exists(t.host, ec);
+    }
+    if (!there) {
+        if (ec) LOGR("files: %s could not be looked for (%s): reported missing", t.host.c_str(), ec.message().c_str());
         FILE_LOG(200, "missing %s", name.c_str());
         return kObjectNameNotFound;
     }
