@@ -332,6 +332,7 @@ private:
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
     void ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
+    void ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
     float PointScale() const;  // host pixels per console pixel of the bound target
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                          GuestExtent size, DrawConstants& c);
@@ -1565,6 +1566,16 @@ void D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
     d.RasterizerState.FrontCounterClockwise = FALSE;
 }
 
+// a line is drawn one console pixel wide by a geometry shader (LineHlsl), solid and never culled
+void D3D12Backend::ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
+    uint64_t hash;
+    ID3DBlob* gs = Compile(LineHlsl(), "main", "gs_5_0", hash);
+    if (!gs) return;
+    d.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
+    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+}
+
 float D3D12Backend::PointScale() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
     if (!t || !t->gh) return 1;
@@ -1581,6 +1592,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     d.InputLayout = {el, n};
     FillPipelineDesc(k, vs, ps, d);
     if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d);
+    if (k.topo == uint32_t(Topology::Lines)) ExpandLines(d);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
     const std::string* kept = CachedPipeline(h);
@@ -2161,8 +2173,8 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         ext_vsc = reinterpret_cast<float(*)[4]>(vc.cpu);
     }
     FillSurfaceConstants(s, size, c);
-    // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
-    if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale() * s.aa_y;
+    // points and lines: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
+    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = PointScale() * s.aa_y;
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
     if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);

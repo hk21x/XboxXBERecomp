@@ -1083,4 +1083,34 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
 )";
 }
 
+// a line covers one console pixel across, several host pixels on an upscaled target: drawn as a quad that wide, half
+// a console pixel past each end. Drawn one host pixel wide at the console's coordinates, a line along a target's top
+// or left edge (0) lies on the host target's outer edge and covers nothing: True Crime clears its shadow map's border
+// with four such lines, so the map's clamped edge kept its shadow and the wet road's sheen ended in a dark band.
+std::string LineHlsl() {
+    return Common() + R"(
+[maxvertexcount(4)]
+void main(line VOut v[2], inout TriangleStream<VOut> strip) {
+    if (v[0].pos.w <= 0 || v[1].pos.w <= 0) return;  // crosses the eye plane: left out
+    float2 a = v[0].pos.xy / v[0].pos.w, b = v[1].pos.xy / v[1].pos.w;
+    float2 px = surf.xy * 0.5;  // console pixels per clip unit
+    float2 d = (b - a) * px;
+    float n2 = dot(d, d);
+    d = n2 > 1e-12 ? d * rsqrt(n2) : float2(1, 0);
+    float2 along = d / px * 0.5, across = float2(-d.y, d.x) / px * 0.5;  // half a console pixel, in clip units
+    // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
+    float2 back = surf.w > 0 ? (0.5 - 1e-3) / (px * surf.w) : 0;
+    float2 mid = (a + b) * 0.5;
+    for (int i = 0; i < 4; i++) {
+        VOut o = v[i >> 1];
+        float2 c = ((i >> 1) ? b + along : a - along) + ((i & 1) ? -across : across);
+        if (c.x < mid.x - 1e-6) c.x -= back.x;
+        if (c.y > mid.y + 1e-6) c.y += back.y;
+        o.pos.xy = c * o.pos.w;
+        strip.Append(o);
+    }
+}
+)";
+}
+
 }  // namespace gpu

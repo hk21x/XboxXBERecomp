@@ -118,6 +118,7 @@ struct Pipeline {
     ComPtr<ID3D11DepthStencilState> depth;
     ComPtr<ID3D11RasterizerState> raster;
     bool points = false;
+    bool lines = false;
 };
 
 // Blit's settings past the source and its rectangle
@@ -395,6 +396,7 @@ private:
     std::unordered_map<uint64_t, ComPtr<ID3D11VertexShader>> vs_;
     std::unordered_map<uint64_t, ComPtr<ID3D11PixelShader>> ps_;
     ComPtr<ID3D11GeometryShader> point_gs_;
+    ComPtr<ID3D11GeometryShader> line_gs_;
     std::unordered_map<uint64_t, Pipeline> pipelines_;
     std::unordered_map<uint64_t, ComPtr<ID3D11SamplerState>> samplers_;
     std::unordered_map<uint64_t, Target> targets_;
@@ -1599,6 +1601,7 @@ Pipeline* D3D11Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs) {
     dev_->CreateDepthStencilState(&dd, &p.depth);
     // a point is drawn as its whole console pixel by a geometry shader, solid, front facing and never culled
     p.points = k.topo == uint32_t(Topology::Points);
+    p.lines = k.topo == uint32_t(Topology::Lines);
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = k.fill == kFillWireframe && !p.points ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
     rd.CullMode = k.cull && !p.points ? D3D11_CULL_BACK : D3D11_CULL_NONE;
@@ -1612,6 +1615,11 @@ Pipeline* D3D11Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs) {
         uint64_t gh;
         if (ID3DBlob* gs = Compile(PointHlsl(), "main", "gs_5_0", gh))
             dev_->CreateGeometryShader(gs->GetBufferPointer(), gs->GetBufferSize(), nullptr, &point_gs_);
+    }
+    if (p.lines && !line_gs_) {  // a line drawn one console pixel wide (LineHlsl)
+        uint64_t gh;
+        if (ID3DBlob* gs = Compile(LineHlsl(), "main", "gs_5_0", gh))
+            dev_->CreateGeometryShader(gs->GetBufferPointer(), gs->GetBufferSize(), nullptr, &line_gs_);
     }
     return &(pipelines_[h] = std::move(p));
 }
@@ -1632,8 +1640,8 @@ void D3D11Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         vsc_last_.assign(b, b + sizeof(s.vsc));
     }
     FillSurfaceConstants(s, size, c);
-    // points: host pixels per console pixel
-    if (k.topo == uint32_t(Topology::Points)) {
+    // points and lines: host pixels per console pixel
+    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) {
         const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
         c.surf[3] = t && t->gh ? float(t->h) * s.aa_y / float(t->gh) : 1.0f;
     }
@@ -1838,7 +1846,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     ID3D11VertexShader* vs = VertexShader(sh.vs_code, sh.vh);
     ID3D11PixelShader* ps = PixelShader(sh.ps_code, sh.ph);
     if (!vs || !ps || (k.regs && !p->layout)) return;
-    ID3D11GeometryShader* gs = p->points ? point_gs_.Get() : nullptr;
+    ID3D11GeometryShader* gs = p->points ? point_gs_.Get() : p->lines ? line_gs_.Get() : nullptr;
     // after a pass or the overlay the context holds their state, whatever the cache says: all of it set again
     bool fresh = !ds_.set;
     ds_.set = true;
