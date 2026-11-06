@@ -35,6 +35,7 @@ struct VOut {
     float4 tc3 : TEXCOORD3;
     float fogamt : TEXCOORD4;
     float wlin : TEXCOORD6;  // w, interpolated perspective correct: the pixel's own
+    float2 clipz : SV_ClipDistance0;  // zclip
     float psize : TEXCOORD7;  // a point's size in console pixels (oPts), 0 for the render state's
 };
 cbuffer VC : register(b0) { float4 c[192]; };
@@ -63,6 +64,8 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 wdepth;
     float4 hud;
     float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
+    float4 vattr[16];  // the v registers a draw gives no stream
+    float4 zclip;  // the depth clip planes
 };
 )";
 
@@ -141,7 +144,7 @@ std::string Src(const Tok& k, int which, uint16_t regs) {
         base = reg == 12 ? "oPos" : F("R%u", reg);
     } else if (mux == 2) {
         uint32_t v = k.f(1, 9, 4);
-        base = (regs >> v) & 1 ? F("i.v%u", v) : (v == 3 ? "float4(1,1,1,1)" : "float4(0,0,0,1)");
+        base = (regs >> v) & 1 ? F("i.v%u", v) : F("vattr[%u]", v);
     } else {
         uint32_t cr = k.f(1, 13, 8);
         base = k.f(3, 1, 1) ? F("c[clamp(a0 + %u, 0, 191)]", cr) : F("c[%u]", cr);
@@ -244,6 +247,7 @@ const char* kVsEpilogue = R"(
     q.xyz *= p.w;
     q.w = p.w;
     o.pos = q;
+    o.clipz = float2(q.z - zclip.x * q.w, zclip.y * q.w - q.z);
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = saturate(oB0);
@@ -901,6 +905,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     if (surf.w == 0 && abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;
     if (hud.w != 0) cp.z = min(cp.z, cp.w);  // W-buffered: nothing clipped past the far plane (the programs' epilogue)
     o.pos = cp;
+    o.clipz = float2(cp.z - zclip.x * cp.w, zclip.y * cp.w - cp.z);
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = o.d0;
@@ -938,7 +943,9 @@ std::string PixelHlsl(const PixelKey& k) {
     }
     s += "    float4 tc0 = i.tc0, tc1 = i.tc1, tc2 = i.tc2, tc3 = i.tc3;\n";
     s += k.two_sided ? "    float4 v0 = front ? i.d0 : i.b0, v1 = front ? i.d1 : i.b1;\n" : "    float4 v0 = i.d0, v1 = i.d1;\n";
-    s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
+    // D3DRS_SPECULARENABLE off: no specular added at the end; a texture stage's D3DTA_SPECULAR still reads it (True Crime's
+    // facades light the wall texture by it). A pixel shader's v1 stays 0 as before.
+    if (k.programmable) s += "    if (misc.w == 0) v1 = float4(0, 0, 0, 1);\n";
     s += "    float4 fogin = float4(fogcolor.rgb, saturate(i.fogamt));\n";
     std::string body;
     if (k.programmable) {
@@ -1013,7 +1020,7 @@ std::string PixelHlsl(const PixelKey& k) {
             std::string a = f[4] <= 1 ? std::string("cur.a") : FfOp(f[4], FfArg(f[5], i, true), FfArg(f[6], i, true), FfArg(f[7], i, true), i, true);
             body += F("{ float3 c3 = saturate(%s); float c1 = saturate(%s); %s = float4(c3, c1); }\n", rgb.c_str(), a.c_str(), dst);
         }
-        body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
+        body += "if (misc.w != 0) cur.rgb = saturate(cur.rgb + v1.rgb);\n";
         body += "float4 outc = float4(lerp(fogin.rgb, cur.rgb, fogin.a), cur.a);\n";
     }
     body += (k.coverage ? F("cov = alphacover(outc.a, %u);\n", k.coverage) : std::string("alphatest(outc.a);\n")) + Hooks().Output() + "return outc;\n}\n";
@@ -1070,6 +1077,36 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
         VOut o = v[0];
         o.pos.x += (i & 1) ? half_pixel.x : -half_pixel.x - back.x;
         o.pos.y += (i & 2) ? -half_pixel.y : half_pixel.y + back.y;
+        strip.Append(o);
+    }
+}
+)";
+}
+
+// a line covers one console pixel across, several host pixels on an upscaled target: drawn as a quad that wide, half
+// a console pixel past each end. Drawn one host pixel wide at the console's coordinates, a line along a target's top
+// or left edge (0) lies on the host target's outer edge and covers nothing: True Crime clears its shadow map's border
+// with four such lines, so the map's clamped edge kept its shadow and the wet road's sheen ended in a dark band.
+std::string LineHlsl() {
+    return Common() + R"(
+[maxvertexcount(4)]
+void main(line VOut v[2], inout TriangleStream<VOut> strip) {
+    if (v[0].pos.w <= 0 || v[1].pos.w <= 0) return;  // crosses the eye plane: left out
+    float2 a = v[0].pos.xy / v[0].pos.w, b = v[1].pos.xy / v[1].pos.w;
+    float2 px = surf.xy * 0.5;  // console pixels per clip unit
+    float2 d = (b - a) * px;
+    float n2 = dot(d, d);
+    d = n2 > 1e-12 ? d * rsqrt(n2) : float2(1, 0);
+    float2 along = d / px * 0.5, across = float2(-d.y, d.x) / px * 0.5;  // half a console pixel, in clip units
+    // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
+    float2 back = surf.w > 0 ? (0.5 - 1e-3) / (px * surf.w) : 0;
+    float2 mid = (a + b) * 0.5;
+    for (int i = 0; i < 4; i++) {
+        VOut o = v[i >> 1];
+        float2 c = ((i >> 1) ? b + along : a - along) + ((i & 1) ? -across : across);
+        if (c.x < mid.x - 1e-6) c.x -= back.x;
+        if (c.y > mid.y + 1e-6) c.y += back.y;
+        o.pos.xy = c * o.pos.w;
         strip.Append(o);
     }
 }

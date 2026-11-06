@@ -121,6 +121,11 @@ struct DrawShaders {
 // draw needs it (a new car, effect or stretch of road in the middle of a race). Thread safe.
 bool CachedShader(uint64_t hash, ID3DBlob** out);  // the blob made from that hash's source, if kept
 void KeepShader(uint64_t hash, ID3DBlob* code);
+// built pipelines' cached blobs on disk by their key (pipelinecache.bin beside the exe), so a pipeline seen in an earlier run
+// builds without the driver's compile: the hitch the first time something new is drawn
+const std::string* CachedPipeline(uint64_t key);  // valid until ForgetPipelines
+void KeepPipeline(uint64_t key, const void* data, size_t size);
+void ForgetPipelines();  // the driver refused a blob (a new driver, another GPU): all of them are stale
 
 // the render target's console size in pixels, or the depth buffer's without one
 struct GuestExtent {
@@ -171,6 +176,9 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
     return std::max(1.0f, aspect * float(gh) / float(gw));
 }
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
+// a paced frame rate that a high refresh display does not divide evenly (60 on 280 Hz: frames alternately 4 and 5 refreshes): vsync
+// would show frames unevenly, so they go out when the pacing says, the display following with variable refresh. XBE_VSYNC_ALWAYS=1: not so
+bool PresentUnsynced();
 bool DepthTested(const State& s);
 bool DepthOnlySampled(const State& s);  // the bound depth buffer is a texture of a draw that leaves it alone
 bool ScreenDraw(const State& s);

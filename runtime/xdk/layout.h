@@ -144,6 +144,9 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_AutoDepth
 #define XDK_CDevice_AutoDepth 0xFFFFFFFFu
 #endif
+#ifndef XDK_CDevice_VertexProgramPlanes
+#define XDK_CDevice_VertexProgramPlanes 0xFFFFFFFFu
+#endif
 #ifndef XDK_CDevice_VBlankCallback
 #define XDK_CDevice_VBlankCallback 0xFFFFFFFFu
 #endif

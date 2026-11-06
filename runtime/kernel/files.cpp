@@ -587,6 +587,8 @@ static uint32_t RawVolume(File& f, bool write, uint32_t buf, uint32_t len, uint6
     return len;
 }
 
+std::atomic<uint64_t> g_read_us{0}, g_read_bytes{0};
+
 // GameInfo::disc_rate or XBE_DISC_RATE=<MB a second>: disc reads take as long as a drive of that speed would (the
 // console's DVD drive reads about 6 MB a second), on the thread that reads; reads here otherwise complete at once,
 // which a title's streaming may never have met on the console
@@ -621,6 +623,7 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     if (f->fp) Seek(f->fp, pos);
     if (write && f->fp) DropStale(f->host.string());
     uint32_t n = 0;
+    const auto read_begin = std::chrono::steady_clock::now();
     while (n < len) {
         uint32_t at = pages ? R32(pages + n / 0x1000 * 8) + n % 0x1000 : buf + n;
         uint32_t chunk = pages ? std::min(len - n, 0x1000 - n % 0x1000) : len;
@@ -631,6 +634,8 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
         if (done < chunk) break;
     }
     f->pos = pos + n;
+    g_read_us += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - read_begin).count());
+    g_read_bytes += n;
     if (!write && (f->entry || f->cdrom)) DiscPace(n);
     if (!write && n < len && FilesLogAll())  // the end of a file reached: copies do it at every file's end
         if (static std::atomic<int> said{0}; said.fetch_add(1) < 2000)

@@ -119,6 +119,7 @@ struct Pipeline {
     ComPtr<ID3D11DepthStencilState> depth;
     ComPtr<ID3D11RasterizerState> raster;
     bool points = false;
+    bool lines = false;
 };
 
 // Blit's settings past the source and its rectangle
@@ -374,6 +375,7 @@ private:
     ComPtr<ID3D11RasterizerState> pass_raster_;
     ComPtr<ID3D11DepthStencilState> no_depth_, depth_always_;
     ComPtr<ID3D11BlendState> opaque_, over_;
+    ComPtr<ID3D11BlendState> channels_[16];  // ClearRects' clears of some channels, by the write mask
     ComPtr<ID3D11SamplerState> pass_samplers_[4];  // linear, then point; all clamp
     ComPtr<ID3D11Buffer> vsc_cb_, dc_cb_, pass_cb_;
     // SMAA on the finished frame: edges, weights, the result; its two lookups; the size they were made for
@@ -395,6 +397,7 @@ private:
     std::unordered_map<uint64_t, ComPtr<ID3D11VertexShader>> vs_;
     std::unordered_map<uint64_t, ComPtr<ID3D11PixelShader>> ps_;
     ComPtr<ID3D11GeometryShader> point_gs_;
+    ComPtr<ID3D11GeometryShader> line_gs_;
     std::unordered_map<uint64_t, Pipeline> pipelines_;
     std::unordered_map<uint64_t, ComPtr<ID3D11SamplerState>> samplers_;
     std::unordered_map<uint64_t, Target> targets_;
@@ -1108,10 +1111,20 @@ void D3D11Backend::ClearRects(Target& t, const std::vector<RECT>& rs, uint32_t f
     }
     SetPassTarget(t.depth ? nullptr : t.rtv.Get(), t.depth ? t.dsv.Get() : nullptr, t.w, t.h);
     float cb[8] = {colour[0], colour[1], colour[2], colour[3], z, 0, 0, 0};
+    // 0x10 to 0x80 are red, green, blue, alpha, in the order of the write mask's bits
+    ID3D11BlendState* blend = opaque_.Get();
+    if (const uint32_t mask = (flags >> 4) & 0xF; !t.depth && mask != 0xF) {
+        if (!channels_[mask]) {
+            D3D11_BLEND_DESC bd{};
+            bd.RenderTarget[0].RenderTargetWriteMask = UINT8(mask);
+            dev_->CreateBlendState(&bd, &channels_[mask]);
+        }
+        blend = channels_[mask].Get();
+    }
     for (const RECT& r : rs) {
         if (r.right <= r.left || r.bottom <= r.top) continue;
         ctx_->RSSetScissorRects(1, &r);
-        FullScreen(vs, ps, cb, 8, nullptr, 0, opaque_.Get(), dss.Get(), stencil & 0xFF);
+        FullScreen(vs, ps, cb, 8, nullptr, 0, blend, dss.Get(), stencil & 0xFF);
     }
     Unbind();
 }
@@ -1136,8 +1149,9 @@ void D3D11Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
             const auto& v = s.viewport;
             rs.push_back(ScaledRect(*t, int(v.x), int(v.y), int(v.x + v.w), int(v.y + v.h)));
         }
-        bool whole = rs.size() == 1 && rs[0].left == 0 && rs[0].top == 0 && rs[0].right == LONG(t->w) &&
-                     rs[0].bottom == LONG(t->h);
+        // a clear of some channels is drawn: a clear view writes them all (True Crime clears alpha after its world)
+        bool whole = (t->depth || (flags & kClearTarget) == kClearTarget) && rs.size() == 1 && rs[0].left == 0 &&
+                     rs[0].top == 0 && rs[0].right == LONG(t->w) && rs[0].bottom == LONG(t->h);
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
         if (!t->depth && LatchCpuWrite(*t)) UploadTarget(*t, s.rt);
         // a whole clear goes to the twin too and leaves both alike; part of one goes to res, the twin refreshed later
@@ -1595,6 +1609,7 @@ Pipeline* D3D11Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs) {
     dev_->CreateDepthStencilState(&dd, &p.depth);
     // a point is drawn as its whole console pixel by a geometry shader, solid, front facing and never culled
     p.points = k.topo == uint32_t(Topology::Points);
+    p.lines = k.topo == uint32_t(Topology::Lines);
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = k.fill == kFillWireframe && !p.points ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
     rd.CullMode = k.cull && !p.points ? D3D11_CULL_BACK : D3D11_CULL_NONE;
@@ -1608,6 +1623,11 @@ Pipeline* D3D11Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs) {
         uint64_t gh;
         if (ID3DBlob* gs = Compile(PointHlsl(), "main", "gs_5_0", gh))
             dev_->CreateGeometryShader(gs->GetBufferPointer(), gs->GetBufferSize(), nullptr, &point_gs_);
+    }
+    if (p.lines && !line_gs_) {  // a line drawn one console pixel wide (LineHlsl)
+        uint64_t gh;
+        if (ID3DBlob* gs = Compile(LineHlsl(), "main", "gs_5_0", gh))
+            dev_->CreateGeometryShader(gs->GetBufferPointer(), gs->GetBufferSize(), nullptr, &line_gs_);
     }
     return &(pipelines_[h] = std::move(p));
 }
@@ -1628,8 +1648,8 @@ void D3D11Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         vsc_last_.assign(b, b + sizeof(s.vsc));
     }
     FillSurfaceConstants(s, size, c);
-    // points: host pixels per console pixel
-    if (k.topo == uint32_t(Topology::Points)) {
+    // points and lines: host pixels per console pixel
+    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) {
         const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
         c.surf[3] = t && t->gh ? float(t->h) * s.aa_y / float(t->gh) : 1.0f;
     }
@@ -1682,11 +1702,11 @@ void D3D11Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawCon
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
-    if (s.scissor_count) {
-        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
-        y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
-        y1 = std::min(y1, LONG(s.scissors[3] * sy));
+    if (s.scissor_count) {  // in place of the viewport: the library's SetScissors reads it only for a count of 0
+        x0 = LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx);
+        y0 = LONG(s.scissors[1] * sy);
+        x1 = LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx);
+        y1 = LONG(s.scissors[3] * sy);
     }
     if (s.squeeze_margin) {  // only the margin the squeezed picture leaves on that side
         const LONG edge = LONG(SqueezedX(dc.hud, s.squeeze_margin < 0 ? 0.0f : dc.hud[1] * 2) * sx);
@@ -1834,7 +1854,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     ID3D11VertexShader* vs = VertexShader(sh.vs_code, sh.vh);
     ID3D11PixelShader* ps = PixelShader(sh.ps_code, sh.ph);
     if (!vs || !ps || (k.regs && !p->layout)) return;
-    ID3D11GeometryShader* gs = p->points ? point_gs_.Get() : nullptr;
+    ID3D11GeometryShader* gs = p->points ? point_gs_.Get() : p->lines ? line_gs_.Get() : nullptr;
     // after a pass or the overlay the context holds their state, whatever the cache says: all of it set again
     bool fresh = !ds_.set;
     ds_.set = true;
@@ -2091,6 +2111,7 @@ void D3D11Backend::Present(const Surface& front) {
     ctx_->RSSetViewports(1, &vp);
     RenderUi();
     bool vsync = app::Get().vsync;
+    if (vsync && tearing_ && PresentUnsynced()) vsync = false;
     swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
     // the flip model unbinds the back buffer

@@ -584,9 +584,20 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
         if (app::kGame.step_interpolation) g_backend = gpu::CreateInterpolating(std::move(g_backend));
     }
     g_state = gpu::State{};
+    // the stencil masks' defaults, which no library table holds (the device starts with them): at 0 every stencil test passes
+    // and True Crime's stencilled wipe around a building's interior, before its first shadow set them, took the whole screen
+    g_state.simple[gpu::kMStencilMask >> 2] = g_state.simple[gpu::kMStencilWriteMask >> 2] = 0xFFFFFFFF;
     MakeFrameBuffers(pp);
     // where the library's own CreateDevice keeps the present parameters' interval (3948)
     if (XDK_CDevice_PresentInterval != xdk::kUnknown) SetDev(XDK_CDevice_PresentInterval, interval);
+    // the default planes, as GetDepthClipPlanes reports them to a title that derives its own from them
+    if (XDK_CDevice_VertexProgramPlanes != xdk::kUnknown) {
+        float far_z = 16777215.0f;
+        uint32_t bits;
+        std::memcpy(&bits, &far_z, 4);
+        SetDev(XDK_CDevice_VertexProgramPlanes, 0);
+        SetDev(XDK_CDevice_VertexProgramPlanes + 4, bits);
+    }
     // 60 Hz, widescreen
     if (XDK_CDevice_DisplayFlags != xdk::kUnknown) SetDev(XDK_CDevice_DisplayFlags, 0x400000 | (app::Widescreen() ? 0x10000 : 0));
 #if HAS_D3D_FvfShader
@@ -629,11 +640,25 @@ HLE_STDCALL(D3DDevice_Reset, 1) {
 
 HLE_STDCALL(D3DDevice_Release, 0) { return 1; }
 
-// SetDepthClipPlanes(near, far, flags): the hardware's Z clip planes. The library's own one rewrites device state the
-// host never set up. The renderer clips at the viewport's depth range, as the default planes do; other planes are
-// not applied yet.
+// SetDepthClipPlanes(near, far, flags): the hardware's Z clip planes for vertex programs. 1 sets them (kept in the device, where
+// the library's GetDepthClipPlanes reads them), 3 goes back to the default; the fixed function pipeline's, 2 and 4, are not applied.
+// The library's own one rewrites device state the host never set up.
 HLE_STDCALL(D3DDevice_SetDepthClipPlanes, 3) {
-    LOG_FIRST(4, "d3d: SetDepthClipPlanes %g %g flags %u is not applied", ArgF(a, 0), ArgF(a, 1), a[2]);
+    WalkBeforeState();
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    const float near_z = ArgF(a, 0), far_z = ArgF(a, 1);
+    LOG_FIRST(8, "d3d: SetDepthClipPlanes %g %g flags %u", near_z, far_z, a[2]);
+    if (a[2] == 1) {
+        g_state.depth_clip = !std::getenv("XBE_NO_DEPTH_CLIP");
+        g_state.depth_clip_near = near_z;
+        g_state.depth_clip_far = far_z;
+        if (XDK_CDevice_VertexProgramPlanes != xdk::kUnknown) {
+            SetDev(XDK_CDevice_VertexProgramPlanes, a[0]);
+            SetDev(XDK_CDevice_VertexProgramPlanes + 4, a[1]);
+        }
+    } else if (a[2] == 3) {
+        g_state.depth_clip = false;
+    }
     return 0;
 }
 
@@ -1432,6 +1457,15 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
             LOG_FIRST(8, "d3d: SetVertexShader with unknown handle %08X", h);
         }
     }
+    // the library's own pushes defaults for the colour registers the shader's declaration or FVF does not supply: diffuse
+    // white, specular 0, front and back (True Crime's city multiplies its light by v3, left at a 2D draw's colour without this)
+    const bool diffuse = g_state.vs ? g_state.vs->inputs[3].stream >= 0 : (h & 0x40) != 0;
+    const bool specular = g_state.vs ? g_state.vs->inputs[4].stream >= 0 : (h & 0x80) != 0;
+    const bool back_diffuse = g_state.vs && g_state.vs->inputs[7].stream >= 0, back_specular = g_state.vs && g_state.vs->inputs[8].stream >= 0;
+    if (!diffuse) g_state.vattr[3] = {1, 1, 1, 1};
+    if (!specular) g_state.vattr[4] = {0, 0, 0, 0};
+    if (!back_diffuse) g_state.vattr[7] = {1, 1, 1, 1};
+    if (!back_specular) g_state.vattr[8] = {0, 0, 0, 0};
     return 0;
 }
 
@@ -2167,6 +2201,7 @@ void Walk(uint32_t end) {
             } else {
                 continue;
             }
+            if (size_t r = (a - g_im_attr) / 4; r < g_state.vattr.size()) std::memcpy(g_state.vattr[r].data(), a, 16);
             if (!g_im_prim) continue;
             g_im_mask |= 1u << (a - g_im_attr) / 4;
             if (a == g_im_attr && last) g_im_vertices.insert(g_im_vertices.end(), g_im_attr, g_im_attr + 64);

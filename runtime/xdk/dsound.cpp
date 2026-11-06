@@ -26,6 +26,14 @@ X86Func* Find(uint32_t guest);
 }
 
 // configs written before the SDK knew the name
+#ifndef SYM_CDirectSoundStream_SetMode
+#define SYM_CDirectSoundStream_SetMode FFFFFF70
+#define HAS_CDirectSoundStream_SetMode 0
+#endif
+#ifndef SYM_CDirectSoundStream_SetRolloffCurve
+#define SYM_CDirectSoundStream_SetRolloffCurve FFFFFF71
+#define HAS_CDirectSoundStream_SetRolloffCurve 0
+#endif
 #ifndef SYM_IDirectSoundBuffer_SetMode
 #define SYM_IDirectSoundBuffer_SetMode FFFFFF40
 #define HAS_IDirectSoundBuffer_SetMode 0
@@ -224,6 +232,7 @@ struct Voice {
     std::vector<float> curve;  // rolloff
     bool is3d = false;
     uint32_t mode = 0;  // DS3DMODE: 1 head relative, 2 disabled
+    uint32_t out = 0;   // the submix buffer it plays into (SetOutputBuffer), 0 its own mix bins
     float p[3] = {}, min_dist = 1, max_dist = 1e9f;
     // ADPCM block cache
     int64_t block = -1;
@@ -237,6 +246,7 @@ struct Done {
 std::recursive_mutex g_lock;
 std::map<uint32_t, Voice> g_voices;
 float g_listener[3] = {}, g_front[3] = {0, 0, 1}, g_top[3] = {0, 1, 0};
+float g_rolloff = 1;  // the listener's rolloff factor (IDirectSound_SetRolloffFactor): 1 halves the level each doubling
 // Completed packets' callbacks, run as the XDK runs them: in DirectSoundDoWork on the title's thread, so they never
 // overlap the title's own stream code. A stream flushed or released runs its own at once, before it is gone.
 std::deque<Done> g_done;
@@ -323,7 +333,28 @@ constexpr float kMixBinGain = 1.0f / float(1u << XDK_DSound_MixBinHeadroom);
 // channels to front left, front right, centre, LFE, back left and back right in turn (EoN's driving missions mix
 // their music and speech into one 6 channel buffer, the speech in the centre).
 constexpr uint32_t kMixChannels = 6;
+Voice* Find(uint32_t obj);
+
 void Levels(Voice& v, float g[kMixChannels][2]) {
+    // into a submix buffer: the voice's own level, then the buffer's (its volume, mix bins and 3D place) for every channel,
+    // a mix of all the voice's channels in the buffer's one
+    if (v.out && v.out != v.obj) {
+        Voice* to = Find(v.out);
+        if (to && to->out != v.obj) {
+            float into[kMixChannels][2];
+            const uint32_t self = v.out;
+            v.out = 0;  // a chain of submixes is followed one step
+            Levels(*to, into);
+            v.out = self;
+            const uint32_t channels = std::min<uint32_t>(std::max<uint32_t>(v.channels, 1), kMixChannels);
+            const float own = v.volume * v.headroom / float(channels);
+            for (uint32_t c = 0; c < kMixChannels; c++) {
+                g[c][0] = c < channels ? own * into[0][0] : 0;
+                g[c][1] = c < channels ? own * into[0][1] : 0;
+            }
+            return;
+        }
+    }
     static const uint8_t kDefault[kMixChannels] = {0, 1, 2, 3, 4, 5};
     const uint8_t* bin = v.nbins ? v.bin : kDefault;
     const uint32_t channels = std::min<uint32_t>(std::max<uint32_t>(v.channels, 1), kMixChannels);
@@ -365,7 +396,8 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
     float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     float att = 1;
     if (dist > v.min_dist && v.curve.empty()) {
-        att = v.min_dist / std::min(dist, v.max_dist);
+        // DirectSound's rolloff: min / (min + rolloff x (distance - min)), as far as the maximum distance
+        att = v.min_dist / (v.min_dist + g_rolloff * (std::min(dist, v.max_dist) - v.min_dist));
     } else if (dist > v.min_dist && v.max_dist > v.min_dist) {
         // points spread evenly from min to max distance, 1.0 at min
         float at = (std::min(dist, v.max_dist) - v.min_dist) / (v.max_dist - v.min_dist) * v.curve.size();
@@ -377,6 +409,7 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
                       g_top[0] * g_front[1] - g_top[1] * g_front[0]};
     float side = rel ? d[0] : d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
     float pan = dist > 1e-3f ? side / dist : 0.0f;
+    if (app::kGame.sound_x_left) pan = -pan;
     for (uint32_t c = 0; c < kMixChannels; c++) {
         g[c][0] *= att * std::min(1.0f, 1.0f - pan);
         g[c][1] *= att * std::min(1.0f, 1.0f + pan);
@@ -412,10 +445,20 @@ void Render(float* out, uint32_t frames) {
             n++;
             float g[kMixChannels][2];
             Levels(v, g);
-            if (g[0][0] + g[0][1] > 0.25f && top.size() < 600) {
-                char b[120];
-                std::snprintf(b, sizeof b, " [%08X tag %X %uHz freq %u vol %.2f head %.2f gain %.2f/%.2f%s]", obj, v.tag, v.rate,
-                              v.freq, v.volume, v.headroom, g[0][0], g[0][1], v.is3d ? " 3d" : "");
+            // a channel's left/right gains; a stereo voice's second channel too (its first is mostly left only)
+            float sum = 0;
+            for (uint32_t c = 0; c < std::min<uint32_t>(v.channels, 2); c++) sum = std::max(sum, g[c][0] + g[c][1]);
+            if (sum > 0.25f && top.size() < 900) {
+                char b[200];
+                int k = std::snprintf(b, sizeof b, " [%08X tag %X %uch %uHz freq %u vol %.2f head %.2f gain %.2f/%.2f", obj, v.tag,
+                                      v.channels, v.rate, v.freq, v.volume, v.headroom, g[0][0], g[0][1]);
+                if (v.channels > 1) k += std::snprintf(b + k, sizeof b - k, " %.2f/%.2f", g[1][0], g[1][1]);
+                if (v.is3d) k += std::snprintf(b + k, sizeof b - k, " 3d mode %u at %.1f %.1f %.1f", v.mode, v.p[0], v.p[1], v.p[2]);
+                // into a 3D submix buffer: where it is, as the title gave it (mode 1 head relative: +x right, +z ahead)
+                if (const Voice* to = v.out ? Find(v.out) : nullptr)
+                    k += std::snprintf(b + k, sizeof b - k, " into %08X mode %u at %.1f %.1f %.1f", v.out, to->mode, to->p[0],
+                                       to->p[1], to->p[2]);
+                std::snprintf(b + std::min<int>(k, int(sizeof b) - 2), 2, "]");
                 top += b;
             }
         }
@@ -700,6 +743,7 @@ static void AuditExports() {
         SYM(CDirectSoundStream_FlushEx), SYM(CDirectSoundStream_Pause), SYM(CDirectSoundStream_SetVolume),
         SYM(CDirectSoundStream_SetFrequency), SYM(CDirectSoundStream_SetFilter), SYM(CDirectSoundStream_SetHeadroom),
         SYM(CDirectSoundStream_SetMixBinVolumes), SYM(CDirectSoundStream_SetMixBins), SYM(CDirectSoundStream_SetMaxDistance),
+        SYM(CDirectSoundStream_SetMode), SYM(CDirectSoundStream_SetRolloffCurve),
         SYM(CDirectSoundStream_SetMinDistance), SYM(CDirectSoundStream_SetPosition), SYM(CDirectSoundStream_SetVelocity),
         SYM(CDirectSoundStream_SetI3DL2Source), SYM(CDirectSoundStream_SetDopplerFactor), SYM(IDirectSoundStream_SetEG),
         SYM(DirectSoundGetSampleTime), SYM(IDirectSound_CreateSoundStream), SYM(IDirectSoundBuffer_GetVoiceProperties),
@@ -758,7 +802,11 @@ HLE_STDCALL(IDirectSound_EnableHeadphones, 2) { return 0; }
 HLE_STDCALL(IDirectSound_SetMixBinHeadroom, 3) { return 0; }
 HLE_STDCALL(IDirectSound_CommitDeferredSettings, 1) { return 0; }
 HLE_STDCALL(IDirectSound_SetDopplerFactor, 3) { return 0; }
-HLE_STDCALL(IDirectSound_SetRolloffFactor, 3) { return 0; }
+HLE_STDCALL(IDirectSound_SetRolloffFactor, 3) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_rolloff = std::max(F32(a[1]), 0.0f);
+    return 0;
+}
 HLE_STDCALL(IDirectSound_SetDistanceFactor, 3) { return 0; }
 HLE_STDCALL(IDirectSound_SetVelocity, 5) { return 0; }
 HLE_STDCALL(IDirectSound_SetI3DL2Listener, 3) { return 0; }
@@ -1050,7 +1098,12 @@ BUFFER(SetRolloffCurve, 4) {
     for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
     return 0;
 }
-BUFFER(SetOutputBuffer, 2) { return 0; }  // the voice keeps its own mix bins
+// (this, the buffer): the voice plays into another buffer (a DSBCAPS_MIXIN one) instead of its own mix bins, and is heard
+// where that buffer is: Project Gotham Racing gives each car a 3D mixin buffer at the car and routes its engine there
+BUFFER(SetOutputBuffer, 2) {
+    v.out = a[1];
+    return 0;
+}
 BUFFER(SetFormat, 2) {
     ReadFormat(v, a[1]);
     v.freq = 0;
@@ -1220,6 +1273,15 @@ STREAM(SetMixBinVolumes, 2) {
 }
 STREAM(SetMixBins, 2) {
     SetBins(v, a[1]);
+    return 0;
+}
+STREAM(SetMode, 3) {
+    v.mode = a[1];
+    return 0;
+}
+STREAM(SetRolloffCurve, 4) {
+    v.curve.clear();
+    for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
     return 0;
 }
 STREAM(SetMaxDistance, 3) {

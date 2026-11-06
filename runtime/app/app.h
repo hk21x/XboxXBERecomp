@@ -247,6 +247,9 @@ struct GameInfo {
     // DSP image would have balanced drown it out): the level of PCM streams and of every other voice; none is full level
     float (*pcm_stream_level)() = nullptr;
     float (*other_voice_level)() = nullptr;
+    // the title's 3D sound positions have +x to the left (DirectSound's is to the right): Project Gotham Racing's head relative
+    // ones do, so a car passing on the right was heard on the left
+    bool sound_x_left = false;
 };
 extern const GameInfo kGame;
 

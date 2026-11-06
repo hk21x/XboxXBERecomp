@@ -768,7 +768,7 @@ struct Combiners {
             if (!Fetch(i, dp)) return false;
         const PixelKey& k = m.key;
         v0 = f.v0;
-        v1 = f.v1;
+        v1 = m.s->rs[kRsSpecularEnable] ? f.v1 : V(0, 0, 0, 1);
         r0 = V(0, 0, 0, (k.tex_modes & 0x1F) ? t[0][3] : 1);
         r1 = Vec{};
         uint32_t n = std::min<uint32_t>(k.count & 0xFF, 8);
@@ -903,7 +903,8 @@ bool ShadeStages(const Material& m, const Fragment& f, Vec& out) {
         }
         (st[8] == 5 ? tmp : cur) = r;
     }
-    for (int j = 0; j < 3; j++) cur[j] = Sat(cur[j] + f.v1[j]);
+    if (m.s->rs[kRsSpecularEnable])  // the specular added only when enabled; D3DTA_SPECULAR reads it regardless
+        for (int j = 0; j < 3; j++) cur[j] = Sat(cur[j] + f.v1[j]);
     for (int j = 0; j < 3; j++) out[j] = f.fog[j] * (1 - f.fog[3]) + cur[j] * f.fog[3];
     out[3] = cur[3];
     return true;
@@ -1247,7 +1248,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                 const float* p = input(vi, r);
                 vp.in[r] = V(p[0], p[1], p[2], p[3]);
             } else {
-                vp.in[r] = r == 3 ? V(1, 1, 1, 1) : V(0, 0, 0, 1);
+                const auto& p = s.vattr[size_t(r)];
+                vp.in[r] = V(p[0], p[1], p[2], p[3]);
             }
         }
         Shaded& o = verts[vi];
@@ -1311,7 +1313,6 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         }
         for (int a : {kD0, kD1, kB0, kB1})
             for (int j = 0; j < 4; j++) o.attr[a][j] = Sat(o.attr[a][j]);
-        if (!s.rs[kRsSpecularEnable]) o.attr[kD1] = o.attr[kB1] = V(0, 0, 0, 1);
         // drawn in pixels of aa_x by aa_y target pixels (State::aa_x)
         o.pos[0] *= float(s.aa_x);
         o.pos[1] *= float(s.aa_y);
@@ -1562,6 +1563,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     // put long triangles that reach the camera in front of everything)
                     float z = wbuf ? wk / (b0 * p0.iw + b1 * p1.iw + b2 * p2.iw) : b0 * zv0 + b1 * zv1 + b2 * zv2;
                     if (z < 0 || (!wbuf && z > s.zscale)) continue;
+                    if (s.depth_clip && (z < s.depth_clip_near || z > s.depth_clip_far)) continue;
                     z = std::clamp(z + zoff + float(adjust.depth_bias) * s.zscale / 16777215.0f, 0.0f, s.zscale);
                     float iw = b0 * p0.iw + b1 * p1.iw + b2 * p2.iw;
                     Vec attr[kAttrs];

@@ -90,6 +90,8 @@ std::string PixelHlsl(const PixelKey& k);
 std::string QuadHlsl(std::string s);
 // the geometry shader that draws a point as its console pixel
 std::string PointHlsl();
+// the geometry shader that draws a line one console pixel wide, as the console does
+std::string LineHlsl();
 
 // HLSL a backend extension adds; the defaults write the console path
 struct ShaderHooks {
@@ -137,6 +139,8 @@ struct DrawConstants {
     float hud[4];        // pretransformed x squeezed about hud[1] (half the width) by hud[0] (ultrawide 2D), else 1;
                          // [2] depth tested; [3] W-buffered: z kept within w (no far plane clipping)
     float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
+    float vattr[16][4];  // State::vattr
+    float zclip[4];      // the depth clip planes, near and far, as depth from 0 to 1 (-2 and 2: none)
 };
 
 }  // namespace gpu

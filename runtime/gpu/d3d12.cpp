@@ -102,7 +102,7 @@ struct Perf {
     uint64_t rtups = 0;
     uint64_t shrinks = 0;
     uint64_t syncs = 0;
-    uint64_t psos = 0;
+    uint64_t psos = 0, psos_kept = 0;
     uint64_t shaders = 0;
     uint64_t raw = 0;
     uint64_t lates = 0;
@@ -333,6 +333,7 @@ private:
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
     void ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
+    void ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d);
     float PointScale() const;  // host pixels per console pixel of the bound target
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                          GuestExtent size, DrawConstants& c);
@@ -522,6 +523,7 @@ private:
         uint32_t stencil;
     };
     void ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs);
+    void ClearChannels(Target& t, const std::vector<D3D12_RECT>& rs, uint32_t flags, const float col[4]);
     // Copy's guest lists: count src_rects, dst_points 0 or one per rect
     struct CopyList {
         uint32_t count;
@@ -1565,6 +1567,16 @@ void D3D12Backend::ExpandPoints(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
     d.RasterizerState.FrontCounterClockwise = FALSE;
 }
 
+// a line is drawn one console pixel wide by a geometry shader (LineHlsl), solid and never culled
+void D3D12Backend::ExpandLines(D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
+    uint64_t hash;
+    ID3DBlob* gs = Compile(LineHlsl(), "main", "gs_5_0", hash);
+    if (!gs) return;
+    d.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
+    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+}
+
 float D3D12Backend::PointScale() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
     if (!t || !t->gh) return 1;
@@ -1581,9 +1593,27 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     d.InputLayout = {el, n};
     FillPipelineDesc(k, vs, ps, d);
     if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d);
+    if (k.topo == uint32_t(Topology::Lines)) ExpandLines(d);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
-    if (HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)); FAILED(hr)) {
+    const std::string* kept = CachedPipeline(h);
+    if (kept) {
+        d.CachedPSO = {kept->data(), kept->size()};
+        g_perf.psos_kept++;
+    }
+    HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
+    if (FAILED(hr) && kept) {
+        // refused: the blob is stale, and d must not point at it once the cache is dropped
+        d.CachedPSO = {};
+        ForgetPipelines();
+        kept = nullptr;
+        pso.Reset();
+        hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
+    }
+    if (SUCCEEDED(hr) && !kept) {
+        if (ComPtr<ID3DBlob> blob; SUCCEEDED(pso->GetCachedBlob(&blob)) && blob) KeepPipeline(h, blob->GetBufferPointer(), blob->GetBufferSize());
+    }
+    if (FAILED(hr)) {
         DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
         if (adapter3_) adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
         LOGE("d3d12: pipeline creation failed %08X (samples %u, colour %u format %u, depth %u, topology %u, fill %u; "
@@ -2144,8 +2174,8 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         ext_vsc = reinterpret_cast<float(*)[4]>(vc.cpu);
     }
     FillSurfaceConstants(s, size, c);
-    // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
-    if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale() * s.aa_y;
+    // points and lines: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
+    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = PointScale() * s.aa_y;
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
     if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);
@@ -2326,11 +2356,11 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawCon
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
     LONG y1 = LONG((s.viewport.y + s.viewport.h) * sy);
-    if (s.scissor_count) {
-        x0 = std::max(x0, LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx));
-        y0 = std::max(y0, LONG(s.scissors[1] * sy));
-        x1 = std::min(x1, LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx));
-        y1 = std::min(y1, LONG(s.scissors[3] * sy));
+    if (s.scissor_count) {  // in place of the viewport: the library's SetScissors reads it only for a count of 0
+        x0 = LONG(SqueezedX(dc.hud, float(s.scissors[0])) * sx);
+        y0 = LONG(s.scissors[1] * sy);
+        x1 = LONG(SqueezedX(dc.hud, float(s.scissors[2])) * sx);
+        y1 = LONG(s.scissors[3] * sy);
     }
     if (s.squeeze_margin) {  // only the margin the squeezed picture leaves on that side
         const LONG edge = LONG(SqueezedX(dc.hud, s.squeeze_margin < 0 ? 0.0f : dc.hud[1] * 2) * sx);
@@ -2621,6 +2651,49 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 }
 
 // rs: the rects buffer, reused across targets
+// A clear of some channels only: 0x10 to 0x80 are red, green, blue, alpha, in the order of the write mask's bits. A
+// clear view writes them all, so it is drawn (True Crime clears alpha and stencil after its world, flags 0x82, for its
+// shadows: the whole picture went black). Into res, the twin refreshed later.
+void D3D12Backend::ClearChannels(Target& t, const std::vector<D3D12_RECT>& rs, uint32_t flags, const float col[4]) {
+    static const char* kHlsl = R"(
+cbuffer B : register(b1) { float4 colour; };
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 t = float2((id << 1) & 2, id & 2);
+    return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float4 ps(float4 p : SV_Position) : SV_Target { return colour; }
+)";
+    const uint32_t mask = (flags >> 4) & 0xF;
+    auto& pso = blit_psos_[Hash(kHlsl, std::strlen(kHlsl), uint64_t(t.fmt) << 8 | mask)];
+    if (!pso) {
+        uint64_t h;
+        ID3DBlob* vs = Compile(kHlsl, "vs", "vs_5_0", h);
+        ID3DBlob* ps = Compile(kHlsl, "ps", "ps_5_0", h);
+        if (!vs || !ps) return;
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, t.fmt);
+        d.BlendState.RenderTarget[0].RenderTargetWriteMask = UINT8(mask);
+        if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return;
+    }
+    Settle(t);
+    Wrote(t);
+    Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    SetBlitTarget(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), t.w, t.h);
+    uint32_t slot = AllocSrvSlots(2);
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = kBgra;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    for (uint32_t i = 0; i < 2; i++) dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+    Alloc cb = Upload(256, 256);
+    std::memcpy(cb.cpu, col, 4 * sizeof(float));
+    for (const D3D12_RECT& r : rs) {
+        if (r.right <= r.left || r.bottom <= r.top) continue;
+        cl_->RSSetScissorRects(1, &r);
+        DrawFullScreen(pso.Get(), cb.gpu, slot);
+    }
+}
+
 void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, std::vector<D3D12_RECT>& rs) {
     rs.clear();
     if (c.count && c.rects) {
@@ -2651,10 +2724,14 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         float col[4];
         Color(c.color, col);
         for (int i = 0; t.range != 1 && i < 3; i++) col[i] /= t.range;
-        cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
-        if (t.ms) {
-            Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
+        if ((c.flags & kClearTarget) != kClearTarget) {
+            ClearChannels(t, rs, c.flags, col);
+        } else {
+            cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
+            if (t.ms) {
+                Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
+            }
         }
     }
     t.drawn = true;
@@ -3112,12 +3189,12 @@ void LogPerf() {
              g_perf_sync_late.exchange(0) / n);
         LOGR("perf: per frame %.0f draws (%.0f raw) %.0fk verts %.1f MB upload %.1f overflow | %.0f checks %.2f MB "
              "hashed | %.1f tex uploads %.2f MB, %.1f new tex, %.1f new targets, %.1f target uploads, %.1f shrinks, "
-             "%.1f read-backs %.1f late | %llu shaders %llu psos this second | reused: %.0f vsc %.0f dc %.0f tables | "
+             "%.1f read-backs %.1f late | %llu shaders %llu psos (%llu kept) this second | reused: %.0f vsc %.0f dc %.0f tables | "
              "stages: %.0f last %.0f memo %.0f target %.0f full | same as last draw: %.0f samplers %.0f views | targets %.2f ms",
              p.draws / n, p.raw / n, p.verts / n / 1000.0, p.upload / n / 1048576.0, p.overflow / n, p.sigs / n,
              p.sig_bytes / n / 1048576.0, p.texups / n, p.texup_bytes / n / 1048576.0, p.newtex / n,
              p.targets / n, p.rtups / n, p.shrinks / n, p.syncs / n, p.lates / n,
-             (unsigned long long)p.shaders, (unsigned long long)p.psos, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
+             (unsigned long long)p.shaders, (unsigned long long)p.psos, (unsigned long long)p.psos_kept, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
              p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
              p.same_views / n, p.t_targets / n);
         g_perf = Perf{};
@@ -3158,6 +3235,7 @@ void D3D12Backend::Present(const Surface& front) {
     DeliverReports();
     bool vsync = app::Get().vsync;
     auto perf_swap = PerfNow();
+    if (vsync && tearing_ && PresentUnsynced()) vsync = false;
     swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     g_perf.swap += PerfMs(perf_swap);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
