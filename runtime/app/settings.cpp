@@ -447,7 +447,8 @@ bool Widescreen() {
 
 float FrameAspect() {
     if (!Widescreen()) return 4.0f / 3.0f;
-    const uint32_t a = AspectChoice();
+    // the booted choice, or the current one for a title whose views follow (GameInfo::fill_follows_live)
+    const uint32_t a = kGame.fill_follows_live ? Get().aspect % 4 : AspectChoice();
     if (a != 3 && !(a == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
     Mode m = Output();
     return m.height ? std::max(16.0f / 9.0f, float(m.width) / float(m.height)) : 16.0f / 9.0f;
