@@ -1083,10 +1083,13 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
 )";
 }
 
-// a line covers one console pixel across, several host pixels on an upscaled target: drawn as a quad that wide, half
-// a console pixel past each end. Drawn one host pixel wide at the console's coordinates, a line along a target's top
-// or left edge (0) lies on the host target's outer edge and covers nothing: True Crime clears its shadow map's border
-// with four such lines, so the map's clamped edge kept its shadow and the wet road's sheen ended in a dark band.
+// a line covers one console pixel across, several host pixels on an upscaled target: drawn as a quad that wide. The
+// console's pixel k has its centre at k, so a line at k covers pixel k, which here spans k to k+1 (the transform maps
+// k to the pixel's near edge): the quad runs half a pixel right and down of the line, half a pixel either side, each
+// pixel from the first to the last (a line from 0 to 255 fills 0 to 256). Drawn one host pixel wide at the console's
+// coordinates, a line along a target's top or left edge (0) covered nothing and one along its far edges (255) missed
+// the last host rows: True Crime clears its shadow map's border with four such lines, and a clamped read past an edge
+// kept its shadow, so the wet road's sheen ended in a dark band ahead of the player (which edge, by the way he faced).
 std::string LineHlsl() {
     return Common() + R"(
 [maxvertexcount(4)]
@@ -1098,14 +1101,10 @@ void main(line VOut v[2], inout TriangleStream<VOut> strip) {
     float n2 = dot(d, d);
     d = n2 > 1e-12 ? d * rsqrt(n2) : float2(1, 0);
     float2 along = d / px * 0.5, across = float2(-d.y, d.x) / px * 0.5;  // half a console pixel, in clip units
-    // a target is read half a host pixel back (surf.w host pixels per console pixel): left and top reach that far
-    float2 back = surf.w > 0 ? (0.5 - 1e-3) / (px * surf.w) : 0;
-    float2 mid = (a + b) * 0.5;
+    float2 centre = float2(0.5, -0.5) / px;  // half a pixel right and down (clip y is up)
     for (int i = 0; i < 4; i++) {
         VOut o = v[i >> 1];
-        float2 c = ((i >> 1) ? b + along : a - along) + ((i & 1) ? -across : across);
-        if (c.x < mid.x - 1e-6) c.x -= back.x;
-        if (c.y > mid.y + 1e-6) c.y += back.y;
+        float2 c = ((i >> 1) ? b + along : a - along) + centre + ((i & 1) ? -across : across);
         o.pos.xy = c * o.pos.w;
         strip.Append(o);
     }
