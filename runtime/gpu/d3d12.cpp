@@ -2039,6 +2039,17 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
             LOGR("d3d12: texture %08X %ux%u (pitch %u) read as the top left of target %ux%u", d.data, d.width,
                  d.height, d.pitch, tit->second.gw, tit->second.gh);
     }
+    // a small target drawn from a texture (PGR2's speed camera photo, 160x120, shrinks the frame): what it samples, a few
+    if (bound_rt_ && bound_rt_->gw <= 256 && bound_rt_->gh <= 256 && d.width >= 320) {
+        if (tit != targets_.end())
+            LOG_FIRST(12, "d3d12: small target %08X %ux%u drawn from texture %08X (format %X, %ux%u) = target %08X %ux%u (host %ux%u, drawn %d, msaa %d dirty %d)",
+                      bound_rt_->data, bound_rt_->gw, bound_rt_->gh, d.data, d.format, d.width, d.height, tit->second.data,
+                      tit->second.gw, tit->second.gh, tit->second.w, tit->second.h, tit->second.drawn ? 1 : 0,
+                      tit->second.ms ? 1 : 0, tit->second.ms_dirty ? 1 : 0);
+        else
+            LOG_FIRST(12, "d3d12: small target %08X %ux%u drawn from texture %08X (format %X, %ux%u), guest memory: no target there",
+                      bound_rt_->data, bound_rt_->gw, bound_rt_->gh, d.data, d.format, d.width, d.height);
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         g_perf.stage_target++;
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
