@@ -122,6 +122,10 @@ public:
 
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
         auto t = Clock::now();
+        if (g_trace_draws.load(std::memory_order_relaxed) > 0)  // TEMPORARY, PGR2 issue 30
+            LOGR_FIRST(400, "trace: draw prim %u count %u into %08X (depth %08X) vs %08X ps %d tex0 %08X viewport %u,%u %ux%u",
+                       prim, count, s.rt.data, s.zs.data, s.vs_handle, s.ps ? 1 : 0,
+                       s.textures[0] ? ::kernel::R32(s.textures[0] + 4) : 0, s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h);
         SendState(s);
         if (Mergeable(s, prim, count, indices)) {
             PutMerged(prim, start, count, indices);
@@ -150,6 +154,8 @@ public:
 
     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) override {
         auto t = Clock::now();
+        if (g_trace_draws.load(std::memory_order_relaxed) > 0)  // TEMPORARY, PGR2 issue 30
+            LOGR_FIRST(40, "trace: clear %X colour %08X into %08X (depth %08X)", flags, color, s.rt.data, s.zs.data);
         SendState(s);
         Cmd c{Op::Clear};
         c.a = count;
