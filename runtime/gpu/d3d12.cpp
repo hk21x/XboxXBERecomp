@@ -311,6 +311,15 @@ public:
     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                uint32_t stencil) override;
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
+    // assembled on the render thread's prep thread: Draw takes it in place of assembling (point sprites too, which
+    // change only the stages)
+    void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
+                       const Assembled& pre, bool ok) override {
+        pre_ = &pre;
+        pre_ok_ = ok;
+        Draw(s, prim, start, count, indices);
+        pre_ = nullptr;
+    }
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override;
     void Present(const Surface& front) override;
     void Sync(uint32_t data, uint32_t size) override;
@@ -761,6 +770,8 @@ private:
         std::string text;
     };
     std::vector<CopyNote> list_copies_;
+    const Assembled* pre_ = nullptr;  // DrawAssembled's draw
+    bool pre_ok_ = false;
     CopyPool vcopies_;     // guest vertex bytes put off (DeferWork), copied before the GPU or the title needs them
     bool defer_ = false;
     std::deque<std::vector<CopyNote>> sent_copies_;
@@ -3060,8 +3071,13 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
     g_perf.pre += PerfMs(perf_pre);
-    Assembled& a = asm_;
-    if (!AssembleDraw(s, prim, start, count, indices, a)) return;
+    if (!pre_ && !AssembleDraw(s, prim, start, count, indices, asm_)) return;
+    if (pre_ && !pre_ok_) return;
+    const Assembled& a = pre_ ? *pre_ : asm_;
+    if (pre_) {
+        g_perf.verts += a.vertex_count;
+        g_perf.raw += a.vertices.empty();
+    }
     // past the ring every upload is a buffer of its own: seconds lost on a frame that draws a whole level once
     if (CurrentFrame().used > kUploadSize - kUploadReserve) Submit(true);
     auto perf_bt = PerfNow();

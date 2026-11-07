@@ -27,6 +27,7 @@
 #include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/vertex.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 
@@ -57,6 +58,8 @@ struct Cmd {
     bool joinable = false;        // a triangle list the next draw with the same state may add to (GameInfo::merge_draws)
     Surface s1, s2;
     uint64_t check = 0;           // XBE_CHECK_STATE: the title's state, hashed (CheckHash)
+    int32_t pre = -1;             // a draw the prep thread assembled: its slot in Threaded::pre_ring_
+    bool pre_ok = false;          // and Assemble's answer
 };
 
 struct Batch {
@@ -141,6 +144,16 @@ public:
         ring_ = mem::AllocSystem(kHeaderRing, 64);
         cur_ = NewBatch();
         defer_ = inner_->DeferWork(true);
+        pre_ = [] {
+            const char* e = std::getenv("XBE_PRE_ASSEMBLE");
+            bool on = !(e && *e == '0');
+            LOGR("render thread: draws assembled %s", on ? "one step ahead on the prep thread" : "by the render thread (XBE_PRE_ASSEMBLE=0)");
+            return on;
+        }();
+        if (pre_) {
+            pre_ring_.resize(kPre);
+            std::thread([this] { Prep(); }).detach();
+        }
         std::thread([this] { Run(); }).detach();
     }
     ~Threaded() override {
@@ -489,10 +502,10 @@ private:
     }
 
     void Run() {
-        using SetDescription = HRESULT(WINAPI*)(HANDLE, PCWSTR);
-        if (auto set = reinterpret_cast<SetDescription>(
-                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
-            set(GetCurrentThread(), L"render");
+        NameThread(L"render");
+        // batches from the prep thread when it runs, else straight from the title
+        std::deque<Batch*>& source = pre_ ? ready_ : queue_;
+        std::condition_variable& source_cv = pre_ ? ready_cv_ : cv_;
         // A batch is done (done_) once the backend settled the work its draws put off. That is done for several
         // batches together: when no batch waits, after kHold of them, or once the title waits for one already run.
         uint64_t unsettled = 0;
@@ -511,15 +524,15 @@ private:
             Batch* b;
             {
                 std::unique_lock lock(m_);
-                if (queue_.empty() && unsettled) {
+                if (source.empty() && unsettled) {
                     lock.unlock();
                     settle();
                     continue;
                 }
-                cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
-                if (queue_.empty()) break;
-                b = queue_.front();
-                queue_.pop_front();
+                source_cv.wait(lock, [&] { return (pre_ ? prep_exited_ : stop_) || !source.empty(); });
+                if (source.empty()) break;
+                b = source.front();
+                source.pop_front();
             }
             static const bool perf = diag::Perf();
             auto t = perf ? Clock::now() : Clock::time_point{};
@@ -564,35 +577,101 @@ private:
                  (unsigned long long)draws, (unsigned long long)wrong, (unsigned long long)stale);
     }
 
+    // a state command's changes into st; true when they touched the vertex constants
+    static bool ApplyState(State& st, const Batch& b, const Cmd& c) {
+        const uint8_t* data = b.bytes.data() + c.data;
+        uint8_t* s = reinterpret_cast<uint8_t*>(&st);
+        static const State layout;
+        static const size_t vsc_from = At(layout, &layout.vsc), vsc_to = vsc_from + sizeof(layout.vsc);
+        bool vsc = false;
+        for (const uint8_t* p = data; p < data + c.size;) {
+            uint32_t head[2];
+            std::memcpy(head, p, 8);
+            std::memcpy(s + head[0], p + 8, head[1]);
+            vsc |= head[0] < vsc_to && head[0] + head[1] > vsc_from;
+            p += 8 + head[1];
+        }
+        if (c.vs >= 0) st.vs = b.vs[size_t(c.vs)];
+        if (c.ps >= 0) st.ps = b.ps[size_t(c.ps)];
+        return vsc;
+    }
+
+    // The prep thread, one step before the render thread (XBE_PRE_ASSEMBLE, on unless 0): it takes the title's batches
+    // first, keeps its own copy of the state and assembles their draws (gpu::Assemble reads only the state, the
+    // indices and guest memory) into pre_ring_, then hands the batch on. After a command that may write guest memory
+    // on the render thread (anything but state, draws and clears: read-backs, copies, presents) the batch's later
+    // draws are left to the render thread, so a draw never reads vertices from before such a command.
+    void Prep() {
+        NameThread(L"render prep");
+        for (;;) {
+            Batch* b;
+            {
+                std::unique_lock lock(m_);
+                cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
+                if (queue_.empty()) break;
+                b = queue_.front();
+                queue_.pop_front();
+            }
+            static const bool perf = diag::Perf();
+            auto t = perf ? Clock::now() : Clock::time_point{};
+            bool ahead = true;
+            for (Cmd& c : b->cmds) {
+                if (c.op == Op::State) {
+                    ApplyState(prep_state_, *b, c);
+                } else if (c.op == Op::Draw) {
+                    if (!ahead) continue;
+                    // a slot is free once the render thread drew what it held (kPre draws ago)
+                    while (pre_made_ - pre_used_.load(std::memory_order_acquire) >= kPre) std::this_thread::yield();
+                    size_t slot = size_t(pre_made_ % kPre);
+                    c.pre_ok = Assemble(prep_state_, c.a, c.b, c.c, c.d ? b->bytes.data() + c.data : nullptr, pre_ring_[slot]);
+                    c.pre = int32_t(slot);
+                    pre_made_++;
+                } else if (c.op != Op::Clear) {
+                    ahead = false;
+                }
+            }
+            if (perf) g_perf_prep_ns += Ns(t);
+            {
+                std::lock_guard lock(m_);
+                ready_.push_back(b);
+            }
+            ready_cv_.notify_one();
+        }
+        {
+            std::lock_guard lock(m_);
+            prep_exited_ = true;
+        }
+        ready_cv_.notify_all();
+    }
+
+    static void NameThread(const wchar_t* name) {
+        using SetDescription = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+        if (auto set = reinterpret_cast<SetDescription>(
+                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
+            set(GetCurrentThread(), name);
+    }
+
     void Execute(const Batch& b, const Cmd& c) {
         const uint8_t* data = b.bytes.data() + c.data;
         switch (c.op) {
             case Op::State: {
                 static const bool perf = diag::Perf();
                 auto t = perf ? Clock::now() : Clock::time_point{};
-                uint8_t* s = reinterpret_cast<uint8_t*>(&state_);
-                static const State layout;
-                static const size_t vsc_from = At(layout, &layout.vsc), vsc_to = vsc_from + sizeof(layout.vsc);
-                bool vsc = false;
-                for (const uint8_t* p = data; p < data + c.size;) {
-                    uint32_t head[2];
-                    std::memcpy(head, p, 8);
-                    std::memcpy(s + head[0], p + 8, head[1]);
-                    vsc |= head[0] < vsc_to && head[0] + head[1] > vsc_from;
-                    p += 8 + head[1];
-                }
                 // the count is the render thread's own, set again after every change: a change sent in whole 64 byte
                 // chunks carries the title's 0 over it (it sits next to vsc)
-                if (vsc || !vsc_count_) vsc_count_++;
+                if (ApplyState(state_, b, c) || !vsc_count_) vsc_count_++;
                 state_.vsc_gen = vsc_count_;
-                if (c.vs >= 0) state_.vs = b.vs[size_t(c.vs)];
-                if (c.ps >= 0) state_.ps = b.ps[size_t(c.ps)];
                 if (perf) g_perf_state_ns += Ns(t);
                 break;
             }
             case Op::Draw:
                 if (CheckState()) Check(c);
-                inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr);
+                if (c.pre >= 0) {
+                    inner_->DrawAssembled(state_, c.a, c.b, c.c, c.d ? data : nullptr, pre_ring_[size_t(c.pre)], c.pre_ok);
+                    pre_used_.fetch_add(1, std::memory_order_release);
+                } else {
+                    inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr);
+                }
                 break;
             case Op::Clear: inner_->Clear(state_, c.a, c.size ? data : nullptr, c.b, c.c, c.f, c.d); break;
             case Op::Copy: inner_->Copy(c.s1, c.s2, c.a, c.b, c.c); break;
@@ -659,6 +738,15 @@ private:
     bool defer_ = false;                   // the backend puts work off until Settle
     static constexpr uint32_t kHold = 16;  // batches run before their put off work is settled
     bool stop_ = false, exited_ = false;
+    // the prep thread (Prep): batches it has assembled, waiting for the render thread
+    bool pre_ = false, prep_exited_ = false;
+    static constexpr uint64_t kPre = 2048;  // assembled draws in flight, many batches' worth
+    std::vector<Assembled> pre_ring_;
+    uint64_t pre_made_ = 0;                // the prep thread's
+    std::atomic<uint64_t> pre_used_{0};    // the render thread's
+    State prep_state_;
+    std::deque<Batch*> ready_;
+    std::condition_variable ready_cv_;
 };
 
 }  // namespace

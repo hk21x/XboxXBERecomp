@@ -21,6 +21,7 @@
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "gpu/texture.h"
+#include "gpu/vertex.h"
 #include "harness.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
@@ -46,11 +47,61 @@ public:
         if (list_) List(s, prim, start, count);
         harness::AuditDraw(s, prim, start, count, indices);
     }
+    uint64_t perf_frames_ = 0, perf_draws_ = 0;
+    // XBE_CHECK_PRE=1: each draw the prep thread assembled is assembled again here, on the render thread, and compared
+    void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
+                       const gpu::Assembled& pre, bool ok) override {
+        static const bool check = [] {
+            const char* e = std::getenv("XBE_CHECK_PRE");
+            return e && *e == '1';
+        }();
+        if (check) {
+            static gpu::Assembled again;
+            static uint64_t n = 0, wrong = 0;
+            bool ok2 = gpu::Assemble(s, prim, start, count, indices, again);
+            const char* why = SameAssembly(pre, ok, again, ok2);
+            n++;
+            if (why && wrong++ < 8) LOGR("prep check: draw %llu assembled differently (%s)", (unsigned long long)n, why);
+            if (n % 200000 == 0)
+                LOGR("prep check: %llu draws assembled ahead, %llu different", (unsigned long long)n, (unsigned long long)wrong);
+        }
+        Draw(s, prim, start, count, indices);
+    }
+    static const char* SameAssembly(const gpu::Assembled& a, bool oka, const gpu::Assembled& b, bool okb) {
+        if (oka != okb) return "drawn or not";
+        if (!oka) return nullptr;
+        if (a.regs != b.regs || a.vertex_count != b.vertex_count || a.topology != b.topology || a.strip != b.strip ||
+            a.pretransformed != b.pretransformed || a.decode != b.decode)
+            return "layout";
+        for (int r = 0; r < 16; r++)  // only the registers in use: Assemble leaves the others as they were
+            if ((a.regs >> r) & 1 && std::memcmp(&a.elements[size_t(r)], &b.elements[size_t(r)], sizeof(a.elements[0])))
+                return "elements";
+        if (a.buffer_count != b.buffer_count) return "buffer count";
+        for (uint32_t i = 0; i < a.buffer_count; i++) {
+            if (a.buffers[i].bytes != b.buffers[i].bytes || a.buffers[i].stride != b.buffers[i].stride) return "buffer size";
+            if (std::memcmp(a.buffers[i].src, b.buffers[i].src, a.buffers[i].bytes)) return "vertex bytes";
+        }
+        if (a.index_count != b.index_count || a.draw_count != b.draw_count || a.base_vertex != b.base_vertex ||
+            a.index16 != b.index16)
+            return "draw";
+        if (a.index_count && std::memcmp(a.index_src, b.index_src, size_t(a.index_count) * (a.index16 ? 2 : 4)))
+            return "indices";
+        return nullptr;
+    }
     void Copy(const Surface& src, const Surface& dst, uint32_t n, uint32_t rects, uint32_t points) override {
         if (drawing_) reference::Copy(src, dst, n, rects, points);
         else CopySurfaceMemory(src, dst, n, rects, points);
     }
     void Present(const Surface& front) override {
+        // XBE_PERF with the render thread on: its own times, every 600 frames
+        static const bool perf = std::getenv("XBE_PERF") != nullptr;
+        if (perf && ++perf_frames_ % 600 == 0) {
+            uint64_t d = draws_ - perf_draws_;
+            perf_draws_ = draws_;
+            LOGR("perf: render thread per frame: state %.3f ms, batches %.3f ms, prep %.3f ms, %.0f draws",
+                 gpu::g_perf_state_ns.exchange(0) / 600.0 / 1e6, gpu::g_perf_batch_ns.exchange(0) / 600.0 / 1e6,
+                 gpu::g_perf_prep_ns.exchange(0) / 600.0 / 1e6, d / 600.0);
+        }
         if (list_) {
             std::fclose(list_);
             list_ = nullptr;

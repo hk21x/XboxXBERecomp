@@ -14,6 +14,8 @@ enum : uint32_t {
     kClearStencil = 0x02,
 };
 
+struct Assembled;
+
 class Backend {
 public:
     virtual ~Backend() = default;
@@ -24,6 +26,13 @@ public:
                        uint32_t stencil) = 0;
     // indices: the title's 16 bit indices, null for non indexed draws, then start is the first vertex
     virtual void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) = 0;
+    // the same draw, already assembled from this state and indices on another thread (the render thread's prep
+    // thread): pre and Assemble's answer ok, which the backend may use in place of assembling it; read only during the
+    // call
+    virtual void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
+                               const Assembled& /*pre*/, bool /*ok*/) {
+        Draw(s, prim, start, count, indices);
+    }
     virtual void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects_va,
                       uint32_t dst_points_va) = 0;
     virtual void Present(const Surface& front) = 0;
@@ -74,7 +83,7 @@ std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner);
 // perf diagnostic: the title's thread recording for the render thread, and waiting on it
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};
 // the render thread: applying the batches' state changes, and running batches at all (with XBE_PERF)
-inline std::atomic<uint64_t> g_perf_state_ns{0}, g_perf_batch_ns{0};
+inline std::atomic<uint64_t> g_perf_state_ns{0}, g_perf_batch_ns{0}, g_perf_prep_ns{0};
 inline std::atomic<uint64_t> g_perf_wait_kind_ns[6];  // read-back, resource, fence, flush, copy, next frame
 inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read-backs the title waited for, by cause
 inline std::atomic<uint32_t> g_shaders_compiled{0};  // D3DCompile calls (the shader cache missed), for the frames lines
