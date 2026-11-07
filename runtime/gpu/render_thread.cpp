@@ -330,8 +330,32 @@ private:
     uint32_t Scratch(const void* p, uint32_t n) {
         uint32_t size = (n + kHeaderSlot - 1) & ~(kHeaderSlot - 1);
         if (ring_pos_ % kHeaderRing + size > kHeaderRing) ring_pos_ += kHeaderRing - ring_pos_ % kHeaderRing;
+        // copies a ring behind are overwritten: the render thread must have drawn the batches that read them. A title
+        // sending more than a ring of headers ahead of it (frames in between: each step's draws sent again, several
+        // times) had its draws read other draws' copies, textures described by garbage (True Crime)
+        const uint64_t end = ring_pos_ + size;
+        if (end > kHeaderRing) {
+            const uint64_t limit = end - kHeaderRing;
+            auto settle = [&] {
+                while (!ring_marks_.empty() && ring_marks_.front().first <= done_.load()) {
+                    ring_done_ = ring_marks_.front().second;
+                    ring_marks_.pop_front();
+                }
+            };
+            settle();
+            if (ring_done_ < limit) {
+                uint64_t batch = 0;
+                for (const auto& m : ring_marks_)
+                    if (m.second >= limit) {
+                        batch = m.first;
+                        break;
+                    }
+                Wait(batch ? batch : cur_->id, WaitFor::Flush, "header ring");
+                settle();
+            }
+        }
         uint32_t at = ring_ + uint32_t(ring_pos_ % kHeaderRing);
-        ring_pos_ += size;
+        ring_pos_ = end;
         std::memcpy(kernel::HostPtr(at), p, n);
         return at;
     }
@@ -420,6 +444,7 @@ private:
 
     uint64_t Submit() {
         uint64_t id = cur_->id;
+        ring_marks_.emplace_back(id, ring_pos_);  // its header copies all lie before here
         {
             std::lock_guard lock(m_);
             queue_.push_back(cur_);
@@ -532,6 +557,8 @@ private:
     std::array<Recent<uint64_t>, 64> recent_uses_{};
     uint32_t ring_ = 0;
     uint64_t ring_pos_ = 0;
+    std::deque<std::pair<uint64_t, uint64_t>> ring_marks_;  // each submitted batch not yet drawn, and ring_pos_ after its copies
+    uint64_t ring_done_ = 0;                                 // copies before this are drawn
     Batch* cur_ = nullptr;
     State sent_;  // the state as the render thread will have it
     std::unordered_map<uint32_t, uint64_t> last_use_;
