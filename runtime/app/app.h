@@ -236,6 +236,8 @@ struct GameInfo {
     // those frames copy only the vertices that changed since their buffer was last drawn (a sampled fingerprint), reading
     // the rest where the title left them: True Crime's city is some 5000 static buffers a step, 50 MB to copy
     bool interp_copy_changed = false;
+    // the vertices those frames may keep a step, bytes (0: 8 MB); twice this is set aside in guest memory
+    uint32_t interp_kept_bytes = 0;
     // while true, those frames carry on past the step instead of leading up to it: no delay, for what the player aims
     bool (*step_ahead)() = nullptr;
     // the title draws its world a few vertices at a time with nothing changed between (Agent Under Fire: thousands of draws a

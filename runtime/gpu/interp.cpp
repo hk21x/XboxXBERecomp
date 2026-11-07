@@ -12,6 +12,7 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "app/app.h"
@@ -38,8 +39,11 @@ constexpr double kTooLong = 0.6;                              // of a step, a re
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
+constexpr uint32_t kSettleSteps = 30;                         // steps, about, a changed buffer stays the same before it is read in place
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
 constexpr uint32_t kRegionBytes = 8u << 20, kRegionHeaders = 1u << 16;  // kept vertices of a step, in guest memory, two steps' worth
+// GameInfo::interp_kept_bytes, else kRegionBytes
+uint32_t RegionBytes() { return app::kGame.interp_kept_bytes ? app::kGame.interp_kept_bytes : kRegionBytes; }
 constexpr uint32_t kRegisters = 192, kMatrixRegisters = 4;    // the first are the title's transform in every program seen
 
 struct Rec {
@@ -157,9 +161,19 @@ private:
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
     // the buffer's bytes as when it was last drawn, by a fingerprint of 32 samples across it: a static one (the city) is
-    // replayed in place; one the title wrote since, or writes again within the step for other draws, is copied
+    // replayed in place; one the title wrote since, or writes again within the step for other draws, is copied, and is
+    // copied from then on (dynamic)
     bool Unchanged(uint32_t va, uint32_t bytes) {
         const auto* p = static_cast<const uint8_t*>(kernel::HostPtr(va));
+        // the buffer's start, the same 256 bytes whatever range of it a draw uses (fewer only at the end of memory)
+        uint64_t head = 0xCBF29CE484222325ull;
+        const uint32_t head_bytes = mem::IsCommitted(va + 255) ? 256u : std::min(bytes, 256u);
+        for (uint32_t i = 0; i + 8 <= head_bytes; i += 8) {
+            uint64_t v;
+            std::memcpy(&v, p + i, 8);
+            head = (head ^ v) * 0x100000001B3ull;
+        }
+        // samples across this draw's range, for a rewrite past the start
         uint64_t h = 0xCBF29CE484222325ull ^ bytes;
         constexpr uint32_t kSamples = 32, kSample = 8;
         for (uint32_t i = 0; i < kSamples; i++) {
@@ -169,12 +183,27 @@ private:
             h = (h ^ v) * 0x100000001B3ull;
             h ^= h >> 29;
         }
-        if (seen_.size() > (1u << 17)) seen_.clear();
-        uint64_t& last = seen_[uint64_t(va) << 32 | bytes];
-        const bool same = last == h;
-        last = h;
-        return same;
+        // forgotten when large, each on its own: a forgotten buffer is copied until seen again
+        if (seen_.size() > (1u << 20)) seen_.clear();
+        if (heads_.size() > (1u << 20)) heads_.clear(), dynamic_.clear();
+        const auto known = heads_.find(va);
+        const bool head_known = known != heads_.end(), head_same = head_known && known->second == head;
+        heads_[va] = head;
+        const uint64_t key = uint64_t(va) << 32 | bytes;
+        const auto found = seen_.find(key);
+        const bool range_changed = found != seen_.end() && found->second != h;
+        seen_[key] = h;
+        // written since it was last drawn: copied until it has stayed the same for a while (the city streams new pieces
+        // into old memory, which then stay)
+        if ((head_known && !head_same) || range_changed) dynamic_[va] = 0;
+        else if (auto d = dynamic_.find(va); d != dynamic_.end() && ++d->second > kSettleSteps * 4) dynamic_.erase(d);
+        // drawn again in the step with another start: the title refills it per draw (a static one drawn again, by another
+        // pass or over other vertices, starts the same)
+        const auto [at, first] = this_step_.try_emplace(va, head);
+        if (!first && at->second != head) dynamic_[va] = 0;
+        return head_same && !range_changed && !dynamic_.count(va);
     }
+
     bool UploadKept();
     void LogJumps();
     Rec& Next(Rec::Kind kind) {
@@ -219,7 +248,10 @@ private:
     std::vector<Rec> now_, before_;
     size_t count_ = 0, before_count_ = 0;
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
-    std::unordered_map<uint64_t, uint64_t> seen_;  // GameInfo::interp_copy_changed: a buffer's (place and size) fingerprint when last drawn
+    std::unordered_map<uint64_t, uint64_t> seen_;  // GameInfo::interp_copy_changed: a draw's range (place and size) sampled when last drawn
+    std::unordered_map<uint32_t, uint64_t> heads_;  // and its buffer's first 256 bytes
+    std::unordered_map<uint32_t, uint32_t> dynamic_;  // buffers seen to change, and its draws unchanged since: copied
+    std::unordered_map<uint32_t, uint64_t> this_step_;  // buffers drawn so far in this step: the first 256 bytes' fingerprint
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
@@ -254,7 +286,7 @@ void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_
         const uint32_t va = mem::VirtualFromPhysical(data);
         if (!mem::IsCommitted(va) || !mem::IsCommitted(va + uint32_t(bytes) - 1)) continue;
         if (app::kGame.interp_copy_changed && Unchanged(va, uint32_t(bytes))) continue;  // read where the title left it
-        if (kept_bytes_.size() + bytes > kRegionBytes || kept_count_ >= kRegionHeaders) {
+        if (kept_bytes_.size() + bytes > RegionBytes() || kept_count_ >= kRegionHeaders) {
             kept_full_ = true;  // that draw would read what the title wrote after it: the last draws, the HUD, in pieces
             continue;
         }
@@ -269,7 +301,7 @@ void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_
 bool Interpolating::UploadKept() {
     region_ ^= 1;
     if (!region_data_[region_]) {
-        region_data_[region_] = mem::AllocHostContiguous(kRegionBytes, 0x1000);
+        region_data_[region_] = mem::AllocHostContiguous(RegionBytes(), 0x1000);
         region_headers_[region_] = mem::AllocHostContiguous(kRegionHeaders * 12, 0x1000);
     }
     if (!region_data_[region_] || !region_headers_[region_]) return false;
@@ -709,6 +741,7 @@ void Interpolating::Present(const Surface& front) {
     count_ = 0;
     kept_bytes_.clear();
     kept_count_ = 0;
+    this_step_.clear();
     kept_full_ = false;
 }
 }  // namespace
