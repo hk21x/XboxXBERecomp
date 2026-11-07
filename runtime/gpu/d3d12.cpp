@@ -94,6 +94,8 @@ struct Perf {
     double f_pre = 0, f_replace = 0, f_sharpen = 0, f_palette = 0, f_lookup = 0, f_desc = 0, f_view = 0;  // a full bind's steps, ms
     double e_find = 0, e_create = 0, e_check = 0, e_cube = 0;  // its texture entry step: found, made, checked, cube copies
     uint64_t e_cubes = 0;
+    double c_find = 0, c_resolve = 0, c_shrink = 0, c_copy = 0;  // a cube copy's faces: found, resolved, shrunk, copied, ms
+    double s_make = 0;  // Shrink's new textures, ms
     uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
     double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
@@ -2278,13 +2280,24 @@ ID3D12Resource* D3D12Backend::BindReplacement(const Replacement& r, const Textur
 void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
     if (tx.fmt != kBgra || tx.faces == presents_ + 1) return;
     tx.faces = presents_ + 1;
+    auto perf_c = PerfNow();
+    auto step = [&](double& acc) {
+        if (!diag::Perf()) return;
+        auto now = PerfClock::now();
+        acc += std::chrono::duration<double, std::milli>(now - perf_c).count();
+        perf_c = now;
+    };
     for (uint32_t f = 0; f < 6; f++) {
         uint32_t face = d.data + f * FaceSize(d);
         auto it = targets_.find(SizedTargetKey(face, false, d.width, d.height));
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
-        CopySource src = PrepareCopySource(t, {});
+        step(g_perf.c_find);
+        Resolve(t);
+        step(g_perf.c_resolve);
+        CopySource src = PrepareCopySource(t, {});  // Resolve again does nothing
+        step(g_perf.c_shrink);
         if (!src.res) continue;
         D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -2296,6 +2309,7 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         // a shrunk copy is read by the recorded copy: kept until the frame is done
         if (src.down) CurrentFrame().garbage.push_back(src.down);
+        step(g_perf.c_copy);
     }
 }
 
@@ -3814,6 +3828,8 @@ void LogPerf() {
              p.f_palette / n, p.e_find / n + p.e_create / n + p.e_check / n + p.e_cube / n, p.f_desc / n, p.f_view / n);
         LOGR("perf: texture entry per frame, ms: find %.2f, make %.2f (%.2f made), check and upload %.2f, cube copies %.2f (%.1f)",
              p.e_find / n, p.e_create / n, p.newtex / n, p.e_check / n, p.e_cube / n, p.e_cubes / n);
+        LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
+             p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
         static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
         if (p.draws / n >= 500) {
@@ -4610,10 +4626,11 @@ ComPtr<ID3D12Resource> D3D12Backend::Shrink(ID3D12Resource* src, D3D12_RESOURCE_
     if (free_rtv_.empty()) return nullptr;
     if (down) {
         Transition(down.Get(), down_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    } else if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
-                                                    D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&down)))) {
-        return nullptr;
     } else {
+        PerfScope perf_make{g_perf.s_make};
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+                                                 IID_PPV_ARGS(&down))))
+            return nullptr;
         Name(down.Get(), "shrunk copy %ux%u (present %llu)", w, h, (unsigned long long)presents_);
     }
     // borrows the next free view without taking it, only for this recording
