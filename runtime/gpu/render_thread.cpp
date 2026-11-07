@@ -528,7 +528,10 @@ private:
                     vsc |= head[0] < vsc_to && head[0] + head[1] > vsc_from;
                     p += 8 + head[1];
                 }
-                if (vsc || !state_.vsc_gen) state_.vsc_gen++;
+                // the count is the render thread's own, set again after every change: a change sent in whole 64 byte
+                // chunks carries the title's 0 over it (it sits next to vsc)
+                if (vsc || !vsc_count_) vsc_count_++;
+                state_.vsc_gen = vsc_count_;
                 if (c.vs >= 0) state_.vs = b.vs[size_t(c.vs)];
                 if (c.ps >= 0) state_.ps = b.ps[size_t(c.ps)];
                 if (perf) g_perf_state_ns += Ns(t);
@@ -595,6 +598,7 @@ private:
     std::deque<Batch*> queue_;
     std::vector<Batch*> free_;
     std::atomic<uint64_t> done_{0};
+    uint64_t vsc_count_ = 0;  // vertex constant changes so far (State::vsc_gen), only ever up
     std::atomic<uint64_t> wanted_{~0ull};  // the batch the title waits for
     bool defer_ = false;                   // the backend puts work off until Settle
     static constexpr uint32_t kHold = 16;  // batches run before their put off work is settled
