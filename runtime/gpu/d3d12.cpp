@@ -261,8 +261,22 @@ private:
         uint64_t used = 0;
         uint64_t fence = 0;
         std::vector<ComPtr<ID3D12Resource>> garbage;
+        std::vector<ComPtr<ID3D12Resource>> shrinks;  // shrunk copies this frame drew, to Shrink's pool once it is done
         uint32_t srv = 0;
     };
+    // Shrink's new textures took about 0.5 ms each: a cube texture's upscaled faces, shrunk every frame, cost PGR2's
+    // races 1.5 ms a frame. Each shrink still has its own texture within a frame (one shared by all six faces hung the
+    // GPU); a finished frame's wait in a pool for the next of their size, a copy source as Shrink left them
+    static constexpr size_t kShrinkPool = 16;
+    std::unordered_map<uint64_t, std::vector<ComPtr<ID3D12Resource>>> shrink_pool_;
+    void RecycleShrinks(Frame& f) {
+        for (auto& r : f.shrinks) {
+            D3D12_RESOURCE_DESC rd = r->GetDesc();
+            auto& pool = shrink_pool_[uint64_t(rd.Width) << 32 | rd.Height];
+            if (pool.size() < kShrinkPool) pool.push_back(std::move(r));
+        }
+        f.shrinks.clear();
+    }
     struct Alloc {
         ID3D12Resource* res;
         uint64_t off;
@@ -855,6 +869,7 @@ void D3D12Backend::Submit(bool wait) {
         WaitFence(fence_value_);
         f.alloc->Reset();
         f.garbage.clear();
+        RecycleShrinks(f);
         f.used = 0;
         f.srv = 0;
         ring_gen_++;
@@ -1937,8 +1952,8 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         sl.SubresourceIndex = 0;
         cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        // a shrunk copy is read by the recorded copy: kept until the frame is done
-        if (src.down) CurrentFrame().garbage.push_back(src.down);
+        // a shrunk copy is read by the recorded copy: kept until the frame is done, then reused by the next shrink
+        if (src.down) CurrentFrame().shrinks.push_back(src.down);
     }
 }
 
@@ -3150,6 +3165,7 @@ void D3D12Backend::ResetFrame() {
     }
     f.alloc->Reset();
     f.garbage.clear();
+    RecycleShrinks(f);
     f.used = 0;
     f.srv = 0;
     ring_gen_++;
@@ -3702,6 +3718,14 @@ ComPtr<ID3D12Resource> D3D12Backend::Shrink(ID3D12Resource* src, D3D12_RESOURCE_
     D3D12_RESOURCE_STATES down_state = o.into ? o.into_state : D3D12_RESOURCE_STATE_RENDER_TARGET;
     g_perf.shrinks++;
     if (free_rtv_.empty()) return nullptr;
+    if (!down) {
+        auto pool = shrink_pool_.find(uint64_t(w) << 32 | h);
+        if (pool != shrink_pool_.end() && !pool->second.empty()) {
+            down = std::move(pool->second.back());
+            pool->second.pop_back();
+            down_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+    }
     if (down) {
         Transition(down.Get(), down_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     } else if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
