@@ -1951,6 +1951,14 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     sv.Texture2D.MipLevels = 1;
     uint32_t header = s.textures[size_t(stage)];
     if (!header) return nullptr;
+    // a small target drawn from a texture (PGR2's speed camera photo, 160x120): its header and how it is bound, a few
+    const bool small_rt = bound_rt_ && bound_rt_->gw == 160 && bound_rt_->gh == 120;  // TEMPORARY, PGR2 issue 30
+    auto note = [&](const char* how) {
+        if (!small_rt) return;
+        LOG_FIRST(16, "d3d12: small target %08X %ux%u, stage %d header %08X words %08X %08X %08X %08X: %s", bound_rt_->data,
+                  bound_rt_->gw, bound_rt_->gh, stage, header, kernel::R32(header), kernel::R32(header + 4),
+                  kernel::R32(header + 12), kernel::R32(header + 16), how);
+    };
     // a guest texture bound earlier this frame: the same binding (its change check runs once a frame anyway)
     uint64_t memo_now = presents_ << 24 ^ targets_gen_;
     if (stage_memo_key_ != memo_now) {
@@ -1970,6 +1978,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         StageLast& last = stage_last_[stage];
         if (last.valid == memo_now && !std::memcmp(last.words, words, sizeof(words))) {
             g_perf.stage_last++;
+            note("the last bind of this stage, kept (stage memo)");
             info = last.memo.info;
             sv = last.memo.sv;
             stages.replaced[stage] = last.memo.replaced;
@@ -1979,6 +1988,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         auto m = stage_memo_.find(memo_key);
         if (m != stage_memo_.end()) {
             g_perf.stage_memo++;
+            note("a bind earlier this frame, kept (stage memo)");
             std::memcpy(last.words, words, sizeof(words));
             last.valid = memo_now;
             last.memo = m->second;
@@ -1989,7 +1999,16 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         }
     }
     TextureDesc d;
-    if (!Describe(header, d)) return nullptr;
+    if (!Describe(header, d)) {
+        note("not understood (Describe)");
+        return nullptr;
+    }
+    if (small_rt) {
+        auto at = targets_.find(SizedTargetKey(d.data, Format(d.format).depth, d.width, d.height));
+        LOG_FIRST(16, "d3d12: small target %08X: stage %d texture data %08X format %X %ux%u pitch %u linear %d: %s", bound_rt_->data,
+                  stage, d.data, d.format, d.width, d.height, d.pitch, d.linear ? 1 : 0,
+                  at != targets_.end() ? "a target at its data" : "no target at its data (guest memory)");
+    }
     const FormatInfo& fi = Format(d.format);
     info.kind = TextureKind(d);
     info.rect = d.linear;
@@ -2040,7 +2059,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
                  d.height, d.pitch, tit->second.gw, tit->second.gh);
     }
     // a small target drawn from a texture (PGR2's speed camera photo, 160x120, shrinks the frame): what it samples, a few
-    if (bound_rt_ && bound_rt_->gw <= 256 && bound_rt_->gh <= 256 && d.width >= 320) {
+    if (bound_rt_ && bound_rt_->gw == 160 && bound_rt_->gh == 120 && d.width >= 320) {  // TEMPORARY, PGR2 issue 30
         if (tit != targets_.end())
             LOG_FIRST(12, "d3d12: small target %08X %ux%u drawn from texture %08X (format %X, %ux%u) = target %08X %ux%u (host %ux%u, drawn %d, msaa %d dirty %d)",
                       bound_rt_->data, bound_rt_->gw, bound_rt_->gh, d.data, d.format, d.width, d.height, tit->second.data,
@@ -2525,6 +2544,16 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
             CapSave(*t, name);
             bound_rt_ = bound_ds_ = nullptr;  // the save may have drawn: the targets are bound again
         }
+    }
+    {
+        // a draw into a small target (PGR2's speed camera photo, 160x120): what it is, a few
+        uint32_t rw = 0, rh = 0;
+        if (s.rt.header) SurfaceSize(s.rt, rw, rh);
+        if (rw == 160 && rh == 120)  // TEMPORARY, PGR2 issue 30
+            LOG_FIRST(16, "d3d12: draw into small target %08X %ux%u: prim %u count %u vs %08X ps %d tex0 %08X (data %08X fmt %08X size %08X) depth %u blank %u",
+                      s.rt.data, rw, rh, prim, count, s.vs_handle, s.ps ? 1 : 0, s.textures[0],
+                      s.textures[0] ? kernel::R32(s.textures[0] + 4) : 0, s.textures[0] ? kernel::R32(s.textures[0] + 12) : 0,
+                      s.textures[0] ? kernel::R32(s.textures[0] + 16) : 0, s.rs[kRsZEnable], s.blank_format);
     }
     if (DepthCopy(s)) return;
     if (diag::SkippedDraw(s.vs_handle)) {
