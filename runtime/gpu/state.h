@@ -229,6 +229,11 @@ struct State {
     // ultrawide it showed at the sides, or a stale picture did without it (the title clears nothing)
     uint32_t blank_format = 0;
     float squeeze_shift = 0;
+    // a game hook draws full screen 2D of this shape (a 4:3 movie: 4/3; 0 none): screen space draws spanning the frame, and
+    // with pillar_format set only those whose stage 0 texture has that format (the header's format byte), are squeezed
+    // whole to it about the centre, pillarboxed instead of stretched across a wider frame
+    float pillar_aspect = 0;
+    uint32_t pillar_format = 0;
     // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
     // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
     int squeeze_margin = 0;

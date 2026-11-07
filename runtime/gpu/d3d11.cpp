@@ -50,6 +50,7 @@ namespace {
 constexpr UINT kBuffers = 2;
 constexpr DXGI_FORMAT kBgra = DXGI_FORMAT_B8G8R8A8_UNORM;
 constexpr uint64_t kStaleFrames = 8;          // frames a target may go unused and still be read back
+constexpr uint32_t kStaleReadMax = 1 << 20;  // a long unused target read back if unchanged: up to this size
 constexpr uint32_t kVertexRing = 32u << 20;   // dynamic vertex buffer, appended to and started over when full
 constexpr uint32_t kIndexRing = 8u << 20;
 constexpr int kLateSlots = 3;                 // copies in flight per surface locked without a wait
@@ -787,7 +788,14 @@ bool D3D11Backend::ReadBack(ID3D11Texture2D* src, uint32_t w, uint32_t h, std::v
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D11Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
-    if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
+    if (it == targets_.end() || !it->second.drawn) return;
+    // long unused: read back only if its memory is as the target last left it (not reused). PGR2 saves its speed camera
+    // photo, a 160x120 target, seconds after drawing it, and it came out grey
+    if (TargetStale(data)) {
+        if (it->second.bytes > kStaleReadMax || SurfaceSig(it->second.data, it->second.bytes) != it->second.sig) return;
+        LOG_FIRST(8, "d3d11: read-back of %08X (%ux%u), unused for a while but its memory unchanged", data, it->second.gw,
+                  it->second.gh);
+    }
     Target& t = it->second;
     // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
     if (!t.linear32 && !t.swizzled32) {
@@ -1884,6 +1892,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
     SqueezeBeyond(s, c.hud);
+    Pillarbox(s, a, aspect_, stretch, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     SetTexturesAndSamplers(s, a, stages);
     SetViewportScissor(s, size.w, c);

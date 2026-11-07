@@ -35,3 +35,9 @@ inline constexpr bool kVerbose = true;
         static std::atomic<int> _c{0};                     \
         if (_c.fetch_add(1, std::memory_order_relaxed) < (n)) LOGI(__VA_ARGS__); \
     } while (0)
+// the same at report level: written in a release build too (LOG_FIRST's info lines are not)
+#define LOGR_FIRST(n, ...)                                 \
+    do {                                                   \
+        static std::atomic<int> _c{0};                     \
+        if (_c.fetch_add(1, std::memory_order_relaxed) < (n)) LOGR(__VA_ARGS__); \
+    } while (0)

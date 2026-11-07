@@ -2204,6 +2204,18 @@ void Walk(uint32_t end) {
                 a[last] = f;
                 a[2] = 0;
                 a[3] = 1;
+            } else if (m >= 0x1900 && m < 0x1940) {  // 2 shorts, z = 0 and w = 1 (SetVertexData2s: PGR2's speed camera photo
+                                                     // gives its texture coordinates in texels so; dropped, it came out one colour)
+                a += (m - 0x1900) / 4 * 4;
+                a[0] = float(int16_t(v & 0xFFFF));
+                a[1] = float(int16_t(v >> 16));
+                a[2] = 0;
+                a[3] = 1;
+            } else if (m >= 0x1980 && m < 0x1A00) {  // 4 shorts in two words (SetVertexData4s)
+                a += (m - 0x1980) / 8 * 4;
+                last = (m - 0x1980) / 4 & 1;
+                a[last * 2] = float(int16_t(v & 0xFFFF));
+                a[last * 2 + 1] = float(int16_t(v >> 16));
             } else if (m >= 0x1940 && m < 0x1980) {  // 4 bytes
                 a += (m - 0x1940) / 4 * 4;
                 for (int c = 0; c < 4; c++) a[c] = (v >> c * 8 & 0xFF) / 255.0f;
@@ -2308,6 +2320,8 @@ void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
         // and what a title's hooks ask now (gpu::State::squeeze_beyond, blank_format; set as its binds are seen)
         s.squeeze_beyond = g_state.squeeze_beyond;
         s.squeeze_shift = g_state.squeeze_shift;
+        s.pillar_aspect = g_state.pillar_aspect;
+        s.pillar_format = g_state.pillar_format;
         s.blank_format = g_state.blank_format;
         if (!g_backend) continue;
         if (!d->up.empty()) {

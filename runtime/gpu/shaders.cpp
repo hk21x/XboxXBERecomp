@@ -501,13 +501,16 @@ void alphatest(float a) {
     if (!ok) discard;
 }
 // a greater-than alpha test as coverage over a pixel's width of alpha, for an MSAA target; other tests stay as they are.
-// The alpha written does not change. Texels with no alpha at all stay out, whatever the reference
+// The alpha written does not change. Texels with no alpha at all stay out, whatever the reference, except under
+// greater-or-equal 0, which passes everything (PGR2 draws with it, in Washington among others: its alpha 0 texels
+// went missing with Smooth alpha edges on)
 uint alphacover(float a, uint samples) {
     int f = (int)misc.y;
     if (f != 4 && f != 6) {
         alphatest(a);
         return 0xFFFFFFFF;
     }
+    if (f == 6 && misc.x <= 0) return 0xFFFFFFFF;
     float c = saturate((a - misc.x / 255) / max(fwidth(a), 1e-3) + 0.5);
     if (a <= 0 || c <= 0) discard;
     uint n = min((uint)ceil(c * samples), samples);
