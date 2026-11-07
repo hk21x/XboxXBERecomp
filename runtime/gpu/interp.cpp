@@ -156,6 +156,25 @@ private:
         return type < 0x20000 || type == 0x30000 ? 12 : kHeaderBytes;
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
+    // the buffer's bytes as when it was last drawn, by a fingerprint of 32 samples across it: a static one (the city) is
+    // replayed in place; one the title wrote since, or writes again within the step for other draws, is copied
+    bool Unchanged(uint32_t va, uint32_t bytes) {
+        const auto* p = static_cast<const uint8_t*>(kernel::HostPtr(va));
+        uint64_t h = 0xCBF29CE484222325ull ^ bytes;
+        constexpr uint32_t kSamples = 32, kSample = 8;
+        for (uint32_t i = 0; i < kSamples; i++) {
+            const uint32_t at = bytes <= kSample ? 0 : uint32_t(uint64_t(bytes - kSample) * i / (kSamples - 1));
+            uint64_t v = 0;
+            std::memcpy(&v, p + at, std::min(kSample, bytes));
+            h = (h ^ v) * 0x100000001B3ull;
+            h ^= h >> 29;
+        }
+        if (seen_.size() > (1u << 17)) seen_.clear();
+        uint64_t& last = seen_[uint64_t(va) << 32 | bytes];
+        const bool same = last == h;
+        last = h;
+        return same;
+    }
     bool UploadKept();
     void LogJumps();
     Rec& Next(Rec::Kind kind) {
@@ -200,6 +219,7 @@ private:
     std::vector<Rec> now_, before_;
     size_t count_ = 0, before_count_ = 0;
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
+    std::unordered_map<uint64_t, uint64_t> seen_;  // GameInfo::interp_copy_changed: a buffer's (place and size) fingerprint when last drawn
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
@@ -233,6 +253,7 @@ void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_
         if (!data) continue;
         const uint32_t va = mem::VirtualFromPhysical(data);
         if (!mem::IsCommitted(va) || !mem::IsCommitted(va + uint32_t(bytes) - 1)) continue;
+        if (app::kGame.interp_copy_changed && Unchanged(va, uint32_t(bytes))) continue;  // read where the title left it
         if (kept_bytes_.size() + bytes > kRegionBytes || kept_count_ >= kRegionHeaders) {
             kept_full_ = true;  // that draw would read what the title wrote after it: the last draws, the HUD, in pieces
             continue;

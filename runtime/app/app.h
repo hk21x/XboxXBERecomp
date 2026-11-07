@@ -233,6 +233,9 @@ struct GameInfo {
     bool (*texture_bound)(uint32_t header, uint32_t palette) = nullptr;
     // the title draws one frame a step of its game, and the frame cap asks for more: frames in between (gpu/interp.cpp), while true
     bool (*step_interpolation)() = nullptr;
+    // those frames copy only the vertices that changed since their buffer was last drawn (a sampled fingerprint), reading
+    // the rest where the title left them: True Crime's city is some 5000 static buffers a step, 50 MB to copy
+    bool interp_copy_changed = false;
     // while true, those frames carry on past the step instead of leading up to it: no delay, for what the player aims
     bool (*step_ahead)() = nullptr;
     // the title draws its world a few vertices at a time with nothing changed between (Agent Under Fire: thousands of draws a
