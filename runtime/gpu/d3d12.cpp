@@ -364,8 +364,6 @@ private:
     // the frame's resources let go once the GPU is done with them; XBE_KEEP_RELEASED=1 (experiment) keeps every one
     uint64_t released_ = 0;
     std::vector<ComPtr<ID3D12Resource>> kept_;
-    // the cube faces' shrunk copies, one kept per size (Shrink leaves it a copy source): made once, not six times a frame
-    std::unordered_map<uint64_t, ComPtr<ID3D12Resource>> cube_shrinks_;
     void DropGarbage(Frame& f) {
         static const bool keep = [] {
             const char* e = std::getenv("XBE_KEEP_RELEASED");
@@ -2286,19 +2284,8 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
-        // an upscaled face is shrunk into the copy kept for its size, drawn over for each face in turn: the copies
-        // run in order, so the next face's blit waits for the last copy (a new texture per face per frame was 1.6 ms a
-        // frame of PGR2's races, its cars' reflections)
-        ShrinkOptions so;
-        ComPtr<ID3D12Resource>* kept = nullptr;
-        if (t.w != t.gw || t.h != t.gh || t.fmt != kBgra) {
-            kept = &cube_shrinks_[uint64_t(t.gw) << 32 | t.gh];
-            so.into = kept->Get();
-        }
-        CopySource src = PrepareCopySource(t, so);
+        CopySource src = PrepareCopySource(t, {});
         if (!src.res) continue;
-        if (kept && !*kept) *kept = src.down;  // the first: made by Shrink, kept from now on
-        if (kept) src.down = nullptr;          // kept, not left to the frame's garbage
         D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_TEXTURE_COPY_LOCATION dl{tx.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
