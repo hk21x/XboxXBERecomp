@@ -268,7 +268,10 @@ private:
     // a vertex the list might not keep first
     bool Mergeable(const State& s, uint32_t prim, uint32_t count, const uint8_t* indices) const {
         constexpr uint32_t kFlat = 0x1D00;
-        return merge_ && indices && (prim == 5 || prim == 6) && count >= 3 && !(s.vs_handle & 1) && (s.vs_handle & 0xE) != 0x4 &&
+        // vertex programs too with XBE_MERGE_DRAWS=2 (experiment): their constants are state, so a run has the same ones
+        // (not 2D: a title whose programs draw it squeezed is left out, merge_programs_)
+        return merge_ && indices && (prim == 5 || prim == 6) && count >= 3 && (!(s.vs_handle & 1) || merge_programs_) &&
+               (s.vs_handle & 0xE) != 0x4 &&
                !s.input_active && !s.blank_format && !s.simple[kMCountEnable >> 2] && s.simple[kMShadeMode >> 2] != kFlat;
     }
 
@@ -512,6 +515,13 @@ private:
         const char* e = std::getenv("XBE_MERGE_DRAWS");
         bool on = e && *e ? *e != '0' : app::kGame.merge_draws;
         if (on) LOGR("gpu: runs of draws with the same state are merged");
+        return on;
+    }();
+    // not for a title whose programs draw 2D the renderers squeeze per draw (GameInfo::squeeze_screen_programs)
+    const bool merge_programs_ = [] {
+        const char* e = std::getenv("XBE_MERGE_DRAWS");
+        bool on = e && *e == '2' && !app::kGame.squeeze_screen_programs;
+        if (on) LOGR("gpu: XBE_MERGE_DRAWS=2, vertex program draws are merged too (experiment)");
         return on;
     }();
 
