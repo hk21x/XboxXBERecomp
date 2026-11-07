@@ -284,13 +284,40 @@ uint32_t StrideOf(const State& s, const VertexShader& layout, const VertexShader
 constexpr uint32_t kStrideAlign = 4;            // the input assembler reads strides in dwords
 constexpr uint32_t kElementOffsetEnd = 0x10000;  // the element offset is stored as uint16_t
 
+// a stride the input assembler cannot read (not whole dwords: PGR2's 10 byte NORMSHORT3 meshes) is repacked: each
+// vertex's elements copied to aligned places in a whole dword vertex (AddRepacked), cheaper than converting them;
+// an element read past the stride takes the next vertex's bytes, as the console does (PGR2 reads a NORMPACKED3 at
+// byte 10 of its 10 byte vertices)
+uint32_t Restride(uint32_t stride) { return stride % kStrideAlign ? (stride + kStrideAlign - 1) & ~(kStrideAlign - 1) : 0; }
+
+// per stream: whole vertices' worth of the elements' offsets, moved to the buffer's start. 007: Everything or
+// Nothing's MI6 Training gives its third enemy's elements offsets of 60172 to 60196 in a 28 byte stride (the mesh
+// 2149 vertices into its buffer); the input assembler's limit is 2047, and NVIDIA GPUs hung on them
+void StreamShifts(const State& s, const Inputs& inputs, uint32_t* shift) {
+    std::fill(shift, shift + 16, ~0u);
+    for (int k = 0; k < inputs.nregs; k++) {
+        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
+        shift[in.stream] = std::min(shift[in.stream], in.offset);
+    }
+    for (int k = 0; k < inputs.nregs; k++) {
+        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
+        uint32_t stride = StrideOf(s, inputs.layout, in);
+        if (stride && Restride(stride)) continue;  // copied out vertex by vertex: from its first element (see Restride)
+        if (stride && shift[in.stream] >= stride) shift[in.stream] = shift[in.stream] / stride * stride;
+        else shift[in.stream] = 0;
+    }
+}
+
 bool RawReadable(const State& s, const Inputs& inputs) {
+    uint32_t shift[16];
+    StreamShifts(s, inputs, shift);  // the element offset the input assembler gets is past the stream's shift
     for (int k = 0; k < inputs.nregs; k++) {
         const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
         HostElement he = HostFormat(in.type);
         uint32_t stride = StrideOf(s, inputs.layout, in);
-        bool readable = he.format && stride && stride % kStrideAlign == 0 && in.offset < kElementOffsetEnd &&
-                        in.offset % std::min<uint32_t>(he.bytes, 4) == 0;
+        uint32_t align = std::min<uint32_t>(he.bytes, 4);
+        bool readable = he.format && stride && in.offset - shift[in.stream] < kElementOffsetEnd &&
+                        (Restride(stride) || in.offset % align == 0);
         if (!readable) {
             LOG_FIRST(32, "vertex: converted on the CPU: v%d type %02X offset %u stride %u", inputs.regs[k], in.type,
                       in.offset, stride);
@@ -325,6 +352,38 @@ int AddRawBuffer(const State& s, const VertexShader& layout, const VertexShader:
         GatherVertices(s, d, data, stride, g);
         out.buffers[out.buffer_count++] = {g.data(), d.count * stride, stride};
     }
+    return slot;
+}
+
+// a repacked stream (Restride): each vertex's elements copied to their places in a vertex of wide bytes, in range order
+// when dense, else in draw order; an element past the stride reads the next vertex's bytes, as the console does
+int AddRepacked(const State& s, const Inputs& inputs, int stream, const DrawRange& d, bool dense, uint32_t shift,
+                uint32_t wide, const uint32_t* place, Assembled& out) {
+    using namespace kernel;
+    struct Part {
+        uint32_t from, to, bytes;
+    } parts[16];
+    int nparts = 0;
+    uint32_t stride = 0;
+    for (int k = 0; k < inputs.nregs; k++) {
+        int reg = inputs.regs[k];
+        const auto& in = inputs.layout.inputs[size_t(reg)];
+        if (in.stream != stream) continue;
+        stride = StrideOf(s, inputs.layout, in);
+        parts[nparts++] = {in.offset - shift, place[reg], HostFormat(in.type).bytes};
+    }
+    const auto& st = s.streams[size_t(stream)];
+    const uint8_t* data = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(st.vb + kResData)))) + shift;
+    int slot = int(out.buffer_count);
+    auto& g = out.gathered[out.buffer_count];
+    uint32_t n = dense ? d.span : d.count;
+    g.assign(size_t(n) * wide, 0);
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t* v = data + size_t(dense ? d.first_vertex + i : DrawVertex(s, d, i)) * stride;
+        uint8_t* o = &g[size_t(i) * wide];
+        for (int p = 0; p < nparts; p++) std::memcpy(o + parts[p].to, v + parts[p].from, parts[p].bytes);
+    }
+    out.buffers[out.buffer_count++] = {g.data(), n * wide, wide};
     return slot;
 }
 
@@ -414,35 +473,36 @@ bool AssembleRaw(const State& s, const Inputs& inputs, const DrawRange& d, Assem
     int slot[16];
     std::fill(std::begin(slot), std::end(slot), -1);
     uint32_t end[16] = {};  // per stream: the furthest byte an element reads, from the vertex's start
-    // per stream: whole vertices' worth of the elements' offsets, moved to the buffer's start. 007: Everything or
-    // Nothing's MI6 Training gives its third enemy's elements offsets of 60172 to 60196 in a 28 byte stride (the mesh
-    // 2149 vertices into its buffer); the input assembler's limit is 2047, and NVIDIA GPUs hung on them
     uint32_t shift[16];
-    std::fill(std::begin(shift), std::end(shift), ~0u);
-    for (int k = 0; k < inputs.nregs; k++) {
-        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
-        shift[in.stream] = std::min(shift[in.stream], in.offset);
-    }
-    for (int k = 0; k < inputs.nregs; k++) {
-        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
-        uint32_t stride = StrideOf(s, inputs.layout, in);
-        if (stride && shift[in.stream] != ~0u && shift[in.stream] >= stride) shift[in.stream] = shift[in.stream] / stride * stride;
-        else shift[in.stream] = 0;
-    }
+    StreamShifts(s, inputs, shift);
     for (int k = 0; k < inputs.nregs; k++) {
         const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
         end[in.stream] = std::max(end[in.stream], in.offset - shift[in.stream] + HostFormat(in.type).bytes);
     }
+    // repacked streams (Restride): each element's place in the copied vertex, in register order at its alignment
+    uint32_t place[16] = {}, wide[16] = {};
+    for (int k = 0; k < inputs.nregs; k++) {
+        int reg = inputs.regs[k];
+        const auto& in = inputs.layout.inputs[size_t(reg)];
+        if (!Restride(StrideOf(s, inputs.layout, in))) continue;
+        uint32_t bytes = HostFormat(in.type).bytes, align = std::min<uint32_t>(bytes, 4);
+        place[reg] = (wide[in.stream] + align - 1) / align * align;
+        wide[in.stream] = place[reg] + bytes;
+    }
+    for (uint32_t& w : wide) w = (w + kStrideAlign - 1) & ~(kStrideAlign - 1);
     for (int k = 0; k < inputs.nregs; k++) {
         int reg = inputs.regs[k];
         const auto& in = inputs.layout.inputs[size_t(reg)];
         if (slot[in.stream] < 0) {
             uint32_t stride = StrideOf(s, inputs.layout, in);
-            slot[in.stream] = AddRawBuffer(s, inputs.layout, in, d, dense, end[in.stream] > stride ? end[in.stream] - stride : 0,
-                                           shift[in.stream], out);
+            slot[in.stream] = wide[in.stream]
+                                  ? AddRepacked(s, inputs, in.stream, d, dense, shift[in.stream], wide[in.stream], place, out)
+                                  : AddRawBuffer(s, inputs.layout, in, d, dense, end[in.stream] > stride ? end[in.stream] - stride : 0,
+                                                 shift[in.stream], out);
         }
         HostElement he = HostFormat(in.type);
-        out.elements[size_t(reg)] = {he.format, uint8_t(slot[in.stream]), uint16_t(in.offset - shift[in.stream])};
+        uint32_t at = wide[in.stream] ? place[reg] : in.offset - shift[in.stream];
+        out.elements[size_t(reg)] = {he.format, uint8_t(slot[in.stream]), uint16_t(at)};
         out.decode |= uint64_t(he.decode) << (reg * 4);
     }
     out.vertex_count = dense ? d.span : d.count;
