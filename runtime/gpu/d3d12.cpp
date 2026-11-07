@@ -94,6 +94,7 @@ struct Perf {
     double f_pre = 0, f_replace = 0, f_sharpen = 0, f_palette = 0, f_lookup = 0, f_desc = 0, f_view = 0;  // a full bind's steps, ms
     double e_find = 0, e_create = 0, e_check = 0, e_cube = 0;  // its texture entry step: found, made, checked, cube copies
     uint64_t e_cubes = 0;
+    uint64_t vb_reused = 0, vb_reused_bytes = 0;  // vertex ranges already uploaded in the ring
     double c_find = 0, c_resolve = 0, c_shrink = 0, c_copy = 0;  // a cube copy's faces: found, resolved, shrunk, copied, ms
     double s_make = 0;  // Shrink's new textures, ms
     uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
@@ -501,6 +502,17 @@ private:
     // per draw uploads and descriptor tables made earlier in the same ring generation are used again; the generation
     // moves on whenever the upload or descriptor ring starts over
     uint64_t ring_gen_ = 1;
+    // guest vertex ranges uploaded in the current ring (ring_gen_), by address and size: reused by later draws
+    struct VbKey {
+        const uint8_t* src;
+        uint32_t bytes;
+        bool operator==(const VbKey& o) const { return src == o.src && bytes == o.bytes; }
+    };
+    struct VbHash {
+        size_t operator()(const VbKey& k) const { return std::hash<uintptr_t>()(uintptr_t(k.src)) ^ (size_t(k.bytes) << 1); }
+    };
+    std::unordered_map<VbKey, D3D12_GPU_VIRTUAL_ADDRESS, VbHash> vb_seen_;
+    uint64_t vb_gen_ = 0, vb_dirty_ = 0;
     uint64_t vsc_gen_ = 0, dc_gen_ = 0, tables_gen_ = 0;
     D3D12_GPU_VIRTUAL_ADDRESS vsc_va_ = 0, dc_va_ = 0;
     std::vector<uint8_t> vsc_last_, dc_last_;
@@ -2827,11 +2839,37 @@ void D3D12Backend::SetBlendFactorStencilRef(const State& s) {
 
 void D3D12Backend::UploadVertexBuffers(const Assembled& a) {
     D3D12_VERTEX_BUFFER_VIEW vbv[16];
+    // a new ring, or a resource locked for writing since (a vertex buffer the CPU rewrote): nothing kept
+    if (vb_gen_ != ring_gen_ || vb_dirty_ != DirtyGeneration()) {
+        vb_seen_.clear();
+        vb_gen_ = ring_gen_;
+        vb_dirty_ = DirtyGeneration();
+    }
     for (uint32_t i = 0; i < a.buffer_count; i++) {
         const VertexBuffer& b = a.buffers[i];
+        // guest memory uploaded already in this ring: the same range again (a scene drawn again into each reflection
+        // face it updates, PGR2's races). Not the gathered or converted copies, scratch memory used again for others
+        // XBE_VB_REUSE=0: every range uploaded again (to tell a fault from it)
+        static const bool reuse = [] {
+            const char* e = std::getenv("XBE_VB_REUSE");
+            bool on = !(e && *e == '0');
+            if (!on) LOGR("d3d12: XBE_VB_REUSE=0, vertex ranges uploaded for every draw");
+            return on;
+        }();
+        const bool guest = reuse && uintptr_t(b.src) - uintptr_t(kernel::g_base) < (uint64_t(1) << 32);
+        if (guest) {
+            auto it = vb_seen_.find(VbKey{b.src, b.bytes});
+            if (it != vb_seen_.end()) {
+                vbv[i] = {it->second, b.bytes, b.stride};
+                g_perf.vb_reused++;
+                g_perf.vb_reused_bytes += b.bytes;
+                continue;
+            }
+        }
         Alloc vb = Upload(b.bytes, 16);
         std::memcpy(vb.cpu, b.src, b.bytes);
         vbv[i] = {vb.gpu, b.bytes, b.stride};
+        if (guest) vb_seen_[VbKey{b.src, b.bytes}] = vb.gpu;
     }
     cl_->IASetVertexBuffers(0, a.buffer_count, vbv);
 }
@@ -3834,6 +3872,8 @@ void LogPerf() {
              (unsigned long long)p.shaders, (unsigned long long)p.psos, (unsigned long long)p.psos_kept, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
              p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
              p.same_views / n, p.t_targets / n);
+        LOGR("perf: vertex ranges reused per frame: %.0f, %.2f MB not uploaded again", p.vb_reused / n,
+             p.vb_reused_bytes / n / 1048576.0);
         LOGR("perf: stage binds per frame by how found, ms: last %.2f, memo %.2f, target %.2f, full %.2f, empty %.2f",
              p.t_last / n, p.t_memo / n, p.t_target / n, p.t_full / n, p.t_empty / n);
         LOGR("perf: full binds per frame, ms: describe and look up %.2f, replacement %.2f, sharpen %.2f, palette %.2f, "

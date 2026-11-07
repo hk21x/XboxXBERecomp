@@ -52,6 +52,8 @@ bool CopySurfaceMemory(const Surface& src, const Surface& dst, uint32_t count, u
 // the title locked a resource, the next bind re-uploads it
 void MarkDirty(uint32_t resource);
 uint64_t DirtyEpoch(uint32_t data_va);
+// the last epoch MarkDirty gave any resource: unchanged, no resource was locked for writing since
+uint64_t DirtyGeneration();
 
 // A title's own picture for a texture (GameInfo hooks, e.g. a sharper redraw of a HUD atlas): the hardware renderers
 // sample it instead of the guest bytes at data, whatever its size (a linear texture's texel coordinates are taken over
