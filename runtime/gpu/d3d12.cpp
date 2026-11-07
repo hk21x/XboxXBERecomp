@@ -49,6 +49,7 @@ namespace {
 
 constexpr int kFrames = 3;
 constexpr uint64_t kStaleFrames = 8;  // frames a target may go unused and still be read back
+constexpr uint32_t kStaleReadMax = 1 << 20;  // a long unused target read back if unchanged: up to this size
 constexpr uint64_t kUploadSize = 64ull << 20;
 // a draw starting with less than this left in the frame's ring waits for the GPU and starts the ring over
 constexpr uint64_t kUploadReserve = 8ull << 20;
@@ -2616,6 +2617,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
     SqueezeBeyond(s, c.hud);
+    Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud);
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
 
@@ -3531,7 +3533,14 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
-    if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
+    if (it == targets_.end() || !it->second.drawn) return;
+    // long unused: read back only if its memory is as the target last left it (not reused). PGR2 saves its speed camera
+    // photo, a 160x120 target, seconds after drawing it, and it came out grey
+    if (TargetStale(data)) {
+        if (it->second.bytes > kStaleReadMax || MemSig(it->second.data, it->second.bytes) != it->second.sig) return;
+        LOG_FIRST(8, "d3d12: read-back of %08X (%ux%u), unused for a while but its memory unchanged", data, it->second.gw,
+                  it->second.gh);
+    }
     // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
     if (!it->second.linear32 && !it->second.swizzled32) {
         LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit surface", data);
