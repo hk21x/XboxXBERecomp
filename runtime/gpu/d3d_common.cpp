@@ -97,7 +97,8 @@ void KeepShader(uint64_t hash, ID3DBlob* code) {
 }
 
 namespace {
-constexpr char kPipelineCacheMagic[8] = {'X', 'B', 'E', 'P', 'S', 'O', '1', 0};
+// 2: the key takes the geometry shader's hash (lines and points); version 1's blobs had none and are dropped
+constexpr char kPipelineCacheMagic[8] = {'X', 'B', 'E', 'P', 'S', 'O', '2', 0};
 constexpr size_t kPipelineCacheMax = size_t(512) << 20;  // past this it starts again
 struct PipelineCache {
     std::mutex m;
@@ -967,24 +968,25 @@ bool ScreenDraw(const State& s) {
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
 }
 
-Span DrawSpan(const State& s, const Assembled& a, float width) {
-    constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
+// the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
+// cannot be read
+bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
     const VertexBuffer& b = a.buffers[e.buffer];
     const bool converted = !a.vertices.empty();
     uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
-    if (!(a.regs & 1) || !count) return kSpanFrame;
+    if (!(a.regs & 1) || !count) return false;
     if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
                                   e.format != DXGI_FORMAT_R32G32_FLOAT)))
-        return kSpanFrame;
+        return false;
     // the screen x: pretransformed and pass-through programs give it, a matrix program's 2D matrix (OrthoConstants) gives
     // clip x, over the viewport
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
-    if (program && s.vs->screen != 1 && k < 0) return kSpanFrame;
-    float lo = 1e30f, hi = -1e30f, top = 1e30f, bottom = -1e30f;  // top and bottom: screen y, without a matrix
+    if (program && s.vs->screen != 1 && k < 0) return false;
+    lo = 1e30f, hi = -1e30f, top = 1e30f, bottom = -1e30f;
     count = std::min<uint32_t>(count, 4096);
     for (uint32_t i = 0; i < count; i++) {
         float p[4] = {0, 0, 0, 1};
@@ -1005,6 +1007,15 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
         top = std::min(top, p[1]);
         bottom = std::max(bottom, p[1]);
     }
+    return true;
+}
+
+Span DrawSpan(const State& s, const Assembled& a, float width) {
+    constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
+    float lo, hi, top, bottom;
+    if (!ScreenExtent(s, a, lo, hi, top, bottom)) return kSpanFrame;
+    const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+    const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
@@ -1026,6 +1037,15 @@ void SqueezeBeyond(const State& s, float hud[4]) {
     // x' = c + (x + shift - c) k is a squeeze about c + shift k / (1 - k)
     hud[1] += s.squeeze_shift * k / (1 - k);
     hud[0] = -k;
+}
+
+void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4]) {
+    if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1 || aspect <= s.pillar_aspect + 1e-3f) return;
+    if (s.pillar_format && (!s.textures[0] || (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) != s.pillar_format)) return;
+    // only a picture spanning the frame, into a centred box: a panel narrowed in place showed hard edges inside the
+    // vignette drawn over it at its old size (PGR2's title movie)
+    if (DrawSpan(s, a, hud[1] * 2) != kSpanFrame) return;
+    hud[0] = -(s.pillar_aspect / aspect);
 }
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {

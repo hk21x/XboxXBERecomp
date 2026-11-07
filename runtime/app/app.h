@@ -259,6 +259,9 @@ struct GameInfo {
     // the title's 3D sound positions have +x to the left (DirectSound's is to the right): Project Gotham Racing's head relative
     // ones do, so a car passing on the right was heard on the left
     bool sound_x_left = false;
+    // a fixed-function stage with no texture reads (0,0,0,0) as its texture, as the hardware's stage with texture mode NONE
+    // does, not white: True Crime clears its shadow map's border with untextured lines that select the texture
+    bool unbound_texture_zero = false;
 };
 extern const GameInfo kGame;
 

@@ -154,18 +154,39 @@ private:
     // one draw's state, textures, transforms, declaration and first vertex
     void List(const State& s, uint32_t prim, uint32_t start, uint32_t count) {
         FILE* f = list_;
-        std::fprintf(f, "DRAW prim=%u n=%u vs=%X ps=%X rt=%08X zs=%08X tex0=%08X light=%u blend=%u %X %X cw=%X at=%u z=%u zf=%X vp=%u,%u,%ux%u\n", prim, count,
+        std::fprintf(f, "DRAW prim=%u n=%u vs=%X ps=%X rt=%08X zs=%08X tex0=%08X light=%u blend=%u %X %X cw=%X at=%u af=%X ar=%X z=%u zf=%X vp=%u,%u,%ux%u\n", prim, count,
                      s.vs_handle, s.ps ? s.ps->handle : 0, s.rt.data, s.zs.data, s.textures[0], s.rs[kRsLighting], s.simple[kMBlendEnable >> 2],
                      s.simple[kMSrcBlend >> 2], s.simple[kMDestBlend >> 2], s.simple[kMColorWriteEnable >> 2],
-                     s.simple[kMAlphaTestEnable >> 2], s.rs[kRsZEnable], s.simple[kMZFunc >> 2],
+                     s.simple[kMAlphaTestEnable >> 2], s.simple[kMAlphaFunc >> 2], s.simple[kMAlphaRef >> 2], s.rs[kRsZEnable],
+                     s.simple[kMZFunc >> 2],
                      s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h);
+        if (s.scissor_count) {  // the title's scissor rectangles (SetScissors)
+            std::fprintf(f, "  scissors %u:", s.scissor_count);
+            for (uint32_t i = 0; i < s.scissor_count && i < 8; i++)
+                std::fprintf(f, " %u,%u-%u,%u", s.scissors[i * 4], s.scissors[i * 4 + 1], s.scissors[i * 4 + 2], s.scissors[i * 4 + 3]);
+            std::fprintf(f, "\n");
+        }
         const auto& t0 = s.tss[0];
         TextureDesc d;
         if (s.textures[0] && Describe(s.textures[0], d))
             std::fprintf(f, "  tex %ux%u fmt %X data %08X cop %u %X %X aop %u %X %X\n", d.width, d.height, d.format, d.data, t0[kTssColorOp],
                          t0[kTssColorArg1], t0[kTssColorArg2], t0[kTssAlphaOp], t0[kTssAlphaArg1], t0[kTssAlphaArg2]);
-        std::fprintf(f, "  ttf %X tci %X addr %u %u t16", t0[kTssTextureTransformFlags], t0[kTssTexCoordIndex], t0[kTssAddressU],
-                     t0[kTssAddressV]);
+        else  // no texture: the stage's operations still say what the draw writes
+            std::fprintf(f, "  no texture cop %u %X %X aop %u %X %X tfactor %08X\n", t0[kTssColorOp], t0[kTssColorArg1], t0[kTssColorArg2],
+                         t0[kTssAlphaOp], t0[kTssAlphaArg1], t0[kTssAlphaArg2], s.rs[kRsTextureFactor]);
+        // the other stages: their texture, address modes, border colour and filters (projected shadow maps and such)
+        for (int i = 1; i < 4; i++) {
+            if (!s.textures[i]) continue;
+            const auto& t = s.tss[i];
+            TextureDesc di;
+            const bool described = Describe(s.textures[i], di);
+            std::fprintf(f, "  stage %d tex %08X %ux%u fmt %X addr %u %u border %08X filter %u %u ttf %X tci %X\n", i, s.textures[i],
+                         described ? di.width : 0, described ? di.height : 0, described ? di.format : 0, t[kTssAddressU],
+                         t[kTssAddressV], t[kTssBorderColor], t[kTssMagFilter], t[kTssMinFilter], t[kTssTextureTransformFlags],
+                         t[kTssTexCoordIndex]);
+        }
+        std::fprintf(f, "  ttf %X tci %X addr %u %u border %08X t16", t0[kTssTextureTransformFlags], t0[kTssTexCoordIndex],
+                     t0[kTssAddressU], t0[kTssAddressV], t0[kTssBorderColor]);
         auto matrix = [&](const char* name, uint32_t which) {
             std::fprintf(f, "%s", name);
             for (float v : s.transforms[which]) std::fprintf(f, " %g", v);
