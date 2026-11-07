@@ -87,8 +87,8 @@ struct Perf {
     double wait = 0;
     double swap = 0;
     double sync = 0;
-    double copy_wait = 0;   // a list waited for the helpers' copies, ms (inside the time of whatever sent it)
-    uint64_t deferred = 0;  // bytes handed to them
+    double settle = 0;                      // put off vertex copies, ms
+    uint64_t deferred = 0, settles = 0;     // their bytes, and the times they were run
     // counts and bytes
     uint64_t draws = 0;
     uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
@@ -313,10 +313,8 @@ public:
     bool DeliverLate(uint32_t data) override;
     void RecordLate(uint32_t data) override;
     void Flush() override;
-    bool DeferWork(CopyPool* pool) override {
-        pool_ = pool;
-        return pool_ != nullptr;
-    }
+    bool DeferWork(bool on) override { return defer_ = on && vcopies_.On(); }
+    void Settle() override;
     void SetGamma(const uint8_t* ramp) override;
     void ClearReport() override { counted_.clear(); }
     // done once the list being recorded, the next fence value, has run
@@ -462,7 +460,7 @@ private:
     void SetBlendFactorStencilRef(const State& s);
     void DrawGeometry(const Assembled& a);
     void UploadVertexBuffers(const Assembled& a);
-    void WaitCopies();
+    void RunCopies();
     // visibility tests
     bool EnsureQueries();
     uint32_t BeginCountedDraw(const State& s);
@@ -751,7 +749,8 @@ private:
         std::string text;
     };
     std::vector<CopyNote> list_copies_;
-    CopyPool* pool_ = nullptr;  // copies handed to helpers (DeferWork), waited for before a list is sent
+    CopyPool vcopies_;     // guest vertex bytes put off (DeferWork), copied before the GPU or the title needs them
+    bool defer_ = false;
     std::deque<std::vector<CopyNote>> sent_copies_;
     void CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, const D3D12_TEXTURE_COPY_LOCATION* src,
                     const D3D12_BOX* box);
@@ -1068,14 +1067,22 @@ void D3D12Backend::Begin() {
     nvmark::Mark(lists_, 0xFFFFF);  // the list's start
 }
 
-void D3D12Backend::WaitCopies() {
-    if (!pool_) return;
-    PerfScope perf{g_perf.copy_wait};
-    pool_->Wait();
+// the render thread's, timed apart; Submit's own is in the time of whatever submitted
+void D3D12Backend::Settle() {
+    if (!vcopies_.Pending()) return;
+    PerfScope perf{g_perf.settle};
+    RunCopies();
+}
+
+void D3D12Backend::RunCopies() {
+    if (!vcopies_.Pending()) return;
+    g_perf.deferred += vcopies_.Pending();
+    g_perf.settles++;
+    vcopies_.Run();
 }
 
 void D3D12Backend::Submit(bool wait) {
-    WaitCopies();  // the list reads the copies' upload memory
+    RunCopies();  // the list reads the copies' upload memory
     if (HRESULT hr = cl_->Close(); FAILED(hr)) {
         LOG_FIRST(4, "d3d12: command list close failed %08X (device %08X)", unsigned(hr), unsigned(dev_->GetDeviceRemovedReason()));
         ReportRemoved("closing a command list");
@@ -2846,10 +2853,10 @@ void D3D12Backend::UploadVertexBuffers(const Assembled& a) {
     for (uint32_t i = 0; i < a.buffer_count; i++) {
         const VertexBuffer& b = a.buffers[i];
         Alloc vb = Upload(b.bytes, 16);
-        // guest memory stays as it is until the render thread tells the title these draws are done (the pool's copies
-        // first); gathered or converted bytes are in scratch the next draw reuses
-        if (pool_ && uintptr_t(b.src) - uintptr_t(kernel::g_base) < (1ull << 32))
-            pool_->Add(vb.cpu, b.src, b.bytes), g_perf.deferred += b.bytes;
+        // guest memory stays as it is until the render thread tells the title these draws are done (Settle first);
+        // gathered or converted bytes are in scratch the next draw reuses
+        if (defer_ && uintptr_t(b.src) - uintptr_t(kernel::g_base) < (1ull << 32))
+            vcopies_.Add(vb.cpu, b.src, b.bytes);
         else
             std::memcpy(vb.cpu, b.src, b.bytes);
         vbv[i] = {vb.gpu, b.bytes, b.stride};
@@ -2864,12 +2871,7 @@ void D3D12Backend::DrawGeometry(const Assembled& a) {
     if (a.index_count) {
         uint32_t ibytes = a.index_count * (a.index16 ? 2 : 4);
         Alloc ib = Upload(ibytes, 4);
-        // the title's own indices are in the render thread's batch, kept until the pool has copied them; a rebuilt
-        // list is scratch
-        if (pool_ && a.index16)
-            pool_->Add(ib.cpu, a.index_src, ibytes), g_perf.deferred += ibytes;
-        else
-            std::memcpy(ib.cpu, a.index_src, ibytes);
+        std::memcpy(ib.cpu, a.index_src, ibytes);
         D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, ibytes, a.index16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
         cl_->IASetIndexBuffer(&ibv);
         cl_->DrawIndexedInstanced(a.index_count, 1, 0, a.base_vertex, 0);
@@ -3830,7 +3832,7 @@ void LogPerf() {
     if (el >= 1000.0) {
         Perf& p = g_perf;
         double n = double(perf_frames);
-        double host = p.draw + p.clear + p.copy + p.present + p.sync;
+        double host = p.draw + p.clear + p.copy + p.present + p.sync + p.settle;
         LOGR("perf: %.1f fps %.2f ms/frame | host %.2f (draw %.2f: assemble %.2f bind %.2f [check %.2f, upload %.2f] "
              "shaders %.2f pso %.2f consts %.2f tables %.2f setup %.2f geometry %.2f "
              "compile %.2f; clear %.2f copy %.2f sync %.2f present %.2f [swap %.2f wait %.2f]) other %.2f",
@@ -3864,8 +3866,8 @@ void LogPerf() {
              p.f_palette / n, p.e_find / n + p.e_create / n + p.e_check / n + p.e_cube / n, p.f_desc / n, p.f_view / n);
         LOGR("perf: texture entry per frame, ms: find %.2f, make %.2f (%.2f made), check and upload %.2f, cube copies %.2f (%.1f)",
              p.e_find / n, p.e_create / n, p.newtex / n, p.e_check / n, p.e_cube / n, p.e_cubes / n);
-        LOGR("perf: helpers' copies per frame: %.2f MB, lists waited %.2f ms for them", p.deferred / n / 1048576.0,
-             p.copy_wait / n);
+        LOGR("perf: put off vertex copies per frame: %.2f ms between lists, %.1f MB in %.1f runs", p.settle / n,
+             p.deferred / n / 1048576.0, p.settles / n);
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
