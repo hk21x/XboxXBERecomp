@@ -91,6 +91,7 @@ struct Perf {
     uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
     uint64_t stage_last = 0, stage_memo = 0, stage_target = 0, stage_full = 0;  // bound stages, by how they were found
     double t_last = 0, t_memo = 0, t_target = 0, t_full = 0, t_empty = 0;      // the time they took, ms, by the same
+    double f_pre = 0, f_replace = 0, f_sharpen = 0, f_palette = 0, f_lookup = 0, f_desc = 0, f_view = 0;  // a full bind's steps, ms
     uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
     double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
@@ -2133,6 +2134,13 @@ void ReadStagePalette(const State& s, int stage, const TextureDesc& d, StagePale
 ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                                DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
+    auto perf_f = PerfNow();
+    auto step = [&](double& acc) {
+        if (!diag::Perf()) return;
+        auto now = PerfClock::now();
+        acc += std::chrono::duration<double, std::milli>(now - perf_f).count();
+        perf_f = now;
+    };
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
@@ -2142,10 +2150,13 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             return res;
         }
     }
+    step(g_perf.f_replace);
     if (draw_2d_) Sharpen2D(d);
     else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
+    step(g_perf.f_sharpen);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
+    step(g_perf.f_palette);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
     Tex& tx = textures_[key];
     uint32_t total = TotalSize(d);
@@ -2176,12 +2187,15 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
         }
     }
     if (d.cube && !fi.depth) CopyCubeTargets(tx, d);
+    step(g_perf.f_lookup);  // the texture's entry, its change check and any upload
     if (stage == 0) {
         D3D12_RESOURCE_DESC rd = tx.res->GetDesc();
         stage0_.tw = uint32_t(rd.Width), stage0_.th = rd.Height, stage0_.tl = rd.MipLevels, stage0_.tf = rd.Format;
         stage0_.tmade = tx.made, stage0_.tu = tx.uploads;
     }
+    step(g_perf.f_desc);
     FillTextureView(tx, d, stages.sv[stage]);
+    step(g_perf.f_view);
     // XBE_NO_SHADOW=1 (experiment): a depth texture read as a plain float texture, no comparison sampler
     static const bool no_shadow = [] {
         const char* e = std::getenv("XBE_NO_SHADOW");
@@ -2335,6 +2349,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
             return m->second.res;
         }
     }
+    auto perf_pre = PerfNow();  // XBE_PERF: a full bind's steps
     TextureDesc d;
     if (!Describe(header, d)) return nullptr;
     const FormatInfo& fi = Format(d.format);
@@ -2400,6 +2415,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
     g_perf.stage_full++;
+    g_perf.f_pre += PerfMs(perf_pre);
     ID3D12Resource* res = BindGuestTexture(s, stage, d, fi, stages);
     if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage], stage0_.tw, stage0_.th, stage0_.tl, stage0_.tf, stage0_.tu, stage0_.tmade};
     return res;
@@ -3785,6 +3801,9 @@ void LogPerf() {
              p.same_views / n, p.t_targets / n);
         LOGR("perf: stage binds per frame by how found, ms: last %.2f, memo %.2f, target %.2f, full %.2f, empty %.2f",
              p.t_last / n, p.t_memo / n, p.t_target / n, p.t_full / n, p.t_empty / n);
+        LOGR("perf: full binds per frame, ms: describe and look up %.2f, replacement %.2f, sharpen %.2f, palette %.2f, "
+             "texture entry and check %.2f, stage 0 desc %.2f, view %.2f", p.f_pre / n, p.f_replace / n, p.f_sharpen / n,
+             p.f_palette / n, p.f_lookup / n, p.f_desc / n, p.f_view / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
         static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
         if (p.draws / n >= 500) {
