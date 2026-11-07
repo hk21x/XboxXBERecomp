@@ -455,11 +455,6 @@ uint64_t DirtyEpoch(uint32_t data) {
     return it == g_dirty.end() ? 0 : it->second;
 }
 
-uint64_t DirtyGeneration() {
-    std::lock_guard<std::mutex> lock(g_dirty_lock);
-    return g_epoch;
-}
-
 namespace {
 std::mutex g_replace_lock;
 std::unordered_map<uint32_t, std::shared_ptr<const Replacement>> g_replace;
