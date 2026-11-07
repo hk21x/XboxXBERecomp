@@ -539,6 +539,13 @@ private:
             for (const Cmd& c : b->cmds) Execute(*b, c);
             if (perf) g_perf_batch_ns += Ns(t);
             uint64_t id = b->id;
+            if (pre_) {
+                {
+                    std::lock_guard lock(m_);
+                    ran_ = id;
+                }
+                ran_cv_.notify_all();
+            }
             b->cmds.clear();
             b->bytes.clear();
             b->vs.clear();
@@ -598,9 +605,10 @@ private:
 
     // The prep thread, one step before the render thread (XBE_PRE_ASSEMBLE, on unless 0): it takes the title's batches
     // first, keeps its own copy of the state and assembles their draws (gpu::Assemble reads only the state, the
-    // indices and guest memory) into pre_ring_, then hands the batch on. After a command that may write guest memory
-    // on the render thread (anything but state, draws and clears: read-backs, copies, presents) the batch's later
-    // draws are left to the render thread, so a draw never reads vertices from before such a command.
+    // indices and guest memory) into pre_ring_, then hands the batch on. A command that may write guest memory on the
+    // render thread (all but state, draws, clears, gamma and report clears: read-backs, copies, presents, reports)
+    // leaves its batch's later draws to the render thread, and the next batch waits until the render thread has run
+    // this one: a draw never reads vertices from before such a command.
     void Prep() {
         NameThread(L"render prep");
         for (;;) {
@@ -611,6 +619,11 @@ private:
                 if (queue_.empty()) break;
                 b = queue_.front();
                 queue_.pop_front();
+            }
+            if (wait_for_) {
+                std::unique_lock lock(m_);
+                ran_cv_.wait(lock, [&] { return ran_ >= wait_for_; });
+                wait_for_ = 0;
             }
             static const bool perf = diag::Perf();
             auto t = perf ? Clock::now() : Clock::time_point{};
@@ -626,8 +639,9 @@ private:
                     c.pre_ok = Assemble(prep_state_, c.a, c.b, c.c, c.d ? b->bytes.data() + c.data : nullptr, pre_ring_[slot]);
                     c.pre = int32_t(slot);
                     pre_made_++;
-                } else if (c.op != Op::Clear) {
+                } else if (c.op != Op::Clear && c.op != Op::Gamma && c.op != Op::ClearReport) {
                     ahead = false;
+                    wait_for_ = b->id;
                 }
             }
             if (perf) g_perf_prep_ns += Ns(t);
@@ -747,6 +761,9 @@ private:
     State prep_state_;
     std::deque<Batch*> ready_;
     std::condition_variable ready_cv_;
+    uint64_t ran_ = 0;       // the last batch the render thread ran (under m_)
+    uint64_t wait_for_ = 0;  // the prep thread's: a batch that may write guest memory, run before the next is assembled
+    std::condition_variable ran_cv_;
 };
 
 }  // namespace
