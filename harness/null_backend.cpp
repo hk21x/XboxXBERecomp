@@ -171,6 +171,9 @@ private:
         if (s.textures[0] && Describe(s.textures[0], d))
             std::fprintf(f, "  tex %ux%u fmt %X data %08X cop %u %X %X aop %u %X %X\n", d.width, d.height, d.format, d.data, t0[kTssColorOp],
                          t0[kTssColorArg1], t0[kTssColorArg2], t0[kTssAlphaOp], t0[kTssAlphaArg1], t0[kTssAlphaArg2]);
+        else  // no texture: the stage's operations still say what the draw writes
+            std::fprintf(f, "  no texture cop %u %X %X aop %u %X %X tfactor %08X\n", t0[kTssColorOp], t0[kTssColorArg1], t0[kTssColorArg2],
+                         t0[kTssAlphaOp], t0[kTssAlphaArg1], t0[kTssAlphaArg2], s.rs[kRsTextureFactor]);
         // the other stages: their texture, address modes, border colour and filters (projected shadow maps and such)
         for (int i = 1; i < 4; i++) {
             if (!s.textures[i]) continue;

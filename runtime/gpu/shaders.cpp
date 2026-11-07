@@ -1010,7 +1010,7 @@ std::string PixelHlsl(const PixelKey& k) {
             else if (t.kind == kTex2D) body += F("float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, uv.c_str());
             else if (t.kind == kTexCube && !(cube = Hooks().Cube(t, i, F("tc%d.xyz", i))).empty()) body += F("float4 t%d = %s;\n", i, cube.c_str());
             else if (t.kind) body += F("float4 t%d = tex%d.Sample(smp%d, tc%d.xyz);\n", i, i, i, i);
-            else body += F("float4 t%d = float4(1,1,1,1);\n", i);
+            else body += F("float4 t%d = float4(%s);\n", i, app::kGame.unbound_texture_zero ? "0,0,0,0" : "1,1,1,1");
             body += Hooks().Fetched(t, i);
             if (t.flags & kTexDepthBytes) body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, DepthBytesArg(t.flags));
             if (t.flags & kTexOpaque) body += F("t%d.a = 1;\n", i);
