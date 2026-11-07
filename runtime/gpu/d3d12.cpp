@@ -92,6 +92,8 @@ struct Perf {
     uint64_t stage_last = 0, stage_memo = 0, stage_target = 0, stage_full = 0;  // bound stages, by how they were found
     double t_last = 0, t_memo = 0, t_target = 0, t_full = 0, t_empty = 0;      // the time they took, ms, by the same
     double f_pre = 0, f_replace = 0, f_sharpen = 0, f_palette = 0, f_lookup = 0, f_desc = 0, f_view = 0;  // a full bind's steps, ms
+    double e_find = 0, e_create = 0, e_check = 0, e_cube = 0;  // its texture entry step: found, made, checked, cube copies
+    uint64_t e_cubes = 0;
     uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
     double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
@@ -2161,6 +2163,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     Tex& tx = textures_[key];
     uint32_t total = TotalSize(d);
     bool same = SameTexture(tx, d);
+    step(g_perf.e_find);
     if (!same && !CreateTexture(tx, d, fi, key)) return nullptr;
     if (!same) {
         tx.made = presents_;
@@ -2169,6 +2172,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
              textures_.size(), (unsigned long long)presents_, d.data, d.format, d.width, d.height, d.depth, d.levels,
              d.cube ? ", cube" : "", d.linear ? ", linear" : "", d.pitch);
     }
+    step(g_perf.e_create);
     // cheap change check once per frame: lock epochs plus a sample of the bytes
     if (tx.frame != presents_ + 1 || !same || tx.palette != palette.hash) {
         tx.frame = presents_ + 1;
@@ -2186,8 +2190,12 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             UploadTexture(tx, d, fi, p, palette.va ? palette.colours : nullptr, same);
         }
     }
-    if (d.cube && !fi.depth) CopyCubeTargets(tx, d);
-    step(g_perf.f_lookup);  // the texture's entry, its change check and any upload
+    step(g_perf.e_check);  // the change check and any upload
+    if (d.cube && !fi.depth) {
+        CopyCubeTargets(tx, d);
+        g_perf.e_cubes++;
+    }
+    step(g_perf.e_cube);
     if (stage == 0) {
         D3D12_RESOURCE_DESC rd = tx.res->GetDesc();
         stage0_.tw = uint32_t(rd.Width), stage0_.th = rd.Height, stage0_.tl = rd.MipLevels, stage0_.tf = rd.Format;
@@ -3803,7 +3811,9 @@ void LogPerf() {
              p.t_last / n, p.t_memo / n, p.t_target / n, p.t_full / n, p.t_empty / n);
         LOGR("perf: full binds per frame, ms: describe and look up %.2f, replacement %.2f, sharpen %.2f, palette %.2f, "
              "texture entry and check %.2f, stage 0 desc %.2f, view %.2f", p.f_pre / n, p.f_replace / n, p.f_sharpen / n,
-             p.f_palette / n, p.f_lookup / n, p.f_desc / n, p.f_view / n);
+             p.f_palette / n, p.e_find / n + p.e_create / n + p.e_check / n + p.e_cube / n, p.f_desc / n, p.f_view / n);
+        LOGR("perf: texture entry per frame, ms: find %.2f, make %.2f (%.2f made), check and upload %.2f, cube copies %.2f (%.1f)",
+             p.e_find / n, p.e_create / n, p.newtex / n, p.e_check / n, p.e_cube / n, p.e_cubes / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
         static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
         if (p.draws / n >= 500) {
