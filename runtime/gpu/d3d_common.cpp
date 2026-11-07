@@ -18,6 +18,7 @@
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "kernel/kernel.h"
+#include "kernel/memory.h"
 
 namespace gpu {
 
@@ -405,6 +406,14 @@ uint32_t GuestPitch(uint32_t width) { return (width * 4 + 63) & ~63u; }
 
 // a surface's bytes hashed: up to kSigWholeMax whole, a bigger one as evenly spaced samples
 uint64_t SurfaceSig(uint32_t data, uint32_t total) {
+    // a size that runs past committed memory (a texture's computed size over a buffer near the end of the host's own
+    // memory) is cut at its last committed page: reading on faulted (True Crime, 2026-11-07)
+    if (total && !mem::IsCommitted(data + total - 1)) {
+        const uint32_t was = total;
+        while (total && !mem::IsCommitted(data + total - 1)) total = total > 0x1000 ? ((total - 1) & ~0xFFFu) : 0;
+        LOG_FIRST(8, "gpu: a surface at %08X of %X bytes runs past committed memory: %X hashed", data, was, total);
+        if (!total) return Hash(&was, sizeof(was));
+    }
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(data));
     uint64_t sig = Hash(&total, sizeof(total));
     if (total <= kSigWholeMax) return Hash(p, total, sig);
