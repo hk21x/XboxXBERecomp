@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include <dxgiformat.h>
+#include <emmintrin.h>
 
 #include "core/log.h"
 #include "kernel/kernel.h"
@@ -229,7 +230,22 @@ bool Pretransformed(const State& s) {
 IndexBounds IndexRange(const uint8_t* ip, uint32_t count) {
     uint16_t lo16 = 0xFFFF;
     uint16_t hi16 = 0;
-    for (uint32_t i = 0; i < count; i++) {
+    uint32_t i = 0;
+    // 8 at a time: SSE2 has signed 16 bit min and max only, so each index is offset by 0x8000 first
+    if (count >= 16) {
+        const __m128i flip = _mm_set1_epi16(int16_t(0x8000));
+        __m128i lo = _mm_set1_epi16(0x7FFF), hi = _mm_set1_epi16(int16_t(0x8000));
+        for (; i + 8 <= count; i += 8) {
+            __m128i v = _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(ip + i * 2)), flip);
+            lo = _mm_min_epi16(lo, v);
+            hi = _mm_max_epi16(hi, v);
+        }
+        alignas(16) uint16_t l[8], h[8];
+        _mm_store_si128(reinterpret_cast<__m128i*>(l), _mm_xor_si128(lo, flip));
+        _mm_store_si128(reinterpret_cast<__m128i*>(h), _mm_xor_si128(hi, flip));
+        for (int k = 0; k < 8; k++) lo16 = std::min(lo16, l[k]), hi16 = std::max(hi16, h[k]);
+    }
+    for (; i < count; i++) {
         uint16_t v;
         std::memcpy(&v, ip + i * 2, 2);
         lo16 = std::min(lo16, v);
@@ -534,6 +550,8 @@ bool Assemble(const State& state, uint32_t prim, uint32_t start, uint32_t count,
     // the vertex range the draw reads
     IndexBounds bounds = {0, count - 1};
     if (ip) bounds = IndexRange(ip, count);
+    out.index_first = bounds.first;
+    out.index_last = bounds.last;
     DrawRange d;
     d.prim = prim;
     d.start = start;

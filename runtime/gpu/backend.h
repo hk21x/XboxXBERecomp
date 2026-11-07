@@ -14,6 +14,8 @@ enum : uint32_t {
     kClearStencil = 0x02,
 };
 
+class CopyPool;
+
 class Backend {
 public:
     virtual ~Backend() = default;
@@ -36,11 +38,10 @@ public:
     virtual bool DeliverLate(uint32_t) { return false; }
     virtual void RecordLate(uint32_t) {}
     virtual void Flush() = 0;
-    // the render thread: a draw may put CPU work off (copying guest vertex bytes into upload memory) once
-    // DeferWork(true) is called, until Settle, which the render thread calls before it tells the title the draws are
-    // done (the title may then rewrite that guest memory); a backend runs it too before the GPU reads the memory
-    virtual bool DeferWork(bool) { return false; }  // true: it does
-    virtual void Settle() {}
+    // the render thread: a draw may hand copies into upload memory (guest vertex bytes, the indices the render thread
+    // holds) to the pool's helpers; the render thread tells the title the draws are done once the pool has copied them,
+    // and the backend waits for the pool before it sends a list. true: the backend does
+    virtual bool DeferWork(CopyPool*) { return false; }
     // as Flush, but the caller need not wait for it: the render thread runs it in turn (reports written once the GPU
     // is past them); a backend that draws at once just flushes
     virtual void Kick() { Flush(); }

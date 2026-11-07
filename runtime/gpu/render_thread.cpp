@@ -27,6 +27,7 @@
 #include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/copy_pool.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 
@@ -105,7 +106,8 @@ public:
     explicit Threaded(std::unique_ptr<Backend> inner) : inner_(std::move(inner)), ranges_(StateRanges()) {
         ring_ = mem::AllocSystem(kHeaderRing, 64);
         cur_ = NewBatch();
-        defer_ = inner_->DeferWork(true);
+        pool_ = CopyPool::Make([this](uint64_t ticket) { Settled(ticket); });
+        defer_ = pool_ && inner_->DeferWork(pool_);
         std::thread([this] { Run(); }).detach();
     }
     ~Threaded() override {
@@ -437,12 +439,10 @@ private:
         if (!id || done_.load() >= id) return;
         if (id >= cur_->id) id = Submit();
         auto t = Clock::now();
-        wanted_.store(id);  // the render thread settles once it has run this batch, not after more
         {
             std::unique_lock lock(m_);
             done_cv_.wait(lock, [&] { return done_.load() >= id; });
         }
-        wanted_.store(~0ull);
         uint64_t ns = Ns(t);
         g_perf_wait_ns += ns;
         g_perf_wait_kind_ns[size_t(kind)] += ns;
@@ -457,29 +457,12 @@ private:
         if (auto set = reinterpret_cast<SetDescription>(
                 reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
             set(GetCurrentThread(), L"render");
-        // A batch is done (done_) once the backend settled the work its draws put off. That is done for several
-        // batches together: when no batch waits, after kHold of them, or once the title waits for one already run.
-        uint64_t unsettled = 0;
-        uint32_t held = 0;
-        auto settle = [&] {
-            inner_->Settle();
-            {
-                std::lock_guard lock(m_);
-                done_.store(unsettled);
-            }
-            done_cv_.notify_all();
-            unsettled = 0;
-            held = 0;
-        };
+        // With a pool, a batch is done (done_) once the pool's helpers copied what its draws handed them: the batch
+        // is held until then (its indices are copied from it), and Settled frees it
         for (;;) {
             Batch* b;
             {
                 std::unique_lock lock(m_);
-                if (queue_.empty() && unsettled) {
-                    lock.unlock();
-                    settle();
-                    continue;
-                }
                 cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
                 if (queue_.empty()) break;
                 b = queue_.front();
@@ -487,25 +470,51 @@ private:
             }
             for (const Cmd& c : b->cmds) Execute(*b, c);
             uint64_t id = b->id;
-            b->cmds.clear();
-            b->bytes.clear();
-            b->vs.clear();
-            b->ps.clear();
+            if (defer_) {
+                uint64_t ticket = pool_->Close();
+                std::lock_guard lock(m_);
+                held_.push_back({id, ticket, b});
+                Release();
+                continue;
+            }
+            Clean(*b);
             {
                 std::lock_guard lock(m_);
                 free_.push_back(b);
-                if (!defer_) done_.store(id);
+                done_.store(id);
             }
-            if (!defer_) {
-                done_cv_.notify_all();
-                continue;
-            }
-            unsettled = id;
-            if (++held >= kHold || wanted_.load() <= id) settle();
+            done_cv_.notify_all();
         }
         std::lock_guard lock(m_);
         exited_ = true;
         done_cv_.notify_all();
+    }
+
+    static void Clean(Batch& b) {
+        b.cmds.clear();
+        b.bytes.clear();
+        b.vs.clear();
+        b.ps.clear();
+    }
+
+    // a helper (or the render thread): every ticket up to this one is copied
+    void Settled(uint64_t ticket) {
+        std::lock_guard lock(m_);
+        settled_ = std::max(settled_, ticket);
+        Release();
+    }
+
+    // under m_: the held batches whose copies are done are freed, the newest of them done
+    void Release() {
+        bool any = false;
+        while (!held_.empty() && held_.front().ticket <= settled_) {
+            Clean(*held_.front().batch);
+            free_.push_back(held_.front().batch);
+            done_.store(held_.front().id);
+            held_.pop_front();
+            any = true;
+        }
+        if (any) done_cv_.notify_all();
     }
 
     void Execute(const Batch& b, const Cmd& c) {
@@ -584,9 +593,15 @@ private:
     std::deque<Batch*> queue_;
     std::vector<Batch*> free_;
     std::atomic<uint64_t> done_{0};
-    std::atomic<uint64_t> wanted_{~0ull};  // the batch the title waits for
-    bool defer_ = false;                   // the backend puts work off until Settle
-    static constexpr uint32_t kHold = 16;  // batches run before their put off work is settled
+    // the pool's helpers copy what draws hand them (null: copies done at once); batches held until theirs are done
+    CopyPool* pool_ = nullptr;
+    bool defer_ = false;
+    struct Held {
+        uint64_t id, ticket;
+        Batch* batch;
+    };
+    std::deque<Held> held_;
+    uint64_t settled_ = 0;
     bool stop_ = false, exited_ = false;
 };
 
