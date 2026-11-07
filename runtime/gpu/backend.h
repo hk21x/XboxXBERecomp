@@ -36,6 +36,11 @@ public:
     virtual bool DeliverLate(uint32_t) { return false; }
     virtual void RecordLate(uint32_t) {}
     virtual void Flush() = 0;
+    // the render thread: a draw may put CPU work off (copying guest vertex bytes into upload memory) once
+    // DeferWork(true) is called, until Settle, which the render thread calls before it tells the title the draws are
+    // done (the title may then rewrite that guest memory); a backend runs it too before the GPU reads the memory
+    virtual bool DeferWork(bool) { return false; }  // true: it does
+    virtual void Settle() {}
     // as Flush, but the caller need not wait for it: the render thread runs it in turn (reports written once the GPU
     // is past them); a backend that draws at once just flushes
     virtual void Kick() { Flush(); }

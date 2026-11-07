@@ -105,6 +105,7 @@ public:
     explicit Threaded(std::unique_ptr<Backend> inner) : inner_(std::move(inner)), ranges_(StateRanges()) {
         ring_ = mem::AllocSystem(kHeaderRing, 64);
         cur_ = NewBatch();
+        defer_ = inner_->DeferWork(true);
         std::thread([this] { Run(); }).detach();
     }
     ~Threaded() override {
@@ -436,10 +437,12 @@ private:
         if (!id || done_.load() >= id) return;
         if (id >= cur_->id) id = Submit();
         auto t = Clock::now();
+        wanted_.store(id);  // the render thread settles once it has run this batch, not after more
         {
             std::unique_lock lock(m_);
             done_cv_.wait(lock, [&] { return done_.load() >= id; });
         }
+        wanted_.store(~0ull);
         uint64_t ns = Ns(t);
         g_perf_wait_ns += ns;
         g_perf_wait_kind_ns[size_t(kind)] += ns;
@@ -454,10 +457,29 @@ private:
         if (auto set = reinterpret_cast<SetDescription>(
                 reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
             set(GetCurrentThread(), L"render");
+        // A batch is done (done_) once the backend settled the work its draws put off. That is done for several
+        // batches together: when no batch waits, after kHold of them, or once the title waits for one already run.
+        uint64_t unsettled = 0;
+        uint32_t held = 0;
+        auto settle = [&] {
+            inner_->Settle();
+            {
+                std::lock_guard lock(m_);
+                done_.store(unsettled);
+            }
+            done_cv_.notify_all();
+            unsettled = 0;
+            held = 0;
+        };
         for (;;) {
             Batch* b;
             {
                 std::unique_lock lock(m_);
+                if (queue_.empty() && unsettled) {
+                    lock.unlock();
+                    settle();
+                    continue;
+                }
                 cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
                 if (queue_.empty()) break;
                 b = queue_.front();
@@ -472,9 +494,14 @@ private:
             {
                 std::lock_guard lock(m_);
                 free_.push_back(b);
-                done_.store(id);
+                if (!defer_) done_.store(id);
             }
-            done_cv_.notify_all();
+            if (!defer_) {
+                done_cv_.notify_all();
+                continue;
+            }
+            unsettled = id;
+            if (++held >= kHold || wanted_.load() <= id) settle();
         }
         std::lock_guard lock(m_);
         exited_ = true;
@@ -557,6 +584,9 @@ private:
     std::deque<Batch*> queue_;
     std::vector<Batch*> free_;
     std::atomic<uint64_t> done_{0};
+    std::atomic<uint64_t> wanted_{~0ull};  // the batch the title waits for
+    bool defer_ = false;                   // the backend puts work off until Settle
+    static constexpr uint32_t kHold = 16;  // batches run before their put off work is settled
     bool stop_ = false, exited_ = false;
 };
 
