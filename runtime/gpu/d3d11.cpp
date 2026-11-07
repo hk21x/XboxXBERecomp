@@ -788,6 +788,12 @@ bool D3D11Backend::ReadBack(ID3D11Texture2D* src, uint32_t w, uint32_t h, std::v
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D11Backend::Sync(uint32_t data, uint32_t) {
     auto it = targets_.find(TargetMapKey(data, false));
+    if (it != targets_.end() && !it->second.drawn && it->second.gw <= 256 && it->second.gh <= 256)
+        LOG_FIRST(8, "d3d11: read-back of %08X (%ux%u) skipped, not drawn since the last", data, it->second.gw, it->second.gh);
+    if (it != targets_.end() && it->second.drawn && TargetStale(data) &&
+        (it->second.bytes > kStaleReadMax || SurfaceSig(it->second.data, it->second.bytes) != it->second.sig))
+        LOG_FIRST(8, "d3d11: read-back of %08X (%ux%u) skipped, unused for a while and its memory changed", data,
+                  it->second.gw, it->second.gh);
     if (it == targets_.end() || !it->second.drawn) return;
     // long unused: read back only if its memory is as the target last left it (not reused). PGR2 saves its speed camera
     // photo, a 160x120 target, seconds after drawing it, and it came out grey
