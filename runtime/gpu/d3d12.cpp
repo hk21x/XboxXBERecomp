@@ -88,6 +88,8 @@ struct Perf {
     double wait = 0;
     double swap = 0;
     double sync = 0;
+    double pre = 0, bind_targets = 0, notes = 0, post = 0;  // Draw outside its timed steps, ms
+    double k_vsc = 0, k_fill = 0, k_dc = 0;                // consts: vertex constants, the draw constants filled, uploaded
     double replay = 0;                 // recorded commands written into the list, ms (inside the steps' own times)
     uint64_t runs = 0, run_draws = 0;  // the times they were, and their draws
     double settle = 0;                      // put off vertex copies, ms
@@ -511,6 +513,7 @@ private:
     // moves on whenever the upload or descriptor ring starts over
     uint64_t ring_gen_ = 1;
     uint64_t vsc_gen_ = 0, dc_gen_ = 0, tables_gen_ = 0;
+    uint64_t vsc_count_ = 0;  // State::vsc_gen of the vertex constants last uploaded
     D3D12_GPU_VIRTUAL_ADDRESS vsc_va_ = 0, dc_va_ = 0;
     std::vector<uint8_t> vsc_last_, dc_last_;
     std::unordered_map<uint64_t, uint32_t> tables_;
@@ -2640,9 +2643,13 @@ void D3D12Backend::FillTextureConstants(const State& s, const DrawTextures& stag
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                                    GuestExtent size, DrawConstants& c) {
     // the vertex constants: the last upload again when they have not changed (an extension may change the copy)
+    auto perf_k = PerfNow();
     D3D12_GPU_VIRTUAL_ADDRESS vsc_va = 0;
     float(*ext_vsc)[4] = nullptr;
-    if (!ext_ && vsc_gen_ == ring_gen_ && !std::memcmp(vsc_last_.data(), s.vsc.data(), sizeof(s.vsc))) {
+    // the render thread counts vsc's changes: the same count is the same constants, no compare needed
+    bool same_count = s.vsc_gen && s.vsc_gen == vsc_count_;
+    if (!ext_ && vsc_gen_ == ring_gen_ && (same_count || !std::memcmp(vsc_last_.data(), s.vsc.data(), sizeof(s.vsc)))) {
+        vsc_count_ = s.vsc_gen;
         vsc_va = vsc_va_;
         g_perf.reused_vsc++;
     } else {
@@ -2652,8 +2659,11 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         vsc_last_.assign(b, b + sizeof(s.vsc));
         vsc_va = vsc_va_ = vc.gpu;
         vsc_gen_ = ext_ ? 0 : ring_gen_;
+        vsc_count_ = s.vsc_gen;
         ext_vsc = reinterpret_cast<float(*)[4]>(vc.cpu);
     }
+    g_perf.k_vsc += PerfMs(perf_k);
+    perf_k = PerfNow();
     FillSurfaceConstants(s, size, c);
     // points and lines: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
     if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = PointScale() * s.aa_y;
@@ -2665,6 +2675,8 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
+    g_perf.k_fill += PerfMs(perf_k);
+    perf_k = PerfNow();
     // the draw constants likewise
     if (dc_gen_ == ring_gen_ && dc_last_.size() == sizeof(c) && !std::memcmp(dc_last_.data(), &c, sizeof(c))) {
         g_perf.reused_dc++;
@@ -2678,6 +2690,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     }
     SetRootCbv(0, vsc_va);
     SetRootCbv(1, dc_va_);
+    g_perf.k_dc += PerfMs(perf_k);
 }
 
 void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
@@ -2997,6 +3010,14 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         return;
     }
     PerfScope perf_draw{g_perf.draw};
+    auto perf_pre = PerfNow();
+    PerfClock::time_point perf_post{};
+    struct PostTime {  // from the draw's geometry to its return (the extension's EndDraw)
+        PerfClock::time_point& t;
+        ~PostTime() {
+            if (t != PerfClock::time_point{}) g_perf.post += PerfMs(t);
+        }
+    } post_time{perf_post};
     g_perf.draws++;
     if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
     // XBE_CAPTURE_DRAWS=vs:...: the target once before the first draw with that shader, before this draw binds anything
@@ -3038,12 +3059,15 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (adjust.skip) return;
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
+    g_perf.pre += PerfMs(perf_pre);
     Assembled& a = asm_;
     if (!AssembleDraw(s, prim, start, count, indices, a)) return;
     // past the ring every upload is a buffer of its own: seconds lost on a frame that draws a whole level once
     if (CurrentFrame().used > kUploadSize - kUploadReserve) Submit(true);
+    auto perf_bt = PerfNow();
     if (!BindTargets(s)) return;
     if (ext_ && ext_->Bound(*this, s, bound_rt_, bound_ds_, a.pretransformed) && !BindTargets(s)) return;
+    g_perf.bind_targets += PerfMs(perf_bt);
 
     // vertex shader
     auto perf_shaders = PerfNow();
@@ -3261,9 +3285,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
                  int(note.base), note.lo, note.hi, a.vertex_count, bufs.c_str(), el.c_str());
         }
     }
+    g_perf.notes += PerfMs(perf_step);  // the skip checks, the draw's note, the shader log
+    perf_step = PerfNow();
     DrawGeometry(a);
     EndCountedDraw(query);
     g_perf.geometry += PerfMs(perf_step);
+    perf_post = PerfNow();
     // XBE_CAPTURE_DRAWS: the target after each draw in the range (cap_i_ moved on past this draw's number)
     if (cap_ && draw_rt_) {
         diag::DrawRange r = diag::CaptureDraws();
@@ -3891,6 +3918,10 @@ void LogPerf() {
              p.deferred / n / 1048576.0, p.settles / n);
         LOGR("perf: recorded commands per frame: replayed in %.2f ms, %.1f runs of %.1f draws", p.replay / n, p.runs / n,
              p.runs ? double(p.run_draws) / double(p.runs) : 0.0);
+        LOGR("perf: draw's other steps per frame, ms: before assembly %.2f, targets %.2f, checks and note %.2f, after "
+             "geometry %.2f | consts: vertex constants %.2f, filled %.2f, uploaded %.2f | render thread: state %.2f, "
+             "batches %.2f", p.pre / n, p.bind_targets / n, p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n,
+             p.k_dc / n, g_perf_state_ns.exchange(0) / n / 1e6, g_perf_batch_ns.exchange(0) / n / 1e6);
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30

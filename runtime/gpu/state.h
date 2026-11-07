@@ -204,6 +204,9 @@ struct State {
     std::shared_ptr<VertexShader> vs;
     std::shared_ptr<PixelShader> ps;
     std::array<std::array<float, 4>, 192> vsc{};  // hardware order: D3D register + 96
+    // the render thread's count of vsc's changes, 0 when not counted (no render thread): a backend compares vsc then.
+    // The title never sets it, so its state changes never carry it
+    uint64_t vsc_gen = 0;
     std::array<std::array<float, 4>, 16> psc{};
     Viewport viewport;
     Surface rt, zs;

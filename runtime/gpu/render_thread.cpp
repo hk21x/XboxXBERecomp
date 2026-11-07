@@ -485,7 +485,10 @@ private:
                 b = queue_.front();
                 queue_.pop_front();
             }
+            static const bool perf = diag::Perf();
+            auto t = perf ? Clock::now() : Clock::time_point{};
             for (const Cmd& c : b->cmds) Execute(*b, c);
+            if (perf) g_perf_batch_ns += Ns(t);
             uint64_t id = b->id;
             b->cmds.clear();
             b->bytes.clear();
@@ -512,15 +515,23 @@ private:
         const uint8_t* data = b.bytes.data() + c.data;
         switch (c.op) {
             case Op::State: {
+                static const bool perf = diag::Perf();
+                auto t = perf ? Clock::now() : Clock::time_point{};
                 uint8_t* s = reinterpret_cast<uint8_t*>(&state_);
+                static const State layout;
+                static const size_t vsc_from = At(layout, &layout.vsc), vsc_to = vsc_from + sizeof(layout.vsc);
+                bool vsc = false;
                 for (const uint8_t* p = data; p < data + c.size;) {
                     uint32_t head[2];
                     std::memcpy(head, p, 8);
                     std::memcpy(s + head[0], p + 8, head[1]);
+                    vsc |= head[0] < vsc_to && head[0] + head[1] > vsc_from;
                     p += 8 + head[1];
                 }
+                if (vsc || !state_.vsc_gen) state_.vsc_gen++;
                 if (c.vs >= 0) state_.vs = b.vs[size_t(c.vs)];
                 if (c.ps >= 0) state_.ps = b.ps[size_t(c.ps)];
+                if (perf) g_perf_state_ns += Ns(t);
                 break;
             }
             case Op::Draw: inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr); break;

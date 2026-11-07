@@ -73,6 +73,8 @@ std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner);
 
 // perf diagnostic: the title's thread recording for the render thread, and waiting on it
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};
+// the render thread: applying the batches' state changes, and running batches at all (with XBE_PERF)
+inline std::atomic<uint64_t> g_perf_state_ns{0}, g_perf_batch_ns{0};
 inline std::atomic<uint64_t> g_perf_wait_kind_ns[6];  // read-back, resource, fence, flush, copy, next frame
 inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read-backs the title waited for, by cause
 inline std::atomic<uint32_t> g_shaders_compiled{0};  // D3DCompile calls (the shader cache missed), for the frames lines
