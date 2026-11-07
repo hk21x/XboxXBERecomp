@@ -1,5 +1,4 @@
 #pragma once
-#include <atomic>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -270,7 +269,5 @@ struct DrawAdjust {
 };
 using DrawFilter = void (*)(const State&, DrawAdjust&);
 inline DrawFilter g_draw_filter = nullptr;
-// TEMPORARY (PGR2 issue 30): while above 0 a game hook asks for each draw and clear recorded to be logged
-inline std::atomic<int> g_trace_draws{0};
 
 }  // namespace gpu
