@@ -1831,6 +1831,17 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
+    // a format no texture has: the header read is not a texture's. Named with its bytes, once each, and not bound
+    if (&Format(d.format) == &Format(0xFFFFFFFFu)) {
+        static std::atomic<int> said{0};
+        if (said++ < 16) {
+            const uint32_t h = s.textures[size_t(stage)];
+            const auto* b = static_cast<const uint32_t*>(kernel::HostPtr(h));
+            LOGR("d3d12: stage %d texture header %08X reads as format %X (%ux%u at %08X): %08X %08X %08X %08X %08X, not bound",
+                 stage, h, d.format, d.width, d.height, d.data, b[0], b[1], b[2], b[3], b[4]);
+        }
+        return nullptr;
+    }
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
     Tex& tx = textures_[key];
     uint32_t total = TotalSize(d);

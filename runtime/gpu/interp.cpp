@@ -58,6 +58,7 @@ struct Rec {
     struct Header {
         uint32_t va;
         uint8_t bytes[kHeaderBytes];
+        uint32_t n;  // bytes saved, by the resource type when saved: restored as many (the type there may differ by then)
     };
     std::vector<Header> headers;
     // its vertices: a title rewrites one small buffer for each draw, waiting for the last, so memory has only the last by now
@@ -107,8 +108,8 @@ public:
         r.headers.clear();
         const auto add = [&](uint32_t va) {
             if (!va) return;
-            Rec::Header h{va, {}};
-            std::memcpy(h.bytes, kernel::HostPtr(va), HeaderSize(va));
+            Rec::Header h{va, {}, HeaderSize(va)};
+            std::memcpy(h.bytes, kernel::HostPtr(va), h.n);
             r.headers.push_back(h);
         };
         for (const auto& stream : s.streams) add(stream.vb);
@@ -586,13 +587,14 @@ void Interpolating::Replay(float alpha) {
         for (const Rec::Header& h : now_[i].headers)
             if (!seen[h.va]) {
                 seen[h.va] = true;
-                Rec::Header l{h.va, {}};
-                std::memcpy(l.bytes, kernel::HostPtr(h.va), HeaderSize(h.va));
+                // the title's own, as many bytes as the longest a replay writes there (each put back exactly)
+                Rec::Header l{h.va, {}, mem::IsCommitted(h.va + kHeaderBytes - 1) ? kHeaderBytes : HeaderSize(h.va)};
+                std::memcpy(l.bytes, kernel::HostPtr(h.va), l.n);
                 left.push_back(l);
             }
     for (size_t i = 0; i < count_; i++) {
         Rec& r = now_[i];
-        for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
+        for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, h.n);
         switch (r.kind) {
             case Rec::Clear:
                 inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
@@ -642,7 +644,7 @@ void Interpolating::Replay(float alpha) {
             }
         }
     }
-    for (const Rec::Header& l : left) std::memcpy(kernel::HostPtr(l.va), l.bytes, HeaderSize(l.va));
+    for (const Rec::Header& l : left) std::memcpy(kernel::HostPtr(l.va), l.bytes, l.n);
     region_fence_[region_] = inner_->Fence();
     replay_seconds_ = std::chrono::duration<double>(Clock::now() - began).count();
 }
