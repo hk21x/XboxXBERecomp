@@ -3772,6 +3772,23 @@ void LogPerf() {
              (unsigned long long)p.shaders, (unsigned long long)p.psos, (unsigned long long)p.psos_kept, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
              p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
              p.same_views / n, p.t_targets / n);
+        // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
+        static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
+        if (p.draws / n >= 500) {
+            busy_s += 1;
+            busy_frames += n;
+            busy_host += host;
+            busy_draw += p.draw;
+            busy_draws += p.draws;
+            busy_min_fps = std::min(busy_min_fps, n * 1000.0 / el);
+            if (busy_s >= 30) {
+                LOGR("perf: busy summary over %.0f s: %.1f fps (lowest second %.1f), host %.2f ms/frame, %.0f draws/frame, "
+                     "%.2f us/draw", busy_s, busy_frames / busy_s, busy_min_fps, busy_host / busy_frames, busy_draws / busy_frames,
+                     busy_draws ? busy_draw * 1000.0 / busy_draws : 0.0);
+                busy_s = busy_frames = busy_host = busy_draw = busy_draws = 0;
+                busy_min_fps = 1e9;
+            }
+        }
         g_perf = Perf{};
         perf_start = PerfClock::now();
         perf_frames = 0;
