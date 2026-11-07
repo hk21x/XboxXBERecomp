@@ -90,6 +90,7 @@ struct Perf {
     uint64_t draws = 0;
     uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
     uint64_t stage_last = 0, stage_memo = 0, stage_target = 0, stage_full = 0;  // bound stages, by how they were found
+    double t_last = 0, t_memo = 0, t_target = 0, t_full = 0, t_empty = 0;      // the time they took, ms, by the same
     uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
     double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
@@ -2478,7 +2479,17 @@ bool D3D12Backend::BindStageTexturesAndTargets(const State& s, DrawTextures& sta
     auto perf_t = PerfNow();
     draw_rt_ = bound_rt_;
     draw_ds_ = bound_ds_;
-    for (int i = 0; i < 4; i++) stages.res[i] = BindTexture(s, i, stages);
+    for (int i = 0; i < 4; i++) {
+        // XBE_PERF: the time of each stage by how it was found
+        const uint64_t last = g_perf.stage_last, memo = g_perf.stage_memo, target = g_perf.stage_target, full = g_perf.stage_full;
+        auto perf_i = PerfNow();
+        stages.res[i] = BindTexture(s, i, stages);
+        if (diag::Perf()) {
+            double ms = PerfMs(perf_i);
+            (g_perf.stage_last != last ? g_perf.t_last : g_perf.stage_memo != memo ? g_perf.t_memo
+             : g_perf.stage_target != target ? g_perf.t_target : g_perf.stage_full != full ? g_perf.t_full : g_perf.t_empty) += ms;
+        }
+    }
     g_perf.bind += PerfMs(perf_t);
     // textures may have recorded copies that unbound the targets
     perf_t = PerfNow();
@@ -3772,6 +3783,8 @@ void LogPerf() {
              (unsigned long long)p.shaders, (unsigned long long)p.psos, (unsigned long long)p.psos_kept, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
              p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
              p.same_views / n, p.t_targets / n);
+        LOGR("perf: stage binds per frame by how found, ms: last %.2f, memo %.2f, target %.2f, full %.2f, empty %.2f",
+             p.t_last / n, p.t_memo / n, p.t_target / n, p.t_full / n, p.t_empty / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
         static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
         if (p.draws / n >= 500) {
