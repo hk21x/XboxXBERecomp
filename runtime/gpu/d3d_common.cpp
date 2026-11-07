@@ -97,7 +97,8 @@ void KeepShader(uint64_t hash, ID3DBlob* code) {
 }
 
 namespace {
-constexpr char kPipelineCacheMagic[8] = {'X', 'B', 'E', 'P', 'S', 'O', '1', 0};
+// 2: the key takes the geometry shader's hash (lines and points); version 1's blobs had none and are dropped
+constexpr char kPipelineCacheMagic[8] = {'X', 'B', 'E', 'P', 'S', 'O', '2', 0};
 constexpr size_t kPipelineCacheMax = size_t(512) << 20;  // past this it starts again
 struct PipelineCache {
     std::mutex m;
