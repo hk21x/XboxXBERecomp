@@ -3,6 +3,7 @@
 
 #include <d3dcompiler.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -411,7 +412,8 @@ uint64_t SurfaceSig(uint32_t data, uint32_t total) {
     if (total && !mem::IsCommitted(data + total - 1)) {
         const uint32_t was = total;
         while (total && !mem::IsCommitted(data + total - 1)) total = total > 0x1000 ? ((total - 1) & ~0xFFFu) : 0;
-        LOG_FIRST(8, "gpu: a surface at %08X of %X bytes runs past committed memory: %X hashed", data, was, total);
+        static std::atomic<int> said{0};
+        if (said++ < 8) LOGR("gpu: a surface at %08X of %X bytes runs past committed memory: %X hashed", data, was, total);
         if (!total) return Hash(&was, sizeof(was));
     }
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(data));

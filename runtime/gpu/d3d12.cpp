@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <bit>
 #include <chrono>
@@ -1844,6 +1845,22 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
         uint64_t sig = MemSig(d.data, total) ^ DirtyEpoch(d.data) ^ palette.hash;
         g_perf.sig += PerfMs(perf_t);
         if (sig != tx.sig || !same) {
+            // a description whose size runs past committed memory is not decoded (it read off the end and faulted:
+            // True Crime with frames in between); one far bigger than a console's texture is named
+            if (!mem::IsCommitted(d.data + total - 1)) {
+                static std::atomic<int> said{0};
+                if (said++ < 16)
+                    LOGR("d3d12: a texture at %08X (format %X, %ux%u, %u levels, pitch %u, %X bytes) runs past committed memory: "
+                         "not uploaded", d.data, d.format, d.width, d.height, d.levels, d.pitch, total);
+                tx.sig = sig;
+                return nullptr;
+            }
+            if (total > (4u << 20)) {
+                static std::atomic<int> said{0};
+                if (said++ < 16)
+                    LOGR("d3d12: a large texture upload at %08X (format %X, %ux%u, %u levels, pitch %u, %X bytes)", d.data,
+                         d.format, d.width, d.height, d.levels, d.pitch, total);
+            }
             PerfScope perf_up{g_perf.texup};
             g_perf.texups++;
             g_perf.texup_bytes += total;
