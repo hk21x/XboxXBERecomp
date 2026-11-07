@@ -164,17 +164,9 @@ private:
     // the buffer's bytes as when it was last drawn, by a fingerprint of 32 samples across it: a static one (the city) is
     // replayed in place; one the title wrote since, or writes again within the step for other draws, is copied, and is
     // copied from then on (dynamic)
-    bool Unchanged(uint32_t va, uint32_t bytes) {
+    // samples across a range, for a rewrite past a buffer's start
+    static uint64_t RangeSamples(uint32_t va, uint32_t bytes) {
         const auto* p = static_cast<const uint8_t*>(kernel::HostPtr(va));
-        // the buffer's start, the same 256 bytes whatever range of it a draw uses (fewer only at the end of memory)
-        uint64_t head = 0xCBF29CE484222325ull;
-        const uint32_t head_bytes = mem::IsCommitted(va + 255) ? 256u : std::min(bytes, 256u);
-        for (uint32_t i = 0; i + 8 <= head_bytes; i += 8) {
-            uint64_t v;
-            std::memcpy(&v, p + i, 8);
-            head = (head ^ v) * 0x100000001B3ull;
-        }
-        // samples across this draw's range, for a rewrite past the start
         uint64_t h = 0xCBF29CE484222325ull ^ bytes;
         constexpr uint32_t kSamples = 32, kSample = 8;
         for (uint32_t i = 0; i < kSamples; i++) {
@@ -184,6 +176,20 @@ private:
             h = (h ^ v) * 0x100000001B3ull;
             h ^= h >> 29;
         }
+        return h;
+    }
+    bool Unchanged(uint32_t va, uint32_t bytes) {
+        if (rewritten_.count(va)) return false;  // seen rewritten after its draws: always copied
+        const auto* p = static_cast<const uint8_t*>(kernel::HostPtr(va));
+        // the buffer's start, the same 256 bytes whatever range of it a draw uses (fewer only at the end of memory)
+        uint64_t head = 0xCBF29CE484222325ull;
+        const uint32_t head_bytes = mem::IsCommitted(va + 255) ? 256u : std::min(bytes, 256u);
+        for (uint32_t i = 0; i + 8 <= head_bytes; i += 8) {
+            uint64_t v;
+            std::memcpy(&v, p + i, 8);
+            head = (head ^ v) * 0x100000001B3ull;
+        }
+        const uint64_t h = RangeSamples(va, bytes);
         // forgotten when large, each on its own: a forgotten buffer is copied until seen again
         if (seen_.size() > (1u << 20)) seen_.clear();
         if (heads_.size() > (1u << 20)) heads_.clear(), dynamic_.clear();
@@ -202,7 +208,24 @@ private:
         // pass or over other vertices, starts the same)
         const auto [at, first] = this_step_.try_emplace(va, head);
         if (!first && at->second != head) dynamic_[va] = 0;
-        return head_same && !range_changed && !dynamic_.count(va);
+        const bool in_place = head_same && !range_changed && !dynamic_.count(va);
+        if (in_place) in_place_.push_back({va, bytes, h});
+        return in_place;
+    }
+    // before the replays (the title waiting): a buffer read in place that the title wrote again after drawing it, through
+    // another header over the same memory say, would replay what came later (True Crime's paving gone in the in-between
+    // frames). Such a step is shown as it is, and the buffer copied from then on
+    bool InPlaceHeld() {
+        bool held = true;
+        for (const InPlace& r : in_place_)
+            if (RangeSamples(r.va, r.bytes) != r.h && rewritten_.insert(r.va).second) {
+                held = false;
+                static int said = 0;
+                if (said++ < 8) LOGR("gpu: in-between frames: vertices at %08X (%X bytes) rewritten after their draw: copied from now on", r.va, r.bytes);
+            } else if (rewritten_.count(r.va)) {
+                held = false;
+            }
+        return held;
     }
 
     bool UploadKept();
@@ -251,6 +274,12 @@ private:
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
     std::unordered_map<uint64_t, uint64_t> seen_;  // GameInfo::interp_copy_changed: a draw's range (place and size) sampled when last drawn
     std::unordered_map<uint32_t, uint64_t> heads_;  // and its buffer's first 256 bytes
+    struct InPlace {
+        uint32_t va, bytes;
+        uint64_t h;
+    };
+    std::vector<InPlace> in_place_;            // this step's ranges read in place, sampled at their draw
+    std::unordered_set<uint32_t> rewritten_;   // buffers the title wrote again after drawing them: always copied
     std::unordered_map<uint32_t, uint32_t> dynamic_;  // buffers seen to change, and its draws unchanged since: copied
     std::unordered_map<uint32_t, uint64_t> this_step_;  // buffers drawn so far in this step: the first 256 bytes' fingerprint
     uint32_t kept_count_ = 0;
@@ -654,7 +683,7 @@ void Interpolating::Present(const Surface& front) {
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
-    const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
+    const bool blend = On() && count_ && !kept_full_ && InPlaceHeld() && Match() && UploadKept();
     if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
@@ -744,6 +773,7 @@ void Interpolating::Present(const Surface& front) {
     kept_bytes_.clear();
     kept_count_ = 0;
     this_step_.clear();
+    in_place_.clear();
     kept_full_ = false;
 }
 }  // namespace
