@@ -56,6 +56,7 @@ struct Cmd {
     int32_t vs = -1, ps = -1;     // index in Batch::vs / ps: the shader changed
     bool joinable = false;        // a triangle list the next draw with the same state may add to (GameInfo::merge_draws)
     Surface s1, s2;
+    uint64_t check = 0;           // XBE_CHECK_STATE: the title's state, hashed (CheckHash)
 };
 
 struct Batch {
@@ -84,6 +85,40 @@ std::vector<Range> StateRanges() {
         {At(s, &s.transforms[256]), 4 * sizeof(s.transforms[0])},  // WORLD to WORLD3: vertex blending
         {At(s, &s.material), sizeof(State) - At(s, &s.material)},
     };
+}
+
+// XBE_CHECK_STATE=1 (a test, headless too): every draw checks the render thread's copy of the state against the
+// title's (the plain data of StateRanges, State::vsc_gen left out: the render thread's own), and that a vertex
+// constant count (State::vsc_gen) the backend reuses uploads by always stands for the same constants
+bool CheckState() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_CHECK_STATE");
+        bool v = e && *e == '1';
+        if (v) LOGR("render thread: XBE_CHECK_STATE=1, every draw's state checked against the title's");
+        return v;
+    }();
+    return on;
+}
+
+uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h) {
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+uint64_t CheckHash(const State& s, const std::vector<Range>& ranges) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&s);
+    const size_t gen = size_t(reinterpret_cast<const uint8_t*>(&s.vsc_gen) - b), gen_end = gen + sizeof(s.vsc_gen);
+    uint64_t h = 1469598103934665603ull;
+    for (const Range& r : ranges) {
+        size_t from = r.off, to = r.off + r.len;
+        if (gen >= from && gen_end <= to) {
+            h = Fnv(b + from, gen - from, h);
+            h = Fnv(b + gen_end, to - gen_end, h);
+        } else {
+            h = Fnv(b + from, to - from, h);
+        }
+    }
+    return h;
 }
 
 // equal bytes, 16 at a time: most of the state is compared on every draw
@@ -137,6 +172,7 @@ public:
             }
             cur_->cmds.push_back(c);
         }
+        if (CheckState()) cur_->cmds.back().check = CheckHash(s, ranges_);
         for (uint32_t tex : s.textures) Use(tex);
         for (uint32_t pal : s.palettes) Use(pal);
         for (const auto& st : s.streams) Use(st.vb);
@@ -511,6 +547,23 @@ private:
         done_cv_.notify_all();
     }
 
+    void Check(const Cmd& c) {
+        static uint64_t draws = 0, wrong = 0, stale = 0, last_gen = 0, last_vsc = 0;
+        draws++;
+        if (CheckHash(state_, ranges_) != c.check && wrong++ < 8)
+            LOGR("render thread: check: draw %llu's state differs from the title's", (unsigned long long)draws);
+        uint64_t vsc = Fnv(reinterpret_cast<const uint8_t*>(state_.vsc.data()), sizeof(state_.vsc), 1469598103934665603ull);
+        // the count only goes up: one that goes back may name constants an older upload held
+        if (((state_.vsc_gen == last_gen && vsc != last_vsc) || state_.vsc_gen < last_gen) && stale++ < 8)
+            LOGR("render thread: check: draw %llu has count %llu with other vertex constants", (unsigned long long)draws,
+                 (unsigned long long)state_.vsc_gen);
+        last_gen = state_.vsc_gen;
+        last_vsc = vsc;
+        if (draws % 200000 == 0)
+            LOGR("render thread: check: %llu draws, %llu with a different state, %llu with a stale vertex constant count",
+                 (unsigned long long)draws, (unsigned long long)wrong, (unsigned long long)stale);
+    }
+
     void Execute(const Batch& b, const Cmd& c) {
         const uint8_t* data = b.bytes.data() + c.data;
         switch (c.op) {
@@ -537,7 +590,10 @@ private:
                 if (perf) g_perf_state_ns += Ns(t);
                 break;
             }
-            case Op::Draw: inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr); break;
+            case Op::Draw:
+                if (CheckState()) Check(c);
+                inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr);
+                break;
             case Op::Clear: inner_->Clear(state_, c.a, c.size ? data : nullptr, c.b, c.c, c.f, c.d); break;
             case Op::Copy: inner_->Copy(c.s1, c.s2, c.a, c.b, c.c); break;
             case Op::Present: inner_->Present(c.s1); break;
