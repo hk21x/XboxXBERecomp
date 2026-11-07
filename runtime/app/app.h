@@ -159,6 +159,7 @@ struct Option {  // a setting in the settings file, flag or value
     uint32_t* value;
     const char* label = nullptr;  // the settings window's name for it, else the key
     const char* help = nullptr;   // a line under it in the settings window
+    const char* const* choices = nullptr;  // a value's names, ended by nullptr: a dropdown in the settings window
 };
 struct GameInfo {
     const wchar_t* title;        // window and splash

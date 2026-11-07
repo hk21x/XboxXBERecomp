@@ -181,6 +181,8 @@ int32_t g_program_slot = -1;
 bool g_program_written = false;
 std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
+std::atomic<float> g_frame_blend{1};  // SetFrameBlend, for the next Present
+std::atomic<bool> g_frame_blend_new{false};
 uint32_t g_buffer_count = 2;
 uint32_t g_depth = 0;
 // Swap with the copy flags and not FINISH starts the title's own copy of the back buffer to the front buffer (a title
@@ -343,6 +345,14 @@ void UpdateSampleScale() {
     else if (mode == 1) (made_y == 2 && made_x == 1 ? y : x) = 2;
     g_state.aa_x = std::max<uint32_t>(x / made_x, 1);
     g_state.aa_y = std::max<uint32_t>(y / made_y, 1);
+    // XBE_NO_SAMPLE_SCALE=1 (experiment): the modes are not applied, every draw lands 1x1
+    static const bool off = [] {
+        const char* e = std::getenv("XBE_NO_SAMPLE_SCALE");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d: XBE_NO_SAMPLE_SCALE=1, the multisample modes are not applied");
+        return v;
+    }();
+    if (off) g_state.aa_x = g_state.aa_y = 1;
     // each target the back buffer's mode is asked on, once: applied (the back buffer) or not (another target)
     uint32_t asked = g_state.rs[gpu::kRsMultiSampleMode];
     if (asked && g_state.rt.header) {
@@ -426,6 +436,11 @@ void VerticalBlank(X86Context& ctx) {
 }
 
 }  // namespace
+
+void SetFrameBlend(float weight, bool new_image) {
+    g_frame_blend = weight;
+    if (new_image) g_frame_blend_new = true;
+}
 
 gpu::State& State() { return g_state; }
 std::recursive_mutex& Lock() { return g_lock; }
@@ -997,7 +1012,12 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         }
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
-    if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    if (g_backend) {
+        gpu::Surface front = SurfaceOf(g_buffers[1]);
+        front.blend = g_frame_blend.exchange(1);
+        front.blend_new = g_frame_blend_new.exchange(false);
+        g_backend->Present(front);
+    }
     achievements::Frame();
     app::Pace(PresentVblanks());
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data

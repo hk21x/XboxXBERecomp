@@ -203,6 +203,13 @@ float4 psmain(O i) : SV_Target {
     if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c.rgb, opts.y > 0 ? c.a : 1);
 }
+// two finished frames mixed: this one (img) at the weight opts.w over the last (t2), gamma after, as one frame's would be
+Texture2D last : register(t2);
+float4 psmix(O i) : SV_Target {
+    float4 c = lerp(last.SampleLevel(ls, i.uv, 0), img.SampleLevel(ls, i.uv, 0), opts.w);
+    if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
+    return float4(c.rgb, 1);
+}
 // the finished frame, the settings' passes in one (the plain blit without them): opts.y bit 0 for FXAA, bit 1 for the
 // sharp scaling filter, opts.z the sharpening 0 to 1. The filter: Catmull-Rom over source pixels going up; going down, the
 // output pixel's area (four taps, even at a ratio that is not whole) less a little of its neighbours. FXAA: where the luma of a pixel and its four neighbours differs enough to be an edge, the colour is
