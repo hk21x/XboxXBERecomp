@@ -112,6 +112,7 @@ struct Perf {
     uint64_t upload = 0;
     uint64_t overflow = 0;
     uint64_t flushes = 0;  // lists the CPU waited for the GPU to finish (Submit(true))
+    uint64_t face_skips = 0;  // draws and clears into a cube face resting this frame (GameInfo::cube_face_hz)
     double flush_wait = 0;  // that wait, ms
     uint64_t sigs = 0;
     uint64_t sig_bytes = 0;
@@ -128,6 +129,7 @@ struct Perf {
     uint64_t lates = 0;
 };
 Perf g_perf;
+float CubeFaceHz();  // GameInfo::cube_face_hz, or XBE_CUBE_FACE_HZ
 struct PerfScope {
     double& acc;
     PerfClock::time_point t = PerfNow();
@@ -390,6 +392,20 @@ private:
     // the frame's resources let go once the GPU is done with them; XBE_KEEP_RELEASED=1 (experiment) keeps every one
     uint64_t released_ = 0;
     std::vector<ComPtr<ID3D12Resource>> kept_;
+    // the cube faces the GPU draws (found by CopyCubeTargets), by target address: drawn at most cube_face_hz times a
+    // second each, staggered, resting (their draws and clears left out) in the frames between
+    struct CubeFace {
+        double due = 0;  // seconds: drawn in the first frame from then
+        bool rest = false;
+    };
+    std::unordered_map<uint32_t, CubeFace> cube_faces_;
+    double FaceClock() const;
+    bool FaceResting(uint32_t data) {
+        if (cube_faces_.empty() || !data) return false;
+        auto it = cube_faces_.find(data & 0x0FFFFFFF);
+        return it != cube_faces_.end() && it->second.rest;
+    }
+    void PlanCubeFaces();
     // Textures placed in large heaps (CreatePlacedResource), XBE_PLACED_TEXTURES=0 for one committed resource each:
     // CreateCommittedResource took about 0.5 ms a texture, and PGR2 streams in up to 400 in a frame (hitches of 30 to
     // 240 ms on Harry's PC). First fit in 64 MB heaps of textures only (no targets), ranges joined again when freed
@@ -2498,6 +2514,8 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
+        if (CubeFaceHz() > 0 && cube_faces_.size() < 64 && !cube_faces_.count(face & 0x0FFFFFFF))  // its turns staggered
+            cube_faces_[face & 0x0FFFFFFF] = {FaceClock() + f / (6.0 * CubeFaceHz()), false};
         step(g_perf.c_find);
         Resolve(t);
         step(g_perf.c_resolve);
@@ -3148,7 +3166,38 @@ void D3D12Backend::DeliverReports() {
     }
 }
 
+// GameInfo::cube_face_hz, or XBE_CUBE_FACE_HZ
+float CubeFaceHz() {
+    static const float hz = [] {
+        float v = app::kGame.cube_face_hz;
+        if (const char* e = std::getenv("XBE_CUBE_FACE_HZ")) v = float(std::atof(e));
+        if (v > 0) LOGR("d3d12: cube map faces drawn at most %.0f times a second each", v);
+        return v;
+    }();
+    return hz;
+}
+
+double D3D12Backend::FaceClock() const {
+    static const auto start = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+// at a present: which faces the next frame draws. A face due draws and is due again a period later (no further back
+// than a period ago, so a slow frame does not leave a backlog); below the rate every face draws every frame
+void D3D12Backend::PlanCubeFaces() {
+    if (cube_faces_.empty()) return;
+    const double now = FaceClock(), period = 1.0 / CubeFaceHz();
+    for (auto& [data, f] : cube_faces_) {
+        f.rest = now < f.due;
+        if (!f.rest) f.due = std::max(f.due + period, now - period);
+    }
+}
+
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
+        g_perf.face_skips++;
+        return;
+    }
     if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
         Clear(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
@@ -3546,6 +3595,10 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
 
 void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
+        g_perf.face_skips++;
+        return;
+    }
     PerfScope perf_clear{g_perf.clear};
     if (cap_) {
         CapStep(s.rt, s.zs);
@@ -4103,8 +4156,9 @@ void LogPerf() {
              p.runs ? double(p.run_draws) / double(p.runs) : 0.0);
         LOGR("perf: draw's other steps per frame, ms: before assembly %.2f, targets %.2f, checks and note %.2f, after "
              "geometry %.2f | consts: vertex constants %.2f, filled %.2f, uploaded %.2f | render thread: state %.2f, "
-             "batches %.2f", p.pre / n, p.bind_targets / n, p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n,
-             p.k_dc / n, g_perf_state_ns.exchange(0) / n / 1e6, g_perf_batch_ns.exchange(0) / n / 1e6);
+             "batches %.2f | resting cube faces: %.0f draws and clears left out", p.pre / n, p.bind_targets / n,
+             p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n, p.k_dc / n, g_perf_state_ns.exchange(0) / n / 1e6,
+             g_perf_batch_ns.exchange(0) / n / 1e6, p.face_skips / n);
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
@@ -4378,6 +4432,7 @@ void D3D12Backend::LogDebugMessages() {
 void D3D12Backend::Present(const Surface& front) {
     LogDebugMessages();
     PerfScope perf_present{g_perf.present};
+    PlanCubeFaces();
     // a file named capture beside the exe asks for a capture as F3 does, checked every 30 frames
     if (presents_ % 30 == 0 && !diag::CaptureDir().empty()) {
         std::error_code ec;
