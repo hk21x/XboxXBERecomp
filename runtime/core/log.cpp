@@ -116,12 +116,18 @@ void Write(Level lv, const char* fmt, ...) {
     // the line is only queued: the writer thread puts it in the file (and stderr) within 250 ms, warnings and errors
     // at once. A write to the disk, or to the network when the game runs from a share, never holds up the caller (a
     // render thread waiting 400 ms on one flush was a hitch on Harry's PC)
+    // XBE_LOG_SYNC=1 (to find a silent exit): every line written at once, as the process may go before the writer
+    static const bool sync = [] {
+        const char* e = std::getenv("XBE_LOG_SYNC");
+        return e && *e == '1';
+    }();
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        StartWriter();
+        if (!sync) StartWriter();
         g_pending.append(line, size_t(n));
         if (lv == Level::Warn || lv == Level::Error) g_urgent = true;
     }
+    if (sync) return WriteOut();
     if (lv == Level::Warn || lv == Level::Error) g_cv.notify_one();
 }
 

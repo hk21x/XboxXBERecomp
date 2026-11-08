@@ -370,6 +370,14 @@ void Pace(uint32_t vblanks) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetUnhandledExceptionFilter(app::WriteCrashDump);
     std::signal(SIGABRT, [](int) { app::WriteCrashDump(nullptr); });
+    // the C runtime's invalid parameter (a bad printf argument, a closed handle...) ends the process at once, without
+    // the filter above: logged and dumped first
+    _set_invalid_parameter_handler([](const wchar_t* expr, const wchar_t* fn, const wchar_t* file, unsigned line, uintptr_t) {
+        LOGE("the C runtime's invalid parameter handler: %ls in %ls (%ls:%u)", expr ? expr : L"?", fn ? fn : L"?",
+             file ? file : L"?", line);
+        app::WriteCrashDump(nullptr);
+        std::_Exit(3);
+    });
     timeBeginPeriod(1);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // one log a session: a relaunch into another image carries on its predecessor's
