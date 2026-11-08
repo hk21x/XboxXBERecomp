@@ -530,6 +530,11 @@ private:
     void SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc);
     void SetBlendFactorStencilRef(const State& s);
     void DrawGeometry(const Assembled& a);
+    struct DrawPacket;
+    void Record(DrawPacket& p, PerfClock::time_point& perf_post);
+    std::unique_ptr<DrawPacket> packet_holder_;
+    DrawPacket& packet_ = *(packet_holder_ = MakePacket());
+    static std::unique_ptr<DrawPacket> MakePacket();
     void UploadVertexBuffers(const Assembled& a);
     void RunCopies();
     // visibility tests
@@ -3198,6 +3203,21 @@ void D3D12Backend::PlanCubeFaces() {
     }
 }
 
+// what a draw's decide half (Draw) hands its record half (Record)
+struct D3D12Backend::DrawPacket {
+    const State* s;
+    const Assembled* a;
+    uint32_t prim, count;
+    DrawShaders sh;
+    PsoKey k;
+    DrawTextures stages;
+    GuestExtent size;
+    DrawConstants c;  // wdepth and hud set by decide, the rest by record
+    PixelKey pk;
+};
+
+std::unique_ptr<D3D12Backend::DrawPacket> D3D12Backend::MakePacket() { return std::make_unique<DrawPacket>(); }
+
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
         g_perf.face_skips++;
@@ -3297,11 +3317,14 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
     g_perf.t_shaders += PerfMs(perf_shaders);
     // stage textures, then the pixel shader made for them
-    DrawTextures stages;
+    // decide writes the packet's parts in place: the constants alone are 2.8 KB a draw
+    DrawTextures& stages = packet_.stages;
+    stages = DrawTextures{};
     draw_2d_ = a.pretransformed || ScreenDraw(s);
     if (!BindStageTexturesAndTargets(s, stages)) return;
     perf_shaders = PerfNow();
-    PixelKey pk = MakePixelKey(s, stages.info);
+    PixelKey& pk = packet_.pk;
+    pk = MakePixelKey(s, stages.info);
     const diag::DrawTest& test = diag::DrawTests();
     bool tested = test.vs && s.vs_handle == test.vs;
     if (tested && test.alphakill) pk.alphakill = 0;
@@ -3349,7 +3372,8 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     size = DrawnExtent(s, size);
-    DrawConstants c{};
+    DrawConstants& c = packet_.c;
+    c = DrawConstants{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
     c.hud[2] = DepthTested(s) ? 1.0f : 0.0f;
@@ -3366,6 +3390,35 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     }
     SqueezeBeyond(s, c.hud);
     Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud);
+    g_perf.consts += PerfMs(perf_consts);
+    // the rest is record's (docs/render-parallel.md): constants, views and samplers, viewport, geometry, the note
+    DrawPacket& p = packet_;
+    p.s = &s;
+    p.a = &a;
+    p.prim = prim;
+    p.count = count;
+    p.sh = sh;
+    p.k = k;
+    p.size = size;
+    Record(p, perf_post);
+}
+
+// A draw's record half, from what its decide half (Draw) settled. Today on the same thread, at once. It reads the
+// state and the draw's packet; what it still reads of decide's members (the bound targets in PointScale and
+// SetViewportScissor, stage0_ for the note, the upload ring and descriptor slots shared with binding) moves into the
+// packet or is split before record runs on a thread of its own
+void D3D12Backend::Record(DrawPacket& p, PerfClock::time_point& perf_post) {
+    const State& s = *p.s;
+    const Assembled& a = *p.a;
+    const uint32_t prim = p.prim, count = p.count;
+    const DrawShaders& sh = p.sh;
+    const PsoKey& k = p.k;
+    DrawTextures& stages = p.stages;
+    const GuestExtent size = p.size;
+    DrawConstants& c = p.c;
+    const PixelKey& pk = p.pk;
+    (void)prim;
+    auto perf_consts = PerfNow();
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
 
