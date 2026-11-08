@@ -107,11 +107,11 @@ constexpr uint16_t kLowPortShift = 20000;
 constexpr uint16_t kLowPorts = 1024;
 uint16_t HostPort(uint16_t port) {
     uint16_t p = ntohs(port);
-    return g_instance && kLowPortShift && p && p < kLowPorts ? htons(uint16_t(p + kLowPortShift)) : port;
+    return g_instance && kLowPortShift != 0 && p && p < kLowPorts ? htons(uint16_t(p + kLowPortShift)) : port;
 }
 uint16_t GuestPort(uint16_t port) {
     uint16_t p = ntohs(port);
-    return g_instance && kLowPortShift && p > kLowPortShift && p < kLowPortShift + kLowPorts ? htons(uint16_t(p - kLowPortShift)) : port;
+    return g_instance && kLowPortShift != 0 && p > kLowPortShift && p < kLowPortShift + kLowPorts ? htons(uint16_t(p - kLowPortShift)) : port;
 }
 
 std::string Ip(uint32_t a) {
