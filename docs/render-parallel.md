@@ -48,3 +48,52 @@ replays draws through Draw).
 - The upload ring and descriptor heaps are allocated in Plan only; Record writes into ranges it was given.
 - Feedback copies, MSAA resolves and shrinks record commands in Plan (they are part of binding): they become packets.
 - Occlusion queries (visibility tests) and captures stay on the render thread: a draw with either is recorded in Plan.
+
+
+## Revision (2026-11-08): what stage A showed, and the pipeline instead
+
+Stage A's recorder showed that writing the commands (the replay) is only about 1.1 to 1.4 ms of a heavy frame: stage B
+as above (replay on helpers) gains little. Since then on render-mt and render-mt2:
+- the prep thread assembles draws ahead (1.5 ms);
+- the title's state compare is faster;
+- textures are placed in heaps, which ended the in-race hitches (0.1% low 34 to 52 fps);
+- reflections rest in late frames.
+Harry's heaviest seconds are now about 80 fps at about 4600 draws, 2.2 us a draw.
+
+A heavy frame's draw time (5114 draws, d8a6414):
+
+| step | ms | where it belongs |
+|---|---|---|
+| targets, texture binding, shaders, pipeline | 0.3 + 2.5 + 0.8 + 0.4 | decide: shared caches (targets_, textures_, pipelines), barriers |
+| constants (fill, compare, upload) | 2.1 | record |
+| tables (views, samplers) | 1.0 | record |
+| viewport, scissor, blend, stencil | 0.2 | record |
+| geometry (vertex and index upload, the draw) | 0.5 | record |
+| the draw's note, checks | 0.5 | record |
+| replay into the list | 1.4 | record |
+
+So a three stage pipeline, one draw at a time and in order:
+
+1. **prep** (exists): its own state copy, assembly.
+2. **decide** (the render thread): its own state copy; targets, textures, shaders, pipeline. Out: a packet per draw.
+   It carries the pipeline, the stages (DrawTextures), the shader facts (DrawShaders, PixelKey bits), PsoKey's
+   zbias, the bound targets' sizes and pointers, and the barriers and copies binding recorded.
+3. **record** (a new thread): its own state copy, from the same batch changes; constants, tables, viewport and
+   scissor, blend and stencil, geometry, note; it writes rec_ and replays it. It owns ds_cache_, root_args_,
+   vsc_last_ and dc_last_, views and tables_, the samplers, and the draw notes.
+
+Shared between decide and record, split or guarded:
+- the upload ring: texture uploads (decide) and constants or geometry (record). Either two rings, or record owns
+  the ring and decide's uploads become packets.
+- descriptor slots: AllocSrvSlots (tables, record) and the targets' and feedback views (decide).
+- anything decide writes to the list directly (copies, resolves, clears, presents, read-backs, Submit): a fence
+  point. Decide waits until record has drained, does it, and goes on. Clears, copies and presents are already their
+  own commands; binding's copies (cube faces, resolves, shrinks) go into the packet as recorded commands.
+
+Steps, each verified on Harry's PC before the next:
+1. The split on one thread: Draw becomes Decide (a packet) then Record (the packet), at once. Same pictures; the
+   packet's cost is measured.
+2. Record's own state copy from the batches (Threaded hands record the same changes); still one thread.
+3. Record on its own thread, with fence points.
+Expected: decide about 4.5 to 5 ms and record about 5 ms of today's heavy frame, run side by side: about 140 fps
+in Harry's heaviest seconds.
