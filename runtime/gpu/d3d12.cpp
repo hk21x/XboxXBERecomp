@@ -110,6 +110,8 @@ struct Perf {
     uint64_t verts = 0;
     uint64_t upload = 0;
     uint64_t overflow = 0;
+    uint64_t flushes = 0;  // lists the CPU waited for the GPU to finish (Submit(true))
+    double flush_wait = 0;  // that wait, ms
     uint64_t sigs = 0;
     uint64_t sig_bytes = 0;
     uint64_t texups = 0;
@@ -1150,7 +1152,10 @@ void D3D12Backend::Submit(bool wait) {
         ReportRemoved("a list waited for");  // before the next list records markers over Aftermath's last ones
     }
     if (wait) {
+        auto perf_w = PerfNow();
         WaitFence(fence_value_);
+        g_perf.flushes++;
+        g_perf.flush_wait += PerfMs(perf_w);
         f.alloc->Reset();
         DropGarbage(f);
         f.used = 0;
@@ -3896,8 +3901,36 @@ void LogPerf() {
     // each frame's time, for the busy summary's lows: this second's, then kept when the second was busy
     static PerfClock::time_point frame_was = PerfClock::now();
     static std::vector<float> second_frames, busy_frames_ms;
-    second_frames.push_back(float(PerfMs(frame_was)));
+    const double frame_ms = PerfMs(frame_was);
+    second_frames.push_back(float(frame_ms));
     frame_was = PerfClock::now();
+    // a slow frame in a busy scene (25 ms or more, 300 draws or more): what it did, against the frame before
+    static Perf was{};
+    static uint64_t title_rec_was = 0, title_wait_was = 0;
+    static int slow_told = 0;
+    const uint64_t title_rec = g_perf_capture_ns.load(), title_wait = g_perf_wait_ns.load();
+    {
+        const Perf& p = g_perf;
+        uint64_t draws = p.draws - was.draws;
+        if (frame_ms >= 25 && draws >= 300 && slow_told < 200) {
+            slow_told++;
+            LOGR("perf: slow frame %.1f ms, %llu draws: draw %.2f (bind %.2f, compile %.2f), %llu new textures, %llu new "
+                 "targets, %llu texture uploads (%.2f ms), %llu shaders, %llu pipelines (%.2f ms), %llu GPU waits (%.2f "
+                 "ms), clear %.2f, copy %.2f, sync %.2f, present %.2f (swap %.2f, frame wait %.2f) | title: recording "
+                 "%.2f ms, waiting %.2f ms", frame_ms, (unsigned long long)draws, p.draw - was.draw, p.bind - was.bind,
+                 p.compile - was.compile, (unsigned long long)(p.newtex - was.newtex),
+                 (unsigned long long)(p.targets - was.targets), (unsigned long long)(p.texups - was.texups),
+                 p.texup - was.texup, (unsigned long long)(p.shaders - was.shaders),
+                 (unsigned long long)(p.psos - was.psos), p.pso - was.pso, (unsigned long long)(p.flushes - was.flushes),
+                 p.flush_wait - was.flush_wait, p.clear - was.clear, p.copy - was.copy, p.sync - was.sync,
+                 p.present - was.present, p.swap - was.swap, p.wait - was.wait,
+                 title_rec >= title_rec_was ? (title_rec - title_rec_was) / 1e6 : 0.0,
+                 title_wait >= title_wait_was ? (title_wait - title_wait_was) / 1e6 : 0.0);
+        }
+        was = p;
+        title_rec_was = title_rec;
+        title_wait_was = title_wait;
+    }
     double el = PerfMs(perf_start);
     if (el >= 1000.0) {
         Perf& p = g_perf;
@@ -3977,6 +4010,8 @@ void LogPerf() {
         }
         second_frames.clear();
         g_perf = Perf{};
+        was = Perf{};
+        title_rec_was = title_wait_was = 0;  // exchanged to 0 above
         perf_start = PerfClock::now();
         perf_frames = 0;
     }
