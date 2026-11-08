@@ -23,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -389,6 +390,25 @@ private:
     // the frame's resources let go once the GPU is done with them; XBE_KEEP_RELEASED=1 (experiment) keeps every one
     uint64_t released_ = 0;
     std::vector<ComPtr<ID3D12Resource>> kept_;
+    // Textures placed in large heaps (CreatePlacedResource), XBE_PLACED_TEXTURES=0 for one committed resource each:
+    // CreateCommittedResource took about 0.5 ms a texture, and PGR2 streams in up to 400 in a frame (hitches of 30 to
+    // 240 ms on Harry's PC). First fit in 64 MB heaps of textures only (no targets), ranges joined again when freed
+    struct TexHeap {
+        ComPtr<ID3D12Heap> heap;
+        std::map<uint64_t, uint64_t> free;  // offset, bytes
+    };
+    struct TexPlace {
+        uint32_t heap;
+        uint64_t offset, bytes;
+    };
+    static constexpr uint64_t kTexHeapBytes = 64ull << 20;
+    static constexpr uint64_t kPlacedMax = 16ull << 20;  // bigger textures are committed resources of their own
+    std::vector<TexHeap> tex_heaps_;
+    std::unordered_map<ID3D12Resource*, TexPlace> placed_;
+    std::vector<ComPtr<ID3D12Resource>> placed_wait_;  // released textures something else may still hold
+    bool TexHeapAlloc(uint64_t bytes, uint64_t align, TexPlace& at);
+    void TexHeapFree(const TexPlace& at);
+    bool CreatePlacedTexture(D3D12_RESOURCE_DESC& td, ComPtr<ID3D12Resource>& res);
     void DropGarbage(Frame& f) {
         static const bool keep = [] {
             const char* e = std::getenv("XBE_KEEP_RELEASED");
@@ -398,6 +418,24 @@ private:
         }();
         released_ += f.garbage.size();
         if (keep) for (auto& r : f.garbage) kept_.push_back(std::move(r));
+        if (!keep) {
+            // placed textures: their heap range is free once nothing else holds them
+            for (auto& r : f.garbage)
+                if (r && placed_.count(r.Get())) placed_wait_.push_back(std::move(r));
+            for (size_t i = 0; i < placed_wait_.size();) {
+                ID3D12Resource* r = placed_wait_[i].Get();
+                r->AddRef();
+                if (r->Release() == 1) {
+                    auto it = placed_.find(r);
+                    TexHeapFree(it->second);
+                    placed_.erase(it);
+                    placed_wait_[i] = std::move(placed_wait_.back());
+                    placed_wait_.pop_back();
+                } else {
+                    i++;
+                }
+            }
+        }
         f.garbage.clear();
         // a finished frame's shrunk copies wait for the next of their size, a copy source as Shrink left them
         for (auto& r : f.shrinks) {
@@ -2088,6 +2126,95 @@ bool SameTexture(const Tex& tx, const TextureDesc& d) {
            tx.d.depth == d.depth && tx.d.levels == d.levels && tx.d.cube == d.cube && tx.d.pitch == d.pitch;
 }
 
+bool D3D12Backend::TexHeapAlloc(uint64_t bytes, uint64_t align, TexPlace& at) {
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint32_t h = 0; h < tex_heaps_.size(); h++) {
+            auto& free = tex_heaps_[h].free;
+            for (auto it = free.begin(); it != free.end(); ++it) {
+                uint64_t start = (it->first + align - 1) / align * align, end = it->first + it->second;
+                if (start + bytes > end) continue;
+                uint64_t from = it->first;
+                free.erase(it);
+                if (start > from) free[from] = start - from;
+                if (start + bytes < end) free[start + bytes] = end - start - bytes;
+                at = {h, start, bytes};
+                return true;
+            }
+        }
+        if (pass) break;
+        // none fits: another heap
+        D3D12_HEAP_DESC hd{};
+        hd.SizeInBytes = kTexHeapBytes;
+        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+        TexHeap th;
+        if (FAILED(dev_->CreateHeap(&hd, IID_PPV_ARGS(&th.heap)))) return false;
+        th.free[0] = kTexHeapBytes;
+        tex_heaps_.push_back(std::move(th));
+        LOGR("d3d12: texture heap %zu made (%llu MB each)", tex_heaps_.size(), (unsigned long long)(kTexHeapBytes >> 20));
+    }
+    return false;
+}
+
+void D3D12Backend::TexHeapFree(const TexPlace& at) {
+    auto& free = tex_heaps_[at.heap].free;
+    uint64_t off = at.offset, bytes = at.bytes;
+    auto next = free.lower_bound(off);
+    if (next != free.end() && next->first == off + bytes) {  // joined with the range after it
+        bytes += next->second;
+        next = free.erase(next);
+    }
+    if (next != free.begin()) {  // and the one before
+        auto prev = std::prev(next);
+        if (prev->first + prev->second == off) {
+            prev->second += bytes;
+            return;
+        }
+    }
+    free[off] = bytes;
+}
+
+// false: the texture is made otherwise (too big, a heap could not be made, XBE_PLACED_TEXTURES=0)
+bool D3D12Backend::CreatePlacedTexture(D3D12_RESOURCE_DESC& td, ComPtr<ID3D12Resource>& res) {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_PLACED_TEXTURES");
+        bool v = !(e && *e == '0');
+        LOGR("d3d12: textures %s", v ? "placed in heaps" : "made as committed resources (XBE_PLACED_TEXTURES=0)");
+        return v;
+    }();
+    if (!on) return false;
+    // the small alignment where the driver allows it, else 64 KB
+    td.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+    D3D12_RESOURCE_ALLOCATION_INFO info = dev_->GetResourceAllocationInfo(0, 1, &td);
+    if (info.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+        td.Alignment = 0;
+        info = dev_->GetResourceAllocationInfo(0, 1, &td);
+    }
+    if (info.SizeInBytes == UINT64_MAX || info.SizeInBytes > kPlacedMax) {
+        td.Alignment = 0;
+        return false;
+    }
+    TexPlace at;
+    if (!TexHeapAlloc(info.SizeInBytes, info.Alignment, at)) {
+        td.Alignment = 0;
+        return false;
+    }
+    if (FAILED(dev_->CreatePlacedResource(tex_heaps_[at.heap].heap.Get(), at.offset, &td, D3D12_RESOURCE_STATE_COPY_DEST,
+                                          nullptr, IID_PPV_ARGS(&res)))) {
+        TexHeapFree(at);
+        td.Alignment = 0;
+        return false;
+    }
+    placed_[res.Get()] = at;
+    // the range may have held a texture released earlier: the new one takes the memory over before it is written
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    b.Aliasing.pResourceAfter = res.Get();
+    rec_.Barrier(b);
+    return true;
+}
+
 // false when the texture could not be made, its entry dropped
 bool D3D12Backend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, uint64_t key) {
     g_perf.newtex++;
@@ -2113,7 +2240,8 @@ bool D3D12Backend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo
     td.MipLevels = UINT16(tx.levels);
     td.Format = tx.fmt;
     td.SampleDesc.Count = 1;
-    if (SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+    if (CreatePlacedTexture(td, tx.res) ||
+        SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                 IID_PPV_ARGS(&tx.res)))) {
         Name(tx.res.Get(), "texture %08X %ux%u format %X (present %llu)", d.data, d.width, d.height, d.format,
              (unsigned long long)presents_);
