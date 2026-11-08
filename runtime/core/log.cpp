@@ -68,7 +68,14 @@ void Write(Level lv, const char* fmt, ...) {
     n = std::min(n, int(sizeof(line)) - 1);
     if (g_file) {
         std::fwrite(line, 1, size_t(n), g_file);
-        if (lv >= Level::Warn) std::fflush(g_file);
+        // warnings and errors reach the file at once; report lines at most every 250 ms (a crash, an exit and a
+        // relaunch flush the rest). Each flush is a write to the disk, or the network when the game runs from a share:
+        // a burst of report lines (a few hundred textures made in one frame) cost about 0.85 ms a line
+        static double flushed = 0;
+        if (lv == Level::Warn || lv == Level::Error || (lv == Level::Report && t - flushed >= 0.25)) {
+            std::fflush(g_file);
+            flushed = t;
+        }
     }
     std::fwrite(line, 1, size_t(n), stderr);
 }
