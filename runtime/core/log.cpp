@@ -35,6 +35,15 @@ void Init(const std::string& dir, const std::string& prefix, bool append) {
     fs::create_directories(dir, ec);
     if (!kVerbose) {
         g_path = (fs::path(dir) / (prefix + ".log")).string();
+        // the last runs' logs are kept: prefix.log moves to prefix.1.log, that to prefix.2.log, and so on (a run
+        // started straight after another no longer loses the one before)
+        if (!append && fs::exists(g_path, ec)) {
+            constexpr int kKeepRelease = 5;
+            auto old = [&](int i) { return (fs::path(dir) / (prefix + "." + std::to_string(i) + ".log")); };
+            fs::remove(old(kKeepRelease), ec);
+            for (int i = kKeepRelease - 1; i >= 1; i--) fs::rename(old(i), old(i + 1), ec);
+            fs::rename(g_path, old(1), ec);
+        }
         g_file = std::fopen(g_path.c_str(), append ? "a" : "w");
         return;
     }
