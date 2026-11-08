@@ -248,6 +248,7 @@ public:
         Cmd c{Op::Present};
         c.s1 = front;
         c.s1.header = Header(front.header);
+        c.check = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());  // when the title finished the frame
         cur_->cmds.push_back(c);
         Use(front.header);
         uint64_t id = Submit();
@@ -826,7 +827,22 @@ private:
                 break;
             case Op::Clear: inner_->Clear(state_, c.a, c.size ? data : nullptr, c.b, c.c, c.f, c.d); break;
             case Op::Copy: inner_->Copy(c.s1, c.s2, c.a, c.b, c.c); break;
-            case Op::Present: inner_->Present(c.s1); break;
+            case Op::Present: {
+                inner_->Present(c.s1);
+                // XBE_PERF: how long after the title finished the frame it was presented, and how that changes from frame
+                // to frame (motion is set by the title's clock; a delay that varies shows as judder at any frame rate)
+                static const bool perf = diag::Perf();
+                if (perf && c.check) {
+                    static int64_t last = -1;
+                    int64_t now = int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+                    int64_t delay = now - int64_t(c.check);
+                    g_perf_delay_ns += uint64_t(std::max<int64_t>(delay, 0));
+                    if (last >= 0) g_perf_delay_jitter_ns += uint64_t(std::llabs(delay - last));
+                    g_perf_delays++;
+                    last = delay;
+                }
+                break;
+            }
             case Op::Sync: inner_->Sync(c.a, 0); break;
             case Op::RecordLate: inner_->RecordLate(c.a); break;
             case Op::Flush: inner_->Flush(); break;

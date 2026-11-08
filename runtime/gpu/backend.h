@@ -100,6 +100,8 @@ inline std::atomic<uint64_t> g_perf_drain_ns{0}, g_perf_drains{0};
 // the render thread's commands that made it wait for record, by kind: copy, present, read-back, late read-back, flush,
 // other
 inline std::atomic<uint64_t> g_perf_fence_ops[6] = {};
+// frames: from the title finishing one to its present, summed; the change of that delay from frame to frame, summed
+inline std::atomic<uint64_t> g_perf_delay_ns{0}, g_perf_delay_jitter_ns{0}, g_perf_delays{0};
 inline std::atomic<uint64_t> g_perf_wait_kind_ns[6];  // read-back, resource, fence, flush, copy, next frame
 inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read-backs the title waited for, by cause
 inline std::atomic<uint32_t> g_shaders_compiled{0};  // D3DCompile calls (the shader cache missed), for the frames lines

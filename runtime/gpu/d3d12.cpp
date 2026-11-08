@@ -4402,6 +4402,12 @@ void LogPerf() {
              g_perf_fence_ops[1].exchange(0) / n, g_perf_fence_ops[2].exchange(0) / n, g_perf_fence_ops[3].exchange(0) / n,
              g_perf_fence_ops[4].exchange(0) / n, g_perf_fence_ops[5].exchange(0) / n, g_perf_record_ns.exchange(0) / n / 1e6,
              p.face_skips / n);
+        {
+            const double k = double(g_perf_delays.exchange(0));
+            const double d = g_perf_delay_ns.exchange(0) / 1e6, j = g_perf_delay_jitter_ns.exchange(0) / 1e6;
+            LOGR("perf: title to present: %.2f ms on average, changing %.2f ms from frame to frame", k ? d / k : 0.0,
+                 k > 1 ? j / (k - 1) : 0.0);
+        }
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
