@@ -3182,13 +3182,18 @@ double D3D12Backend::FaceClock() const {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 }
 
-// at a present: which faces the next frame draws. A face due draws and is due again a period later (no further back
-// than a period ago, so a slow frame does not leave a backlog); below the rate every face draws every frame
+// at a present: which faces the next frame draws. Only while frames run late (the last took longer than
+// kFaceBudget): a face due draws and is due again a period later (no further back than a period ago, so a slow frame
+// leaves no backlog), the others rest. A frame on time draws every face, so reflections are as before but in the
+// heaviest scenes
 void D3D12Backend::PlanCubeFaces() {
+    constexpr double kFaceBudget = 1.0 / 120;  // seconds a frame may take before faces start resting
+    static double last = FaceClock();
+    const double now = FaceClock(), took = now - last, period = 1.0 / CubeFaceHz();
+    last = now;
     if (cube_faces_.empty()) return;
-    const double now = FaceClock(), period = 1.0 / CubeFaceHz();
     for (auto& [data, f] : cube_faces_) {
-        f.rest = now < f.due;
+        f.rest = took > kFaceBudget && now < f.due;
         if (!f.rest) f.due = std::max(f.due + period, now - period);
     }
 }
