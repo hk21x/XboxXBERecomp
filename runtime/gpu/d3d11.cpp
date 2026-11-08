@@ -305,6 +305,13 @@ private:
     void DropMs(Target& t);
     ComPtr<ID3D11Texture2D> PrepareCopySource(Target& t);  // guest sized BGRA: the target, or a shrunk copy
     ComPtr<ID3D11Texture2D> Shrink(Target& t, uint32_t w, uint32_t h);
+    // the cube faces' shrunk copies, one kept per size with its view: the context orders the copy before the next shrink
+    // draws over it (a new texture per face per frame cost PGR2's races 1.5 ms a frame on Direct3D 12)
+    struct CubeShrink {
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11RenderTargetView> rtv;
+    };
+    std::unordered_map<uint64_t, CubeShrink> cube_shrinks_;
     bool ReadBack(ID3D11Texture2D* src, uint32_t w, uint32_t h, std::vector<uint8_t>& out);
     // full screen passes
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
@@ -1494,7 +1501,24 @@ void D3D11Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
-        ComPtr<ID3D11Texture2D> src = PrepareCopySource(t);
+        ComPtr<ID3D11Texture2D> src;
+        Settle(t);
+        if (t.w != t.gw || t.h != t.gh) {
+            CubeShrink& k = cube_shrinks_[uint64_t(t.gw) << 32 | t.gh];
+            if (!k.tex) {
+                D3D11_TEXTURE2D_DESC td = Texture2DDesc(kBgra, t.gw, t.gh, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+                if (FAILED(dev_->CreateTexture2D(&td, nullptr, &k.tex)) || FAILED(dev_->CreateRenderTargetView(k.tex.Get(), nullptr, &k.rtv))) {
+                    k = {};
+                    continue;
+                }
+            }
+            SetPassTarget(k.rtv.Get(), nullptr, t.gw, t.gh);
+            float uv[4] = {0, 0, 1, 1};
+            Blit(t.srv.Get(), uv, {.alpha = true});
+            src = k.tex;
+        } else {
+            src = t.res;
+        }
         if (src) ctx_->CopySubresourceRegion(tx.res.Get(), D3D11CalcSubresource(0, f, tx.levels), 0, 0, 0, src.Get(), 0, nullptr);
     }
 }
