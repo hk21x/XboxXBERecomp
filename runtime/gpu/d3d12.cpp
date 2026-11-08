@@ -325,6 +325,8 @@ public:
     // change only the stages)
     bool RecordOnThread(std::function<void()> drain) override;
     bool ClearsRecorded() const override { return record_thread_; }
+    // visibility tests: their queries are record's, and so are the report clears and reads in between the draws
+    bool ReportsRecorded() const override { return record_thread_; }
     void RecordNext(const State& s) override;
     void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                        const Assembled& pre, bool ok) override {
@@ -557,6 +559,7 @@ private:
     }
     // what record reads of the draw's targets and stage 0 (set from its packet)
     float rec_point_scale_ = 1;
+    float rec_spp_ = 1;  // the draw's targets' samples per console pixel (visibility tests)
     uint32_t rec_vp_w_ = 0, rec_vp_h_ = 0, rec_vp_gh_ = 0;
     D3D12_SAMPLER_DESC rec_sd_{};  // stage 0's sampler, for the note
     void UploadVertexBuffers(const Assembled& a);
@@ -3191,16 +3194,14 @@ uint32_t D3D12Backend::BeginCountedDraw(const State& s) {
     }();
     if (none || !EnsureQueries()) return kNoQuery;
     uint32_t query = query_next_++ % kQueries;
-    CL()->BeginQuery(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
+    rec_.BeginQuery(query_heap_.Get(), query);  // record's: it writes the draw too
     return query;
 }
 
 void D3D12Backend::EndCountedDraw(uint32_t query) {
     if (query == kNoQuery) return;
-    CL()->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
-    uint64_t at = uint64_t(query) * sizeof(uint64_t);
-    CL()->ResolveQueryData(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query, 1, query_rb_.Get(), at);
-    counted_.push_back({query, SamplesPerPixel()});
+    rec_.EndQuery(query_heap_.Get(), query_rb_.Get(), query);
+    counted_.push_back({query, rec_spp_});  // the samples per pixel decide found for the draw's targets
 }
 
 // the console counts its own pixels: the bound target's scale and multisampling come out
@@ -3277,6 +3278,7 @@ struct D3D12Backend::DrawPacket {
     D3D12Rec pre;                       // decide's own commands (barriers, targets), before the draw's
     ID3D12PipelineState* pso = nullptr;
     float point_scale = 1;              // the bound targets' host pixels per console pixel
+    float spp = 1;                      // SamplesPerPixel, for a visibility test's count
     uint32_t vp_w = 0, vp_h = 0, vp_gh = 0;  // the bound target's (colour, else depth)
     DrawNote stage0;                    // stage 0's texture, for the note
     bool draw = false;                  // false: only pre (the draw was left out, or recorded already)
@@ -3510,7 +3512,8 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     p.stage0 = stage0_;
     p.draw = true;
     // visibility tested draws (queries write the list) and captures are recorded here, once record has drained
-    if (record_thread_ && !s.simple[kMCountEnable >> 2] && !cap_) return;  // handed over at the end of decide
+    p.spp = SamplesPerPixel();
+    if (record_thread_ && !cap_) return;  // handed over at the end of decide
     if (record_thread_) DrainRecord();
     deciding_ = false;  // decided: record writes rec_ itself
     Record(p, perf_post);
@@ -3570,6 +3573,7 @@ void D3D12Backend::Record(DrawPacket& p, PerfClock::time_point& perf_post) {
     rec_.Append(p.pre);  // decide's commands first
     if (ds_cache_.pso != p.pso) rec_.Pso(ds_cache_.pso = p.pso);
     rec_point_scale_ = p.point_scale;
+    rec_spp_ = p.spp;
     rec_vp_w_ = p.vp_w, rec_vp_h_ = p.vp_h, rec_vp_gh_ = p.vp_gh;
     auto perf_consts = PerfNow();
     UploadConstants(s, sh, k, stages, size, c);

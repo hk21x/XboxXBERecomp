@@ -38,6 +38,8 @@ public:
     virtual void RecordNext(const State& /*s*/) {}
     // clears too are decided and handed to record (a RecordNext each), not fences
     virtual bool ClearsRecorded() const { return false; }
+    // ClearReport and GetReport are called on the record thread, in order with its draws, not as fences
+    virtual bool ReportsRecorded() const { return false; }
     virtual void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                                const Assembled& /*pre*/, bool /*ok*/) {
         Draw(s, prim, start, count, indices);

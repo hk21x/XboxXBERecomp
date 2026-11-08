@@ -159,6 +159,7 @@ public:
             return !(e && *e == '0') && inner_->RecordOnThread([this] { Drain(); });
         }();
         record_clears_ = record_ && inner_->ClearsRecorded();
+        record_reports_ = record_ && inner_->ReportsRecorded();
         if (record_) std::thread([this] { Record(); }).detach();
         std::thread([this] { Run(); }).detach();
     }
@@ -583,7 +584,8 @@ private:
                 run_cmd_ = i;
                 // with the pipeline, anything but a state change, a draw or (when the backend records them) a clear
                 // writes the list: record drains first
-                if (record_ && c.op != Op::State && c.op != Op::Draw && !(c.op == Op::Clear && record_clears_)) {
+                if (record_ && c.op != Op::State && c.op != Op::Draw && !(c.op == Op::Clear && record_clears_) &&
+                    !((c.op == Op::ClearReport || c.op == Op::GetReport) && record_reports_)) {
                     PushSegment(i, false);
                     WaitRecorded();
                 }
@@ -678,6 +680,10 @@ private:
                 if (c.op == Op::State) {
                     if (ApplyState(rec_state_, *g.b, c) || !rec_vsc_count_) rec_vsc_count_++;
                     rec_state_.vsc_gen = rec_vsc_count_;
+                } else if (c.op == Op::ClearReport && record_reports_) {
+                    inner_->ClearReport();
+                } else if (c.op == Op::GetReport && record_reports_) {
+                    inner_->GetReport(c.a);
                 } else if (c.op == Op::Draw || (c.op == Op::Clear && record_clears_)) {
                     inner_->RecordNext(rec_state_);
                     if (c.pre >= 0) pre_used_.fetch_add(1, std::memory_order_release);  // its slot is free now
@@ -823,8 +829,12 @@ private:
             case Op::RecordLate: inner_->RecordLate(c.a); break;
             case Op::Flush: inner_->Flush(); break;
             case Op::Gamma: inner_->SetGamma(data); break;
-            case Op::ClearReport: inner_->ClearReport(); break;
-            case Op::GetReport: inner_->GetReport(c.a); break;
+            case Op::ClearReport:
+                if (!record_reports_) inner_->ClearReport();  // else the record thread's, in order with the draws
+                break;
+            case Op::GetReport:
+                if (!record_reports_) inner_->GetReport(c.a);
+                break;
         }
     }
 
@@ -894,6 +904,7 @@ private:
     // the pipeline's record thread (Record), when the backend records on it (RecordOnThread)
     bool record_ = false, run_exited_ = false;
     bool record_clears_ = false;  // the backend decides clears and hands them to record too
+    bool record_reports_ = false;  // visibility test reports are record's
     std::deque<Segment> segments_;
     uint64_t segs_pushed_ = 0, segs_done_ = 0;  // under m_
     std::condition_variable seg_cv_, seg_done_cv_;
