@@ -351,7 +351,7 @@ public:
     void GetReport(uint32_t report) override { reports_.push_back({report, counted_, fence_value_ + 1}); }
 
     ID3D12Device* Device() override { return dev_.Get(); }
-    ID3D12GraphicsCommandList* List() override { return CL(); }
+    ID3D12GraphicsCommandList* List() override { return CLAt(__func__); }
     void Release(ComPtr<ID3D12Resource> r) override { CurrentFrame().garbage.push_back(std::move(r)); }
     D3D12_CPU_DESCRIPTOR_HANDLE View(const Target& t) override { return Cpu(rtv_heap_.Get(), t.view, rtv_inc_); }
     void Unbind() override { bound_rt_ = bound_ds_ = nullptr; }
@@ -800,7 +800,7 @@ private:
     uint64_t fence_value_ = 0;
     Frame frames_[kFrames];
     uint64_t frame_ = 0;
-    ComPtr<ID3D12GraphicsCommandList> cl_;  // written through CL(), which replays rec_ first
+    ComPtr<ID3D12GraphicsCommandList> cl_;  // written through CLAt(__func__), which replays rec_ first
     D3D12Rec rec_;                          // the draws' commands, in order (stage A of docs/render-parallel.md); record's
     // The pipeline (docs/render-parallel.md): while a draw is decided its own commands (barriers, targets) go into its
     // packet, which record appends to rec_ first. Anything that writes the list itself, or record's caches, first lets
@@ -817,12 +817,16 @@ private:
         drain_();
     }
     D3D12Rec& DRec();
-    ID3D12GraphicsCommandList* CL() {
+    // which functions write the list directly (XBE_PERF: their drains, by function)
+    ID3D12GraphicsCommandList* CLAt(const char* fn) {
+        if (drain_ && diag::Perf()) NoteDrain(fn);
         DrainRecord();
         TakeDecided();
         FlushRec();
         return cl_.Get();
     }
+    void NoteDrain(const char* fn);
+    std::unordered_map<const char*, uint64_t> drain_fns_;
     void TakeDecided();  // a draw being decided: its commands so far into rec_, before something written after them
     void FlushRec();
     ComPtr<ID3D12DescriptorHeap> srv_heap_;
@@ -1192,8 +1196,8 @@ void D3D12Backend::LoadSettings() {
 
 void D3D12Backend::Begin() {
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), smp_heap_.Get()};
-    CL()->SetDescriptorHeaps(2, heaps);
-    CL()->SetGraphicsRootSignature(root_.Get());
+    CLAt(__func__)->SetDescriptorHeaps(2, heaps);
+    CLAt(__func__)->SetGraphicsRootSignature(root_.Get());
     bound_rt_ = bound_ds_ = nullptr;
     std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
     ForgetDrawState();
@@ -1305,13 +1309,13 @@ void D3D12Backend::SetFullViewport(uint32_t w, uint32_t h) {
     ForgetDrawState();
     D3D12_VIEWPORT vp{0, 0, float(w), float(h), 0, 1};
     D3D12_RECT scissor{0, 0, LONG(w), LONG(h)};
-    CL()->RSSetViewports(1, &vp);
-    CL()->RSSetScissorRects(1, &scissor);
+    CLAt(__func__)->RSSetViewports(1, &vp);
+    CLAt(__func__)->RSSetScissorRects(1, &scissor);
 }
 
 // one w x h colour target for a Blit, the draw's bound targets forgotten
 void D3D12Backend::SetBlitTarget(D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, uint32_t h) {
-    CL()->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     SetFullViewport(w, h);
 }
@@ -1448,12 +1452,12 @@ bool D3D12Backend::CreateTargetView(Target& t) {
         dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         dev_->CreateDepthStencilView(t.res.Get(), &dv, Cpu(dsv_heap_.Get(), t.view, dsv_inc_));
         float one = 1;
-        CL()->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_),
+        CLAt(__func__)->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_),
                                    D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, one, 0, 0, nullptr);
     } else {
         dev_->CreateRenderTargetView(t.res.Get(), nullptr, Cpu(rtv_heap_.Get(), t.view, rtv_inc_));
         float black[4] = {0, 0, 0, 0};
-        CL()->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
+        CLAt(__func__)->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
     }
     return true;
 }
@@ -1654,7 +1658,7 @@ void D3D12Backend::DrawDepthCopy(Target& src, Target& dst, ID3D12PipelineState* 
     Transition(src.res.Get(), src.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     Transition(dst.res.Get(), dst.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     D3D12_CPU_DESCRIPTOR_HANDLE dh = Cpu(dsv_heap_.Get(), dst.view, dsv_inc_);
-    CL()->OMSetRenderTargets(0, nullptr, FALSE, &dh);
+    CLAt(__func__)->OMSetRenderTargets(0, nullptr, FALSE, &dh);
     SetFullViewport(dst.w, dst.h);
     uint32_t slot = AllocSrvSlots(1);
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -1792,14 +1796,14 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
 void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t srv_slot,
                                   std::optional<uint32_t> sampler_slot) {
     ForgetDrawState();
-    CL()->SetPipelineState(pso);
+    CLAt(__func__)->SetPipelineState(pso);
     SetRootCbv(0, cb);
     SetRootCbv(1, cb);
     SetRootTable(2, Gpu(srv_heap_.Get(), srv_slot, srv_inc_));
     // without a slot the passes take the blit samplers, looked up at this point as they always were
     uint32_t si = sampler_slot ? *sampler_slot : EnsureBlitSamplers();
     SetRootTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
-    CL()->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    CLAt(__func__)->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     // counted with the title's draws, as DRED counts every draw (a lost device's report)
     DrawNote blit;
     blit.list = lists_;
@@ -1807,7 +1811,7 @@ void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_AD
     blit.topo = 99;  // the renderer's own blit
     blit.count = 3;
     list_notes_.push_back(blit);
-    CL()->DrawInstanced(3, 1, 0, 0);
+    CLAt(__func__)->DrawInstanced(3, 1, 0, 0);
 }
 
 void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], const BlitOptions& o) {
@@ -1976,12 +1980,12 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
     }
     Alloc cb = Upload(256, 256);
     std::memcpy(cb.cpu, p, 8 * sizeof(float));
-    CL()->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     SetFullViewport(w, h);
     if (blend >= 0) {
         float f[4] = {blend, blend, blend, blend};
         ForgetDrawState();
-        CL()->OMSetBlendFactor(f);
+        CLAt(__func__)->OMSetBlendFactor(f);
     }
     DrawFullScreen(pso, cb.gpu, slot);
     bound_rt_ = bound_ds_ = nullptr;
@@ -2003,7 +2007,7 @@ ID3D12Resource* D3D12Backend::Feedback(Target& t) {
     }
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Transition(t.fb.Get(), t.fb_state, D3D12_RESOURCE_STATE_COPY_DEST);
-    CL()->CopyResource(t.fb.Get(), t.res.Get());
+    CLAt(__func__)->CopyResource(t.fb.Get(), t.res.Get());
     Transition(t.fb.Get(), t.fb_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return t.fb.Get();
 }
@@ -3764,7 +3768,7 @@ float4 ps(float4 p : SV_Position) : SV_Target { return colour; }
     std::memcpy(cb.cpu, col, 4 * sizeof(float));
     for (const D3D12_RECT& r : rs) {
         if (r.right <= r.left || r.bottom <= r.top) continue;
-        CL()->RSSetScissorRects(1, &r);
+        CLAt(__func__)->RSSetScissorRects(1, &r);
         DrawFullScreen(pso.Get(), cb.gpu, slot);
     }
 }
@@ -3859,7 +3863,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
     Transition(src_res, src_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     Transition(dst_t.res.Get(), dst_t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), dst_t.view, rtv_inc_);
-    CL()->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     float src_scale = float(src_t.w) / src_t.gw;
     float dst_scale = float(dst_t.w) / dst_t.gw;
     float dst_scale_y = float(dst_t.h) / dst_t.gh;
@@ -3878,8 +3882,8 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         D3D12_RECT scissor{LONG(vp.TopLeftX), LONG(vp.TopLeftY), right, bottom};
         if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) continue;
         ForgetDrawState();
-        CL()->RSSetViewports(1, &vp);
-        CL()->RSSetScissorRects(1, &scissor);
+        CLAt(__func__)->RSSetViewports(1, &vp);
+        CLAt(__func__)->RSSetScissorRects(1, &scissor);
         float uv[4] = {r.x0 / src_t.gw, r.y0 / src_t.gh, (r.x1 - r.x0) / src_t.gw, (r.y1 - r.y0) / src_t.gh};
         uint32_t taps = uint32_t(std::ceil(std::max(src_scale / dst_scale, 1.0f) - kTapsSlack));
         float mul = 1 / dst_t.range;
@@ -4070,7 +4074,7 @@ ComPtr<ID3D12Resource> D3D12Backend::SmaaLookup(DXGI_FORMAT fmt, uint32_t w, uin
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     sl.PlacedFootprint.Offset = a.off;
     sl.PlacedFootprint.Footprint = {fmt, w, h, 1, pitch};
-    CL()->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CLAt(__func__)->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
     D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
     Transition(tex.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return tex;
@@ -4166,8 +4170,8 @@ void D3D12Backend::BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt) {
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
     D3D12_RECT scissor{0, 0, LONG(bb_w_), LONG(bb_h_)};
     ForgetDrawState();
-    CL()->RSSetViewports(1, &vp);
-    CL()->RSSetScissorRects(1, &scissor);
+    CLAt(__func__)->RSSetViewports(1, &vp);
+    CLAt(__func__)->RSSetScissorRects(1, &scissor);
     // a title blending its frames (HoldFrame): the last two images mixed, gamma after; every other frame the final pass
     if (hold_live_ && hold_w_ < 1) {
         Blit(hold_[hold_last_].Get(), fmt, uv, {.gamma = gamma_, .mul = hold_w_, .mix = hold_[!hold_last_].Get()});
@@ -4205,7 +4209,7 @@ void D3D12Backend::HoldFrame(Target& t, const Surface& front) {
     auto copy = [&](int i) {
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
         Transition(hold_[i].Get(), hold_state_[i], D3D12_RESOURCE_STATE_COPY_DEST);
-        CL()->CopyResource(hold_[i].Get(), t.res.Get());
+        CLAt(__func__)->CopyResource(hold_[i].Get(), t.res.Get());
         Transition(hold_[i].Get(), hold_state_[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     };
     if (!hold_live_) {
@@ -4232,8 +4236,8 @@ void D3D12Backend::RenderUi() {
     if (app::kGame.ui) app::kGame.ui(fps_);
     ImGui::Render();
     ID3D12DescriptorHeap* uh[] = {ui_heap_.Get()};
-    CL()->SetDescriptorHeaps(1, uh);
-    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), CL());
+    CLAt(__func__)->SetDescriptorHeaps(1, uh);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), CLAt(__func__));
 }
 
 void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
@@ -4249,8 +4253,8 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), kRtvCount + bi, rtv_inc_);
     float black[4] = {0, 0, 0, 1};
-    CL()->ClearRenderTargetView(rh, black, 0, nullptr);
-    CL()->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    CLAt(__func__)->ClearRenderTargetView(rh, black, 0, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     if (frame) BlitFrame(frame, frame_fmt);
     // F12: the frame as shown, before the interface; the read submits, so the target is set again
@@ -4259,7 +4263,7 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
         std::vector<uint8_t> px;
         if (ReadBack(bb_[bi].Get(), bb_w_, bb_h_, px)) app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
         Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        CL()->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+        CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     }
     RenderUi();
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
@@ -4481,7 +4485,7 @@ void D3D12Backend::CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UI
     if (box) snprintf(bx, sizeof(bx), ", box %u,%u-%u,%u", box->left, box->top, box->right, box->bottom);
     list_copies_.push_back({list_draws_, "copy to " + where(dst) + " at " + std::to_string(x) + "," + std::to_string(y) +
                                              " from " + where(src) + bx});
-    CL()->CopyTextureRegion(dst, x, y, 0, src, box);
+    CLAt(__func__)->CopyTextureRegion(dst, x, y, 0, src, box);
 }
 
 // DRED's output, declared here with the Windows SDK's layout (the MinGW headers the Linux check uses lack it):
@@ -4691,8 +4695,24 @@ void D3D12Backend::LogDebugMessages() {
     info_->ClearStoredMessages();
 }
 
+void D3D12Backend::NoteDrain(const char* fn) { drain_fns_[fn]++; }
+
 void D3D12Backend::Present(const Surface& front) {
     LogDebugMessages();
+    // XBE_PERF with the record thread: which functions wrote the list directly (each drained record), every 600 frames
+    if (drain_ && diag::Perf() && presents_ % 600 == 599 && !drain_fns_.empty()) {
+        std::vector<std::pair<uint64_t, const char*>> v;
+        for (auto& [f, c] : drain_fns_) v.push_back({c, f});
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        std::string line;
+        for (size_t i = 0; i < v.size() && i < 8; i++) {
+            char b[96];
+            snprintf(b, sizeof b, " %s %.1f", v[i].second, v[i].first / 600.0);
+            line += b;
+        }
+        LOGR("perf: list writes that drained record, a frame, by function:%s", line.c_str());
+        drain_fns_.clear();
+    }
     PerfScope perf_present{g_perf.present};
     PlanCubeFaces();
     // a file named capture beside the exe asks for a capture as F3 does, checked every 30 frames
@@ -4980,12 +5000,12 @@ void D3D12Backend::Settle(Target& t) {
     if (!t.depth) {
         Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RESOLVE_DEST);
-        CL()->ResolveSubresource(t.res.Get(), 0, t.ms.Get(), 0, t.fmt);
+        CLAt(__func__)->ResolveSubresource(t.res.Get(), 0, t.ms.Get(), 0, t.fmt);
     } else if (ID3D12PipelineState* pso = EnsureDepthResolvePipeline()) {
         Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CPU_DESCRIPTOR_HANDLE dh = Cpu(dsv_heap_.Get(), t.view, dsv_inc_);
-        CL()->OMSetRenderTargets(0, nullptr, FALSE, &dh);
+        CLAt(__func__)->OMSetRenderTargets(0, nullptr, FALSE, &dh);
         SetFullViewport(t.w, t.h);
         uint32_t slot = AllocSrvSlots(1);
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -5012,7 +5032,7 @@ void D3D12Backend::Refresh(Target& t) {
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CPU_DESCRIPTOR_HANDLE dh = Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_);
-        CL()->OMSetRenderTargets(0, nullptr, FALSE, &dh);
+        CLAt(__func__)->OMSetRenderTargets(0, nullptr, FALSE, &dh);
         SetFullViewport(t.w, t.h);
         uint32_t slot = AllocSrvSlots(1);
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
