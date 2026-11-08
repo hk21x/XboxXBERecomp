@@ -411,8 +411,12 @@ private:
     void Delta(const void* field, const void* value, size_t n) {
         uint8_t* sent = reinterpret_cast<uint8_t*>(&sent_) + At(sent_, field);
         if (Same(sent, static_cast<const uint8_t*>(value), n)) return;
-        std::memcpy(sent, value, n);
-        uint32_t head[2] = {uint32_t(At(sent_, field)), uint32_t(n)};
+        Send(At(sent_, field), value, n);
+    }
+    // n bytes at offset off of the State, changed: kept as sent and put in the batch
+    void Send(size_t off, const void* value, size_t n) {
+        std::memcpy(reinterpret_cast<uint8_t*>(&sent_) + off, value, n);
+        uint32_t head[2] = {uint32_t(off), uint32_t(n)};
         size_t at = cur_->bytes.size();
         cur_->bytes.resize(at + 8 + n);
         std::memcpy(cur_->bytes.data() + at, head, 8);
@@ -424,9 +428,21 @@ private:
         const uint8_t* now = reinterpret_cast<const uint8_t*>(&s);
         Cmd c{Op::State};
         size_t first = cur_->bytes.size();
-        for (const Range& r : ranges_)
-            for (size_t off = r.off, end = r.off + r.len; off < end; off += 64)
-                Delta(reinterpret_cast<const uint8_t*>(&sent_) + off, now + off, std::min<size_t>(64, end - off));
+        uint8_t* sent = reinterpret_cast<uint8_t*>(&sent_);
+        for (const Range& r : ranges_) {
+            // whole 64 byte pieces in one pass, stopping only at one that changed; the same pieces Delta would send
+            size_t off = r.off, end = r.off + r.len;
+            for (; off + 64 <= end; off += 64) {
+                const __m128i* a = reinterpret_cast<const __m128i*>(sent + off);
+                const __m128i* b = reinterpret_cast<const __m128i*>(now + off);
+                __m128i d = _mm_or_si128(_mm_or_si128(_mm_xor_si128(_mm_loadu_si128(a), _mm_loadu_si128(b)),
+                                                      _mm_xor_si128(_mm_loadu_si128(a + 1), _mm_loadu_si128(b + 1))),
+                                         _mm_or_si128(_mm_xor_si128(_mm_loadu_si128(a + 2), _mm_loadu_si128(b + 2)),
+                                                      _mm_xor_si128(_mm_loadu_si128(a + 3), _mm_loadu_si128(b + 3))));
+                if (!_mm_testz_si128(d, d)) Send(off, now + off, 64);
+            }
+            if (off < end) Delta(sent + off, now + off, end - off);
+        }
         std::array<uint32_t, 4> textures;
         for (size_t i = 0; i < 4; i++) textures[i] = Header(s.textures[i]);
         Delta(&sent_.textures, &textures, sizeof(textures));
