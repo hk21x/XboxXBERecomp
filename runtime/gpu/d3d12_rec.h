@@ -18,6 +18,15 @@ public:
     };
 
     bool Empty() const { return bytes_.empty(); }
+    // another recorder's commands after these, in order; it is left empty
+    void Append(D3D12Rec& o) {
+        if (o.bytes_.empty()) return;
+        Pad();
+        bytes_.insert(bytes_.end(), o.bytes_.begin(), o.bytes_.end());
+        draws_ += o.draws_;
+        o.bytes_.clear();
+        o.draws_ = 0;
+    }
     uint32_t Draws() const { return draws_; }
 
     void Pso(ID3D12PipelineState* p) { Put(kPso, p); }

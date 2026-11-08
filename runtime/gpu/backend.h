@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "gpu/state.h"
@@ -29,6 +30,12 @@ public:
     // the same draw, already assembled from this state and indices on another thread (the render thread's prep
     // thread): pre and Assemble's answer ok, which the backend may use in place of assembling it; read only during the
     // call
+    // The pipeline (docs/render-parallel.md): the backend's draws are decided on the render thread and recorded on the
+    // render thread's record thread. true: the backend does so. drain, called (on the render thread) before the
+    // backend writes its list or record's state itself, returns once record has recorded every draw handed so far.
+    // RecordNext (the record thread) records the next draw, its state s as it was for it; once per Draw, in order
+    virtual bool RecordOnThread(std::function<void()> /*drain*/) { return false; }
+    virtual void RecordNext(const State& /*s*/) {}
     virtual void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                                const Assembled& /*pre*/, bool /*ok*/) {
         Draw(s, prim, start, count, indices);
@@ -83,7 +90,7 @@ std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner);
 // perf diagnostic: the title's thread recording for the render thread, and waiting on it
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};
 // the render thread: applying the batches' state changes, and running batches at all (with XBE_PERF)
-inline std::atomic<uint64_t> g_perf_state_ns{0}, g_perf_batch_ns{0}, g_perf_prep_ns{0};
+inline std::atomic<uint64_t> g_perf_state_ns{0}, g_perf_batch_ns{0}, g_perf_prep_ns{0}, g_perf_record_ns{0};
 inline std::atomic<uint64_t> g_perf_wait_kind_ns[6];  // read-back, resource, fence, flush, copy, next frame
 inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read-backs the title waited for, by cause
 inline std::atomic<uint32_t> g_shaders_compiled{0};  // D3DCompile calls (the shader cache missed), for the frames lines

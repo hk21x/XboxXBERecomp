@@ -8,6 +8,9 @@
 // zeros) within 30 frames, then memdump is removed
 // poke in the run folder: lines "address size value" (hex address, size 1 2 or 4, value decimal or 0x hex) written to
 // guest memory at the next present, then poke is removed (to meet a condition by hand: achievements)
+#include <atomic>
+#include <functional>
+#include <thread>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -43,11 +46,59 @@ public:
     }
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
         draws_++;
+        Decided(s);
         if (drawing_) reference::Draw(s, prim, start, count, indices);
         if (list_) List(s, prim, start, count);
         harness::AuditDraw(s, prim, start, count, indices);
     }
     uint64_t perf_frames_ = 0, perf_draws_ = 0;
+    // XBE_CHECK_RECORD=1 (with XBE_RENDER_THREAD=1): this backend takes the pipeline's record thread. Each draw keeps
+    // a hash of its state, and every 41st draw drains record as D3D12's direct list writes do; the record thread's
+    // copy of the state must hash the same, draw for draw, in order
+    bool RecordOnThread(std::function<void()> drain) override {
+        const char* e = std::getenv("XBE_CHECK_RECORD");
+        if (!(e && *e == '1')) return false;
+        drain_ = std::move(drain);
+        LOGR("record check: draws recorded on the record thread, each checked against its draw's state");
+        return true;
+    }
+    static uint64_t RecordHash(const State& s) {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](const void* p, size_t n) {
+            for (size_t i = 0; i < n; i++) h = (h ^ static_cast<const uint8_t*>(p)[i]) * 1099511628211ull;
+        };
+        mix(s.simple.data(), sizeof(s.simple));
+        mix(s.vsc.data(), sizeof(s.vsc));
+        mix(&s.viewport, sizeof(s.viewport));
+        mix(&s.vs_handle, sizeof(s.vs_handle));
+        return h;
+    }
+    void Decided(const State& s) {
+        if (!drain_) return;
+        static uint64_t n = 0;
+        // a draw's record may lag: the ring as D3D12's (64), waiting while full
+        if (made_ - recorded_.load(std::memory_order_acquire) >= kRing) drain_();  // as D3D12's HandOver
+        ring_[made_ % kRing] = RecordHash(s);
+        made_++;
+        if (++n % 97 == 0) drain_();
+    }
+    void RecordNext(const State& s) override {
+        static uint64_t n = 0, wrong = 0;
+        uint64_t i = recorded_.load(std::memory_order_relaxed);
+        if (i >= made_.load(std::memory_order_acquire)) {
+            if (wrong++ < 8) LOGR("record check: record ran ahead of decide (draw %llu)", (unsigned long long)i);
+        } else if (RecordHash(s) != ring_[i % kRing] && wrong++ < 8) {
+            LOGR("record check: draw %llu recorded with another state than it was decided with", (unsigned long long)i);
+        }
+        recorded_.fetch_add(1, std::memory_order_release);
+        if (++n % 200000 == 0)
+            LOGR("record check: %llu draws recorded, %llu wrong", (unsigned long long)n, (unsigned long long)wrong);
+    }
+    static constexpr uint64_t kRing = 64;
+    std::function<void()> drain_;
+    uint64_t ring_[kRing] = {};
+    std::atomic<uint64_t> made_{0}, recorded_{0};
+
     // XBE_CHECK_PRE=1: each draw the prep thread assembled is assembled again here, on the render thread, and compared
     void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                        const gpu::Assembled& pre, bool ok) override {
@@ -98,9 +149,11 @@ public:
         if (perf && ++perf_frames_ % 600 == 0) {
             uint64_t d = draws_ - perf_draws_;
             perf_draws_ = draws_;
-            LOGR("perf: render thread per frame: state %.3f ms, batches %.3f ms, prep %.3f ms, %.0f draws",
+            LOGR("perf: render thread per frame: state %.3f ms, batches %.3f ms, prep %.3f ms, %.0f draws | title: "
+                 "recording %.3f ms, waiting %.3f ms",
                  gpu::g_perf_state_ns.exchange(0) / 600.0 / 1e6, gpu::g_perf_batch_ns.exchange(0) / 600.0 / 1e6,
-                 gpu::g_perf_prep_ns.exchange(0) / 600.0 / 1e6, d / 600.0);
+                 gpu::g_perf_prep_ns.exchange(0) / 600.0 / 1e6, d / 600.0, gpu::g_perf_capture_ns.exchange(0) / 600.0 / 1e6,
+                 gpu::g_perf_wait_ns.exchange(0) / 600.0 / 1e6);
         }
         if (list_) {
             std::fclose(list_);

@@ -203,7 +203,11 @@ void Name(ID3D12Object* o, const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(b, sizeof(b), fmt, ap);
     va_end(ap);
-    Names()[o] = b;
+    {
+        static std::mutex m;  // decide's textures and record's upload buffers are named from both threads
+        std::lock_guard lock(m);
+        Names()[o] = b;
+    }
     wchar_t w[96];
     for (size_t i = 0; i < sizeof(b); i++) w[i] = wchar_t(uint8_t(b[i]));
     o->SetName(w);
@@ -319,6 +323,8 @@ public:
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
     // assembled on the render thread's prep thread: Draw takes it in place of assembling (point sprites too, which
     // change only the stages)
+    bool RecordOnThread(std::function<void()> drain) override;
+    void RecordNext(const State& s) override;
     void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                        const Assembled& pre, bool ok) override {
         pre_ = &pre;
@@ -532,9 +538,26 @@ private:
     void DrawGeometry(const Assembled& a);
     struct DrawPacket;
     void Record(DrawPacket& p, PerfClock::time_point& perf_post);
-    std::unique_ptr<DrawPacket> packet_holder_;
-    DrawPacket& packet_ = *(packet_holder_ = MakePacket());
-    static std::unique_ptr<DrawPacket> MakePacket();
+    // packets in flight between decide and record: a ring; inline (no record thread) only the first is used
+    static constexpr uint32_t kPackets = 64;
+    std::vector<std::unique_ptr<DrawPacket>> packets_;
+    DrawPacket* packet_ = MakePackets(packets_);  // the one being decided
+    uint64_t packets_made_ = 0;                   // decide's: handed to record
+    std::atomic<uint64_t> packets_done_{0};       // record's: recorded
+    bool record_thread_ = false;                  // RecordOnThread: record runs on the render thread's record thread
+    void HandOver();                              // the decided packet to record, and the next packet_
+    static DrawPacket* MakePackets(std::vector<std::unique_ptr<DrawPacket>>& v);
+    std::mutex ring_m_;  // the upload ring and the views' slots: decide and record both take them
+    std::mutex copies_m_;  // vcopies_: record adds, the render thread's lists and record's settles run them
+    std::vector<ComPtr<ID3D12Resource>> overflow_;  // Upload's own buffers since the last Submit (under ring_m_)
+    uint64_t RingUsed() {
+        std::lock_guard lock(ring_m_);
+        return CurrentFrame().used;
+    }
+    // what record reads of the draw's targets and stage 0 (set from its packet)
+    float rec_point_scale_ = 1;
+    uint32_t rec_vp_w_ = 0, rec_vp_h_ = 0, rec_vp_gh_ = 0;
+    D3D12_SAMPLER_DESC rec_sd_{};  // stage 0's sampler, for the note
     void UploadVertexBuffers(const Assembled& a);
     void RunCopies();
     // visibility tests
@@ -582,7 +605,7 @@ private:
     void RescaleTargets();
     // per draw uploads and descriptor tables made earlier in the same ring generation are used again; the generation
     // moves on whenever the upload or descriptor ring starts over
-    uint64_t ring_gen_ = 1;
+    std::atomic<uint64_t> ring_gen_{1};  // record moves it on too (a views' wrap in AllocSrvSlots)
     uint64_t vsc_gen_ = 0, dc_gen_ = 0, tables_gen_ = 0;
     uint64_t vsc_count_ = 0;  // State::vsc_gen of the vertex constants last uploaded
     D3D12_GPU_VIRTUAL_ADDRESS vsc_va_ = 0, dc_va_ = 0;
@@ -600,7 +623,11 @@ private:
         float bf[4] = {};
         uint32_t sref = ~0u;
     } ds_cache_;
-    void ForgetDrawState() { ds_cache_ = {}; }
+    // record's cache: written by others only once record has drained
+    void ForgetDrawState() {
+        DrainRecord();
+        ds_cache_ = {};
+    }
     // what earlier draws of this frame found, for the same inputs: a guest texture's binding by stage, the colour and
     // depth targets for the same surfaces; both start over each frame and whenever a target is made, dropped or
     // rescaled (targets_gen_)
@@ -769,11 +796,25 @@ private:
     Frame frames_[kFrames];
     uint64_t frame_ = 0;
     ComPtr<ID3D12GraphicsCommandList> cl_;  // written through CL(), which replays rec_ first
-    D3D12Rec rec_;                          // the draws' commands, in order (stage A of docs/render-parallel.md)
+    D3D12Rec rec_;                          // the draws' commands, in order (stage A of docs/render-parallel.md); record's
+    // The pipeline (docs/render-parallel.md): while a draw is decided its own commands (barriers, targets) go into its
+    // packet, which record appends to rec_ first. Anything that writes the list itself, or record's caches, first lets
+    // record drain (drain_, set by the render thread when record runs on a thread of its own; nothing to do inline)
+    bool deciding_ = false;
+    int draw_depth_ = 0;  // Draw within Draw (point sprites)
+    void EndDecide();
+    std::function<void()> drain_;
+    void DrainRecord() {
+        if (drain_) drain_();
+    }
+    D3D12Rec& DRec();
     ID3D12GraphicsCommandList* CL() {
+        DrainRecord();
+        TakeDecided();
         FlushRec();
         return cl_.Get();
     }
+    void TakeDecided();  // a draw being decided: its commands so far into rec_, before something written after them
     void FlushRec();
     ComPtr<ID3D12DescriptorHeap> srv_heap_;
     ComPtr<ID3D12DescriptorHeap> smp_heap_;
@@ -791,7 +832,7 @@ private:
     std::unordered_map<uint64_t, uint64_t> shader_src_;  // vertex and pixel program keys to source hash
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> psos_;
     std::unordered_map<uint64_t, uint32_t> samplers_;
-    uint32_t smp_used_ = 0;
+    std::atomic<uint32_t> smp_used_{0};
     std::unordered_map<uint64_t, Target> targets_;
     std::unordered_map<uint32_t, uint64_t> target_used_;  // target address to the frame it was last used
     std::unordered_map<uint64_t, Tex> textures_;  // by data address, a P8 texture's with its palette's above
@@ -1160,6 +1201,7 @@ void D3D12Backend::Settle() {
 }
 
 void D3D12Backend::RunCopies() {
+    std::lock_guard lock(copies_m_);  // record adds them, the render thread's lists and record's settles run them
     if (!vcopies_.Pending()) return;
     g_perf.deferred += vcopies_.Pending();
     g_perf.settles++;
@@ -1178,6 +1220,13 @@ void D3D12Backend::FlushRec() {
 }
 
 void D3D12Backend::Submit(bool wait) {
+    DrainRecord();
+    TakeDecided();
+    {
+        std::lock_guard lock(ring_m_);
+        for (auto& r : overflow_) CurrentFrame().garbage.push_back(std::move(r));
+        overflow_.clear();
+    }
     RunCopies();  // the list reads the copies' upload memory
     FlushRec();
     if (HRESULT hr = cl_->Close(); FAILED(hr)) {
@@ -1259,6 +1308,7 @@ void D3D12Backend::SetBlitTarget(D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, ui
 }
 
 D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
+    std::lock_guard lock(ring_m_);  // decide's texture uploads and record's constants and geometry
     Frame& f = CurrentFrame();
     g_perf.upload += size;
     uint64_t o = (f.used + align - 1) & ~(align - 1);
@@ -1277,7 +1327,7 @@ D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
     Name(r.Get(), "upload of its own, %llu bytes (present %llu)", (unsigned long long)size, (unsigned long long)presents_);
     uint8_t* p = nullptr;
     r->Map(0, nullptr, reinterpret_cast<void**>(&p));
-    f.garbage.push_back(r);
+    overflow_.push_back(r);  // into the frame's garbage at the next Submit (record may hold the ring lock here)
     return {r.Get(), 0, p, r->GetGPUVirtualAddress()};
 }
 
@@ -1286,12 +1336,19 @@ D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
 // other descriptors, which hung NVIDIA GPUs (EoN's MI6 Training: 7800 draws a frame used up the frame's 32768 views
 // and the ring started again over its first draws). Called before a draw records anything.
 void D3D12Backend::MakeDescriptorRoom() {
-    bool views = CurrentFrame().srv + 16 > kSrvCount / kFrames, samplers = smp_used_ + 16 > kSamplerCount;
+    // with record on its own thread, the packets in flight may each take a table and samplers more than seen here
+    const uint32_t room = 16 + (drain_ ? 4 * kPackets : 0);
+    uint32_t srv;
+    {
+        std::lock_guard lock(ring_m_);
+        srv = CurrentFrame().srv;
+    }
+    bool views = srv + room > kSrvCount / kFrames, samplers = smp_used_.load(std::memory_order_relaxed) + room > kSamplerCount;
     if (!views && !samplers) return;
     static int told = 0;
     if (told++ < 4)
         LOGR("d3d12: %s nearly used up (views %u of %u this frame, samplers %u of %u): the GPU finishes first",
-             views ? "descriptors" : "samplers", CurrentFrame().srv, kSrvCount / kFrames, smp_used_, kSamplerCount);
+             views ? "descriptors" : "samplers", srv, kSrvCount / kFrames, smp_used_.load(), kSamplerCount);
     Flush();  // Submit(true): the frame's views start again
     if (samplers) {
         samplers_.clear();
@@ -1300,6 +1357,7 @@ void D3D12Backend::MakeDescriptorRoom() {
 }
 
 uint32_t D3D12Backend::AllocSrvSlots(uint32_t n) {
+    std::lock_guard lock(ring_m_);
     Frame& f = CurrentFrame();
     const uint32_t per = kSrvCount / kFrames;
     if (f.srv + n > per) {
@@ -1321,7 +1379,7 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     b.Transition.StateBefore = cur;
     b.Transition.StateAfter = want;
-    rec_.Barrier(b);
+    DRec().Barrier(b);
     cur = want;
 }
 
@@ -1542,7 +1600,7 @@ bool D3D12Backend::BindTargets(const State& s) {
             rt ? Cpu(rtv_heap_.Get(), ms ? rt->ms_view : rt->view, rtv_inc_) : D3D12_CPU_DESCRIPTOR_HANDLE{};
         D3D12_CPU_DESCRIPTOR_HANDLE dh =
             ds ? Cpu(dsv_heap_.Get(), ms ? ds->ms_view : ds->view, dsv_inc_) : D3D12_CPU_DESCRIPTOR_HANDLE{};
-        rec_.Targets(rt ? &rh : nullptr, ds ? &dh : nullptr);
+        DRec().Targets(rt ? &rh : nullptr, ds ? &dh : nullptr);
         bound_rt_ = rt;
         bound_ds_ = ds;
         bound_ms_ = ms;
@@ -2232,7 +2290,7 @@ bool D3D12Backend::CreatePlacedTexture(D3D12_RESOURCE_DESC& td, ComPtr<ID3D12Res
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
     b.Aliasing.pResourceAfter = res.Get();
-    rec_.Barrier(b);
+    DRec().Barrier(b);
     return true;
 }
 
@@ -2693,7 +2751,7 @@ uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& s
     D3D12_SAMPLER_DESC sd[4];
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso,
                                                    stages.replaced[i]);
-    stage0_.sd = sd[0];
+    rec_sd_ = sd[0];  // record's (the note's); stage0_ is decide's
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return samplers_last_slot_ = it->second;
@@ -2826,7 +2884,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         const uint8_t* b = reinterpret_cast<const uint8_t*>(s.vsc.data());
         vsc_last_.assign(b, b + sizeof(s.vsc));
         vsc_va = vsc_va_ = vc.gpu;
-        vsc_gen_ = ext_ ? 0 : ring_gen_;
+        vsc_gen_ = ext_ ? 0 : ring_gen_.load();
         vsc_count_ = s.vsc_gen;
         ext_vsc = reinterpret_cast<float(*)[4]>(vc.cpu);
     }
@@ -2834,7 +2892,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     perf_k = PerfNow();
     FillSurfaceConstants(s, size, c);
     // points and lines: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
-    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = PointScale() * s.aa_y;
+    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = rec_point_scale_ * s.aa_y;
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
     if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);
@@ -3007,13 +3065,13 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
 
 // viewport covers the target, the guest viewport is in the shader; scissor clips to it
 void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc) {
-    const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
-    float W = float(b->w);
-    float H = float(b->h);
+    // the bound target's (colour, else depth) sizes, from the packet
+    float W = float(rec_vp_w_);
+    float H = float(rec_vp_h_);
     D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
     DrawStateCache& c = ds_cache_;
     if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) rec_.Viewport(vp);
-    float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
+    float sx = W / gw, sy = rec_vp_gh_ ? H * s.aa_y / rec_vp_gh_ : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(SqueezedX(dc.hud, s.viewport.x) * sx);
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
@@ -3057,9 +3115,10 @@ void D3D12Backend::UploadVertexBuffers(const Assembled& a) {
         Alloc vb = Upload(b.bytes, 16);
         // guest memory stays as it is until the render thread tells the title these draws are done (Settle first);
         // gathered or converted bytes are in scratch the next draw reuses
-        if (defer_ && uintptr_t(b.src) - uintptr_t(kernel::g_base) < (1ull << 32))
+        if (defer_ && uintptr_t(b.src) - uintptr_t(kernel::g_base) < (1ull << 32)) {
+            std::lock_guard lock(copies_m_);
             vcopies_.Add(vb.cpu, b.src, b.bytes);
-        else
+        } else
             std::memcpy(vb.cpu, b.src, b.bytes);
         vbv[i] = {vb.gpu, b.bytes, b.stride};
     }
@@ -3214,11 +3273,53 @@ struct D3D12Backend::DrawPacket {
     GuestExtent size;
     DrawConstants c;  // wdepth and hud set by decide, the rest by record
     PixelKey pk;
+    D3D12Rec pre;                       // decide's own commands (barriers, targets), before the draw's
+    ID3D12PipelineState* pso = nullptr;
+    float point_scale = 1;              // the bound targets' host pixels per console pixel
+    uint32_t vp_w = 0, vp_h = 0, vp_gh = 0;  // the bound target's (colour, else depth)
+    DrawNote stage0;                    // stage 0's texture, for the note
+    bool draw = false;                  // false: only pre (the draw was left out, or recorded already)
+    Assembled own;                      // the draw's assembly when the prep thread did not do it
 };
 
-std::unique_ptr<D3D12Backend::DrawPacket> D3D12Backend::MakePacket() { return std::make_unique<DrawPacket>(); }
+D3D12Backend::DrawPacket* D3D12Backend::MakePackets(std::vector<std::unique_ptr<DrawPacket>>& v) {
+    for (uint32_t i = 0; i < kPackets; i++) v.push_back(std::make_unique<DrawPacket>());
+    return v[0].get();
+}
+
+D3D12Rec& D3D12Backend::DRec() { return deciding_ ? packet_->pre : rec_; }
+
+// XBE_RECORD_THREAD=0, an extension or captures: record stays inline
+bool D3D12Backend::RecordOnThread(std::function<void()> drain) {
+    const char* e = std::getenv("XBE_RECORD_THREAD");
+    bool on = !(e && *e == '0') && !g_extension && diag::CaptureDir().empty();
+    LOGR("d3d12: draws recorded %s", on ? "on the record thread (decide and record side by side)"
+                                       : "with their decide (XBE_RECORD_THREAD=0, an extension or captures)");
+    if (!on) return false;
+    drain_ = std::move(drain);
+    record_thread_ = true;
+    return true;
+}
+
+void D3D12Backend::TakeDecided() {
+    if (deciding_) rec_.Append(packet_->pre);
+}
+
 
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    // the top level draw is decided into packet_: its commands go to the packet until it is handed to record, and a
+    // draw left out on the way leaves them (barriers already tracked) to record all the same
+    struct DecideScope {
+        D3D12Backend& b;
+        bool top;
+        explicit DecideScope(D3D12Backend& be) : b(be), top(be.draw_depth_++ == 0) {
+            if (top) b.deciding_ = true, b.packet_->draw = false;
+        }
+        ~DecideScope() {
+            b.draw_depth_--;
+            if (top) b.EndDecide();
+        }
+    } decide_scope{*this};
     if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
         g_perf.face_skips++;
         return;
@@ -3279,15 +3380,17 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
     g_perf.pre += PerfMs(perf_pre);
-    if (!pre_ && !AssembleDraw(s, prim, start, count, indices, asm_)) return;
+    // with record on its own thread a draw assembled here goes with its packet (asm_ is the next draw's)
+    Assembled& scratch = record_thread_ ? packet_->own : asm_;
+    if (!pre_ && !AssembleDraw(s, prim, start, count, indices, scratch)) return;
     if (pre_ && !pre_ok_) return;
-    const Assembled& a = pre_ ? *pre_ : asm_;
+    const Assembled& a = pre_ ? *pre_ : scratch;
     if (pre_) {
         g_perf.verts += a.vertex_count;
         g_perf.raw += a.vertices.empty();
     }
     // past the ring every upload is a buffer of its own: seconds lost on a frame that draws a whole level once
-    if (CurrentFrame().used > kUploadSize - kUploadReserve) Submit(true);
+    if (RingUsed() > kUploadSize - kUploadReserve) Submit(true);
     auto perf_bt = PerfNow();
     if (!BindTargets(s)) return;
     if (ext_ && ext_->Bound(*this, s, bound_rt_, bound_ds_, a.pretransformed) && !BindTargets(s)) return;
@@ -3318,12 +3421,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     g_perf.t_shaders += PerfMs(perf_shaders);
     // stage textures, then the pixel shader made for them
     // decide writes the packet's parts in place: the constants alone are 2.8 KB a draw
-    DrawTextures& stages = packet_.stages;
+    DrawTextures& stages = packet_->stages;
     stages = DrawTextures{};
     draw_2d_ = a.pretransformed || ScreenDraw(s);
     if (!BindStageTexturesAndTargets(s, stages)) return;
     perf_shaders = PerfNow();
-    PixelKey& pk = packet_.pk;
+    PixelKey& pk = packet_->pk;
     pk = MakePixelKey(s, stages.info);
     const diag::DrawTest& test = diag::DrawTests();
     bool tested = test.vs && s.vs_handle == test.vs;
@@ -3364,7 +3467,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
-    if (ds_cache_.pso != pso) rec_.Pso(ds_cache_.pso = pso);
+    packet_->pso = pso;  // set by record, against its cache
     g_perf.pso += PerfMs(perf_pso);
 
     // constants
@@ -3372,7 +3475,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     size = DrawnExtent(s, size);
-    DrawConstants& c = packet_.c;
+    DrawConstants& c = packet_->c;
     c = DrawConstants{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
@@ -3392,7 +3495,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud);
     g_perf.consts += PerfMs(perf_consts);
     // the rest is record's (docs/render-parallel.md): constants, views and samplers, viewport, geometry, the note
-    DrawPacket& p = packet_;
+    DrawPacket& p = *packet_;
     p.s = &s;
     p.a = &a;
     p.prim = prim;
@@ -3400,7 +3503,52 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     p.sh = sh;
     p.k = k;
     p.size = size;
+    p.point_scale = PointScale();
+    const Target* vt = bound_rt_ ? bound_rt_ : bound_ds_;
+    p.vp_w = vt->w, p.vp_h = vt->h, p.vp_gh = vt->gh;
+    p.stage0 = stage0_;
+    p.draw = true;
+    // visibility tested draws (queries write the list) and captures are recorded here, once record has drained
+    if (record_thread_ && !s.simple[kMCountEnable >> 2] && !cap_) return;  // handed over at the end of decide
+    if (record_thread_) DrainRecord();
+    deciding_ = false;  // decided: record writes rec_ itself
     Record(p, perf_post);
+    p.draw = false;
+}
+
+// the next draw's record half on the record thread, with its state as it was for that draw
+void D3D12Backend::RecordNext(const State& s) {
+    DrawPacket& p = *packets_[packets_done_.load(std::memory_order_relaxed) % kPackets];
+    if (p.draw) {
+        p.s = &s;
+        PerfClock::time_point post{};
+        Record(p, post);
+    } else {
+        rec_.Append(p.pre);
+    }
+    // record writes its commands into the list itself (the render thread writes it only once record has drained),
+    // a run at a time
+    if (rec_.Draws() >= 64) FlushRec();
+    packets_done_.fetch_add(1, std::memory_order_release);
+}
+
+// decide's packet to record (one for each top level draw, a left out one too: record takes them in order with the
+// title's draws), and the next free packet
+void D3D12Backend::HandOver() {
+    packets_made_++;
+    DrawPacket* next = packets_[packets_made_ % kPackets].get();
+    // a full ring: record has kPackets to do. Drain hands record the draws decided so far (a batch's are handed only
+    // at its end or a fence) and waits; spinning here would wait for draws record has not been given
+    if (packets_made_ - packets_done_.load(std::memory_order_acquire) >= kPackets) DrainRecord();
+    packet_ = next;
+}
+
+// the end of a top level draw's decide: inline, a draw left out leaves its commands to rec_ (record took them
+// already otherwise)
+void D3D12Backend::EndDecide() {
+    deciding_ = false;
+    if (record_thread_) return HandOver();
+    rec_.Append(packet_->pre);
 }
 
 // A draw's record half, from what its decide half (Draw) settled. Today on the same thread, at once. It reads the
@@ -3418,6 +3566,10 @@ void D3D12Backend::Record(DrawPacket& p, PerfClock::time_point& perf_post) {
     DrawConstants& c = p.c;
     const PixelKey& pk = p.pk;
     (void)prim;
+    rec_.Append(p.pre);  // decide's commands first
+    if (ds_cache_.pso != p.pso) rec_.Pso(ds_cache_.pso = p.pso);
+    rec_point_scale_ = p.point_scale;
+    rec_vp_w_ = p.vp_w, rec_vp_h_ = p.vp_h, rec_vp_gh_ = p.vp_gh;
     auto perf_consts = PerfNow();
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
@@ -3509,8 +3661,8 @@ void D3D12Backend::Record(DrawPacket& p, PerfClock::time_point& perf_post) {
     note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
             a.index_count != 0, uint32_t(a.base_vertex), mem::VirtualFromPhysical(s.rt.data), s.textures[0],
             s.textures[1], s.vs ? s.vs->handle : 0, s.ps ? s.ps->handle : 0};
-    note.tw = stage0_.tw, note.th = stage0_.th, note.tl = stage0_.tl, note.tf = stage0_.tf, note.tu = stage0_.tu;
-    note.tmade = stage0_.tmade, note.sd = stage0_.sd;
+    note.tw = p.stage0.tw, note.th = p.stage0.th, note.tl = p.stage0.tl, note.tf = p.stage0.tf, note.tu = p.stage0.tu;
+    note.tmade = p.stage0.tmade, note.sd = rec_sd_;
     note.counted = s.simple[kMCountEnable >> 2] != 0;
     note.buffers = a.buffer_count;
     if (a.buffer_count) {

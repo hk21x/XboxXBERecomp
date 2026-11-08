@@ -154,6 +154,11 @@ public:
             pre_ring_.resize(kPre);
             std::thread([this] { Prep(); }).detach();
         }
+        record_ = [&] {
+            const char* e = std::getenv("XBE_RECORD_THREAD");
+            return !(e && *e == '0') && inner_->RecordOnThread([this] { Drain(); });
+        }();
+        if (record_) std::thread([this] { Record(); }).detach();
         std::thread([this] { Run(); }).detach();
     }
     ~Threaded() override {
@@ -517,32 +522,50 @@ private:
         }
     }
 
+    // a batch the render thread (or, with the pipeline, the record thread) has finished: done once the backend
+    // settled the work its draws put off. That is done for several batches together: when no batch waits, after kHold
+    // of them, or once the title waits for one already run
+    void Settle() {
+        inner_->Settle();
+        {
+            std::lock_guard lock(m_);
+            done_.store(unsettled_);
+        }
+        done_cv_.notify_all();
+        unsettled_ = 0;
+        held_ = 0;
+    }
+    void Complete(Batch* b) {
+        uint64_t id = b->id;
+        b->cmds.clear();
+        b->bytes.clear();
+        b->vs.clear();
+        b->ps.clear();
+        {
+            std::lock_guard lock(m_);
+            free_.push_back(b);
+            if (!defer_) done_.store(id);
+        }
+        if (!defer_) {
+            done_cv_.notify_all();
+            return;
+        }
+        unsettled_ = id;
+        if (++held_ >= kHold || wanted_.load() <= id) Settle();
+    }
+
     void Run() {
         NameThread(L"render");
         // batches from the prep thread when it runs, else straight from the title
         std::deque<Batch*>& source = pre_ ? ready_ : queue_;
         std::condition_variable& source_cv = pre_ ? ready_cv_ : cv_;
-        // A batch is done (done_) once the backend settled the work its draws put off. That is done for several
-        // batches together: when no batch waits, after kHold of them, or once the title waits for one already run.
-        uint64_t unsettled = 0;
-        uint32_t held = 0;
-        auto settle = [&] {
-            inner_->Settle();
-            {
-                std::lock_guard lock(m_);
-                done_.store(unsettled);
-            }
-            done_cv_.notify_all();
-            unsettled = 0;
-            held = 0;
-        };
         for (;;) {
             Batch* b;
             {
                 std::unique_lock lock(m_);
-                if (source.empty() && unsettled) {
+                if (!record_ && source.empty() && unsettled_) {
                     lock.unlock();
-                    settle();
+                    Settle();
                     continue;
                 }
                 source_cv.wait(lock, [&] { return (pre_ ? prep_exited_ : stop_) || !source.empty(); });
@@ -552,7 +575,18 @@ private:
             }
             static const bool perf = diag::Perf();
             auto t = perf ? Clock::now() : Clock::time_point{};
-            for (const Cmd& c : b->cmds) Execute(*b, c);
+            run_batch_ = b;
+            seg_from_ = 0;
+            for (size_t i = 0; i < b->cmds.size(); i++) {
+                const Cmd& c = b->cmds[i];
+                run_cmd_ = i;
+                // with the pipeline, anything but a state change or a draw writes the list: record drains first
+                if (record_ && c.op != Op::State && c.op != Op::Draw) {
+                    PushSegment(i, false);
+                    WaitRecorded();
+                }
+                Execute(*b, c);
+            }
             if (perf) g_perf_batch_ns += Ns(t);
             uint64_t id = b->id;
             if (pre_) {
@@ -562,21 +596,90 @@ private:
                 }
                 ran_cv_.notify_all();
             }
-            b->cmds.clear();
-            b->bytes.clear();
-            b->vs.clear();
-            b->ps.clear();
+            if (record_) {
+                PushSegment(b->cmds.size(), true);  // record finishes the batch
+                run_batch_ = nullptr;
+            } else {
+                run_batch_ = nullptr;
+                Complete(b);
+            }
+        }
+        if (record_) {
             {
                 std::lock_guard lock(m_);
-                free_.push_back(b);
-                if (!defer_) done_.store(id);
+                run_exited_ = true;
             }
-            if (!defer_) {
-                done_cv_.notify_all();
-                continue;
+            seg_cv_.notify_all();
+            return;
+        }
+        std::lock_guard lock(m_);
+        exited_ = true;
+        done_cv_.notify_all();
+    }
+
+    // The pipeline's record thread: the render thread hands it each batch in segments (up to a command that writes
+    // the list, and the rest with the batch's last); it keeps its own copy of the state from the segments' changes and
+    // records their draws, then finishes the batch (the title may then reuse what its draws read)
+    struct Segment {
+        Batch* b;
+        size_t from, to;
+        bool last;
+    };
+    void PushSegment(size_t to, bool last) {
+        if (to <= seg_from_ && !last) return;
+        {
+            std::lock_guard lock(m_);
+            segments_.push_back({run_batch_, seg_from_, to, last});
+            segs_pushed_++;
+        }
+        seg_from_ = to;
+        seg_cv_.notify_one();
+    }
+    // the render thread: once record has done every segment handed to it
+    void WaitRecorded() {
+        std::unique_lock lock(m_);
+        seg_done_cv_.wait(lock, [&] { return segs_done_ == segs_pushed_; });
+    }
+    // the backend's drain: what the draw being decided follows goes to record, and the render thread waits for it
+    void Drain() {
+        if (run_batch_) PushSegment(run_cmd_, false);
+        WaitRecorded();
+    }
+    void Record() {
+        NameThread(L"render record");
+        for (;;) {
+            Segment g;
+            {
+                std::unique_lock lock(m_);
+                if (segments_.empty() && unsettled_) {
+                    lock.unlock();
+                    Settle();
+                    continue;
+                }
+                seg_cv_.wait(lock, [&] { return run_exited_ || !segments_.empty(); });
+                if (segments_.empty()) break;
+                g = segments_.front();
+                segments_.pop_front();
             }
-            unsettled = id;
-            if (++held >= kHold || wanted_.load() <= id) settle();
+            static const bool perf = diag::Perf();
+            auto t = perf ? Clock::now() : Clock::time_point{};
+            for (size_t i = g.from; i < g.to; i++) {
+                const Cmd& c = g.b->cmds[i];
+                if (c.op == Op::State) {
+                    if (ApplyState(rec_state_, *g.b, c) || !rec_vsc_count_) rec_vsc_count_++;
+                    rec_state_.vsc_gen = rec_vsc_count_;
+                } else if (c.op == Op::Draw) {
+                    inner_->RecordNext(rec_state_);
+                    if (c.pre >= 0) pre_used_.fetch_add(1, std::memory_order_release);  // its slot is free now
+                }
+            }
+            if (g.last) Complete(g.b);
+            if (perf) g_perf_record_ns += Ns(t);
+            {
+                std::lock_guard lock(m_);
+                segs_done_++;
+            }
+            seg_done_cv_.notify_all();
         }
         std::lock_guard lock(m_);
         exited_ = true;
@@ -698,7 +801,7 @@ private:
                 if (CheckState()) Check(c);
                 if (c.pre >= 0) {
                     inner_->DrawAssembled(state_, c.a, c.b, c.c, c.d ? data : nullptr, pre_ring_[size_t(c.pre)], c.pre_ok);
-                    pre_used_.fetch_add(1, std::memory_order_release);
+                    if (!record_) pre_used_.fetch_add(1, std::memory_order_release);  // else once recorded
                 } else {
                     inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr);
                 }
@@ -778,6 +881,17 @@ private:
     std::deque<Batch*> ready_;
     std::condition_variable ready_cv_;
     uint64_t ran_ = 0;       // the last batch the render thread ran (under m_)
+    // the pipeline's record thread (Record), when the backend records on it (RecordOnThread)
+    bool record_ = false, run_exited_ = false;
+    std::deque<Segment> segments_;
+    uint64_t segs_pushed_ = 0, segs_done_ = 0;  // under m_
+    std::condition_variable seg_cv_, seg_done_cv_;
+    Batch* run_batch_ = nullptr;  // the render thread's: the batch it runs, its command, the next segment's start
+    size_t run_cmd_ = 0, seg_from_ = 0;
+    State rec_state_;
+    uint64_t rec_vsc_count_ = 0;
+    uint64_t unsettled_ = 0;  // the batches finished but not settled yet (whichever thread finishes batches)
+    uint32_t held_ = 0;
     uint64_t wait_for_ = 0;  // the prep thread's: a batch that may write guest memory, run before the next is assembled
     std::condition_variable ran_cv_;
 };
