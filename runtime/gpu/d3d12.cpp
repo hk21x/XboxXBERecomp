@@ -4366,9 +4366,10 @@ void LogPerf() {
              p.runs ? double(p.run_draws) / double(p.runs) : 0.0);
         LOGR("perf: draw's other steps per frame, ms: before assembly %.2f, targets %.2f, checks and note %.2f, after "
              "geometry %.2f | consts: vertex constants %.2f, filled %.2f, uploaded %.2f | render thread: state %.2f, "
-             "batches %.2f | resting cube faces: %.0f draws and clears left out", p.pre / n, p.bind_targets / n,
-             p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n, p.k_dc / n, g_perf_state_ns.exchange(0) / n / 1e6,
-             g_perf_batch_ns.exchange(0) / n / 1e6, p.face_skips / n);
+             "batches %.2f | record thread: %.2f | resting cube faces: %.0f draws and clears left out", p.pre / n,
+             p.bind_targets / n, p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n, p.k_dc / n,
+             g_perf_state_ns.exchange(0) / n / 1e6, g_perf_batch_ns.exchange(0) / n / 1e6,
+             g_perf_record_ns.exchange(0) / n / 1e6, p.face_skips / n);
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
