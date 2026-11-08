@@ -23,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -3892,6 +3893,11 @@ void LogPerf() {
     static PerfClock::time_point perf_start = PerfClock::now();
     static uint64_t perf_frames = 0;
     perf_frames++;
+    // each frame's time, for the busy summary's lows: this second's, then kept when the second was busy
+    static PerfClock::time_point frame_was = PerfClock::now();
+    static std::vector<float> second_frames, busy_frames_ms;
+    second_frames.push_back(float(PerfMs(frame_was)));
+    frame_was = PerfClock::now();
     double el = PerfMs(perf_start);
     if (el >= 1000.0) {
         Perf& p = g_perf;
@@ -3949,14 +3955,27 @@ void LogPerf() {
             busy_draw += p.draw;
             busy_draws += p.draws;
             busy_min_fps = std::min(busy_min_fps, n * 1000.0 / el);
+            busy_frames_ms.insert(busy_frames_ms.end(), second_frames.begin(), second_frames.end());
             if (busy_s >= 30) {
-                LOGR("perf: busy summary over %.0f s: %.1f fps (lowest second %.1f), host %.2f ms/frame, %.0f draws/frame, "
-                     "%.2f us/draw", busy_s, busy_frames / busy_s, busy_min_fps, busy_host / busy_frames, busy_draws / busy_frames,
-                     busy_draws ? busy_draw * 1000.0 / busy_draws : 0.0);
+                // the lows: the frame rate of the slowest 1% and 0.1% of frames (their average frame time)
+                std::vector<float>& f = busy_frames_ms;
+                std::sort(f.begin(), f.end(), std::greater<float>());
+                auto low = [&](double share) {
+                    size_t k = std::max<size_t>(1, size_t(f.size() * share));
+                    double sum = 0;
+                    for (size_t i = 0; i < k && i < f.size(); i++) sum += f[i];
+                    return sum > 0 ? 1000.0 * double(k) / sum : 0.0;
+                };
+                LOGR("perf: busy summary over %.0f s: %.1f fps (lowest second %.1f, 1%% low %.1f, 0.1%% low %.1f, slowest "
+                     "frame %.1f ms), host %.2f ms/frame, %.0f draws/frame, %.2f us/draw", busy_s, busy_frames / busy_s,
+                     busy_min_fps, low(0.01), low(0.001), f.empty() ? 0.0 : double(f[0]), busy_host / busy_frames,
+                     busy_draws / busy_frames, busy_draws ? busy_draw * 1000.0 / busy_draws : 0.0);
                 busy_s = busy_frames = busy_host = busy_draw = busy_draws = 0;
                 busy_min_fps = 1e9;
+                f.clear();
             }
         }
+        second_frames.clear();
         g_perf = Perf{};
         perf_start = PerfClock::now();
         perf_frames = 0;
