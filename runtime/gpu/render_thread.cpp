@@ -525,7 +525,7 @@ private:
     // a batch the render thread (or, with the pipeline, the record thread) has finished: done once the backend
     // settled the work its draws put off. That is done for several batches together: when no batch waits, after kHold
     // of them, or once the title waits for one already run
-    void Settle() {
+    void SettleBatches() {
         inner_->Settle();
         {
             std::lock_guard lock(m_);
@@ -551,7 +551,7 @@ private:
             return;
         }
         unsettled_ = id;
-        if (++held_ >= kHold || wanted_.load() <= id) Settle();
+        if (++held_ >= kHold || wanted_.load() <= id) SettleBatches();
     }
 
     void Run() {
@@ -565,7 +565,7 @@ private:
                 std::unique_lock lock(m_);
                 if (!record_ && source.empty() && unsettled_) {
                     lock.unlock();
-                    Settle();
+                    SettleBatches();
                     continue;
                 }
                 source_cv.wait(lock, [&] { return (pre_ ? prep_exited_ : stop_) || !source.empty(); });
@@ -653,7 +653,7 @@ private:
                 std::unique_lock lock(m_);
                 if (segments_.empty() && unsettled_) {
                     lock.unlock();
-                    Settle();
+                    SettleBatches();
                     continue;
                 }
                 seg_cv_.wait(lock, [&] { return run_exited_ || !segments_.empty(); });
