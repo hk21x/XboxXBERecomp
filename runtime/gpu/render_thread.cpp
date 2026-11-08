@@ -586,6 +586,8 @@ private:
                 // writes the list: record drains first
                 if (record_ && c.op != Op::State && c.op != Op::Draw && !(c.op == Op::Clear && record_clears_) &&
                     !((c.op == Op::ClearReport || c.op == Op::GetReport) && record_reports_)) {
+                    g_perf_fence_ops[c.op == Op::Copy ? 0 : c.op == Op::Present ? 1 : c.op == Op::Sync ? 2
+                                     : c.op == Op::RecordLate ? 3 : c.op == Op::Flush ? 4 : 5]++;
                     PushSegment(i, false);
                     WaitRecorded();
                 }

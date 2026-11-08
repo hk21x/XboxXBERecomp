@@ -112,7 +112,8 @@ struct Perf {
     uint64_t upload = 0;
     uint64_t overflow = 0;
     uint64_t flushes = 0;  // lists the CPU waited for the GPU to finish (Submit(true))
-    uint64_t face_skips = 0;  // draws and clears into a cube face resting this frame (GameInfo::cube_face_hz)
+    uint64_t face_skips = 0;
+    uint64_t drain_why[5] = {};  // the backend's drains by where (DrainRecord)  // draws and clears into a cube face resting this frame (GameInfo::cube_face_hz)
     double flush_wait = 0;  // that wait, ms
     uint64_t sigs = 0;
     uint64_t sig_bytes = 0;
@@ -629,7 +630,7 @@ private:
     } ds_cache_;
     // record's cache: written by others only once record has drained
     void ForgetDrawState() {
-        DrainRecord();
+        DrainRecord(2);
         ds_cache_ = {};
     }
     // what earlier draws of this frame found, for the same inputs: a guest texture's binding by stage, the colour and
@@ -808,8 +809,12 @@ private:
     int draw_depth_ = 0;  // Draw within Draw (point sprites)
     void EndDecide();
     std::function<void()> drain_;
-    void DrainRecord() {
-        if (drain_) drain_();
+    // drain_why_: where the drains come from, for XBE_PERF (0 CL, 1 Submit, 2 ForgetDrawState, 3 a full packet ring,
+    // 4 a captured draw)
+    void DrainRecord(int why = 0) {
+        if (!drain_) return;
+        g_perf.drain_why[why]++;
+        drain_();
     }
     D3D12Rec& DRec();
     ID3D12GraphicsCommandList* CL() {
@@ -1224,7 +1229,7 @@ void D3D12Backend::FlushRec() {
 }
 
 void D3D12Backend::Submit(bool wait) {
-    DrainRecord();
+    DrainRecord(1);
     TakeDecided();
     {
         std::lock_guard lock(ring_m_);
@@ -3514,7 +3519,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // visibility tested draws (queries write the list) and captures are recorded here, once record has drained
     p.spp = SamplesPerPixel();
     if (record_thread_ && !cap_) return;  // handed over at the end of decide
-    if (record_thread_) DrainRecord();
+    if (record_thread_) DrainRecord(4);
     deciding_ = false;  // decided: record writes rec_ itself
     Record(p, perf_post);
     p.draw = false;
@@ -3543,7 +3548,7 @@ void D3D12Backend::HandOver() {
     DrawPacket* next = packets_[packets_made_ % kPackets].get();
     // a full ring: record has kPackets to do. Drain hands record the draws decided so far (a batch's are handed only
     // at its end or a fence) and waits; spinning here would wait for draws record has not been given
-    if (packets_made_ - packets_done_.load(std::memory_order_acquire) >= kPackets) DrainRecord();
+    if (packets_made_ - packets_done_.load(std::memory_order_acquire) >= kPackets) DrainRecord(3);
     packet_ = next;
 }
 
@@ -4385,16 +4390,23 @@ void LogPerf() {
              p.runs ? double(p.run_draws) / double(p.runs) : 0.0);
         LOGR("perf: draw's other steps per frame, ms: before assembly %.2f, targets %.2f, checks and note %.2f, after "
              "geometry %.2f | consts: vertex constants %.2f, filled %.2f, uploaded %.2f | render thread: state %.2f, "
-             "batches %.2f, waiting for record %.2f (%.1f times) | record thread: %.2f | resting cube faces: %.0f draws "
-             "and clears left out", p.pre / n,
+             "batches %.2f, waiting for record %.2f (%.1f times; the backend's: %.1f list writes, %.1f submits, %.1f "
+             "state resets, %.1f full rings; the commands': %.1f copies, %.1f presents, %.1f read-backs, %.1f late "
+             "read-backs, %.1f flushes, %.1f others) | record thread: %.2f | resting cube faces: %.0f draws and clears "
+             "left out",
+             p.pre / n,
              p.bind_targets / n, p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n, p.k_dc / n,
              g_perf_state_ns.exchange(0) / n / 1e6, g_perf_batch_ns.exchange(0) / n / 1e6,
-             g_perf_drain_ns.exchange(0) / n / 1e6, g_perf_drains.exchange(0) / n, g_perf_record_ns.exchange(0) / n / 1e6,
+             g_perf_drain_ns.exchange(0) / n / 1e6, g_perf_drains.exchange(0) / n, p.drain_why[0] / n,
+             p.drain_why[1] / n, p.drain_why[2] / n, p.drain_why[3] / n, g_perf_fence_ops[0].exchange(0) / n,
+             g_perf_fence_ops[1].exchange(0) / n, g_perf_fence_ops[2].exchange(0) / n, g_perf_fence_ops[3].exchange(0) / n,
+             g_perf_fence_ops[4].exchange(0) / n, g_perf_fence_ops[5].exchange(0) / n, g_perf_record_ns.exchange(0) / n / 1e6,
              p.face_skips / n);
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
         static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
+        static double pace_jitter = 0, pace_uneven = 0, pace_n = 0;
         if (p.draws / n >= 500) {
             busy_s += 1;
             busy_frames += n;
@@ -4403,6 +4415,15 @@ void LogPerf() {
             busy_draws += p.draws;
             busy_min_fps = std::min(busy_min_fps, n * 1000.0 / el);
             busy_frames_ms.insert(busy_frames_ms.end(), second_frames.begin(), second_frames.end());
+            // pacing, in frame order: how much each frame differs from the one before, and frames well over both
+            // neighbours (a long frame among short ones: felt as a stutter at any average)
+            for (size_t i = 1; i < second_frames.size(); i++) {
+                pace_jitter += std::fabs(second_frames[i] - second_frames[i - 1]);
+                pace_n++;
+                if (i + 1 < second_frames.size() &&
+                    second_frames[i] >= 1.5f * std::max(second_frames[i - 1], second_frames[i + 1]))
+                    pace_uneven++;
+            }
             if (busy_s >= 30) {
                 // the lows: the frame rate of the slowest 1% and 0.1% of frames (their average frame time)
                 std::vector<float>& f = busy_frames_ms;
@@ -4414,9 +4435,12 @@ void LogPerf() {
                     return sum > 0 ? 1000.0 * double(k) / sum : 0.0;
                 };
                 LOGR("perf: busy summary over %.0f s: %.1f fps (lowest second %.1f, 1%% low %.1f, 0.1%% low %.1f, slowest "
-                     "frame %.1f ms), host %.2f ms/frame, %.0f draws/frame, %.2f us/draw", busy_s, busy_frames / busy_s,
+                     "frame %.1f ms), host %.2f ms/frame, %.0f draws/frame, %.2f us/draw | pacing: frame to frame %.2f ms "
+                     "on average, %.1f%% of frames 1.5 times their neighbours' or more", busy_s, busy_frames / busy_s,
                      busy_min_fps, low(0.01), low(0.001), f.empty() ? 0.0 : double(f[0]), busy_host / busy_frames,
-                     busy_draws / busy_frames, busy_draws ? busy_draw * 1000.0 / busy_draws : 0.0);
+                     busy_draws / busy_frames, busy_draws ? busy_draw * 1000.0 / busy_draws : 0.0,
+                     pace_n ? pace_jitter / pace_n : 0.0, pace_n ? 100.0 * pace_uneven / pace_n : 0.0);
+                pace_jitter = pace_uneven = pace_n = 0;
                 busy_s = busy_frames = busy_host = busy_draw = busy_draws = 0;
                 busy_min_fps = 1e9;
                 f.clear();
