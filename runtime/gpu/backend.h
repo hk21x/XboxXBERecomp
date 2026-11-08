@@ -36,6 +36,8 @@ public:
     // RecordNext (the record thread) records the next draw, its state s as it was for it; once per Draw, in order
     virtual bool RecordOnThread(std::function<void()> /*drain*/) { return false; }
     virtual void RecordNext(const State& /*s*/) {}
+    // clears too are decided and handed to record (a RecordNext each), not fences
+    virtual bool ClearsRecorded() const { return false; }
     virtual void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                                const Assembled& /*pre*/, bool /*ok*/) {
         Draw(s, prim, start, count, indices);
@@ -91,6 +93,8 @@ std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner);
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};
 // the render thread: applying the batches' state changes, and running batches at all (with XBE_PERF)
 inline std::atomic<uint64_t> g_perf_state_ns{0}, g_perf_batch_ns{0}, g_perf_prep_ns{0}, g_perf_record_ns{0};
+// the render thread waiting for the record thread to drain (before a command that writes the list), and how often
+inline std::atomic<uint64_t> g_perf_drain_ns{0}, g_perf_drains{0};
 inline std::atomic<uint64_t> g_perf_wait_kind_ns[6];  // read-back, resource, fence, flush, copy, next frame
 inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read-backs the title waited for, by cause
 inline std::atomic<uint32_t> g_shaders_compiled{0};  // D3DCompile calls (the shader cache missed), for the frames lines

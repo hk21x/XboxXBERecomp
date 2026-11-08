@@ -158,6 +158,7 @@ public:
             const char* e = std::getenv("XBE_RECORD_THREAD");
             return !(e && *e == '0') && inner_->RecordOnThread([this] { Drain(); });
         }();
+        record_clears_ = record_ && inner_->ClearsRecorded();
         if (record_) std::thread([this] { Record(); }).detach();
         std::thread([this] { Run(); }).detach();
     }
@@ -580,8 +581,9 @@ private:
             for (size_t i = 0; i < b->cmds.size(); i++) {
                 const Cmd& c = b->cmds[i];
                 run_cmd_ = i;
-                // with the pipeline, anything but a state change or a draw writes the list: record drains first
-                if (record_ && c.op != Op::State && c.op != Op::Draw) {
+                // with the pipeline, anything but a state change, a draw or (when the backend records them) a clear
+                // writes the list: record drains first
+                if (record_ && c.op != Op::State && c.op != Op::Draw && !(c.op == Op::Clear && record_clears_)) {
                     PushSegment(i, false);
                     WaitRecorded();
                 }
@@ -637,8 +639,16 @@ private:
     }
     // the render thread: once record has done every segment handed to it
     void WaitRecorded() {
-        std::unique_lock lock(m_);
-        seg_done_cv_.wait(lock, [&] { return segs_done_ == segs_pushed_; });
+        static const bool perf = diag::Perf();
+        auto t = perf ? Clock::now() : Clock::time_point{};
+        {
+            std::unique_lock lock(m_);
+            seg_done_cv_.wait(lock, [&] { return segs_done_ == segs_pushed_; });
+        }
+        if (perf) {
+            g_perf_drain_ns += Ns(t);
+            g_perf_drains++;
+        }
     }
     // the backend's drain: what the draw being decided follows goes to record, and the render thread waits for it
     void Drain() {
@@ -668,7 +678,7 @@ private:
                 if (c.op == Op::State) {
                     if (ApplyState(rec_state_, *g.b, c) || !rec_vsc_count_) rec_vsc_count_++;
                     rec_state_.vsc_gen = rec_vsc_count_;
-                } else if (c.op == Op::Draw) {
+                } else if (c.op == Op::Draw || (c.op == Op::Clear && record_clears_)) {
                     inner_->RecordNext(rec_state_);
                     if (c.pre >= 0) pre_used_.fetch_add(1, std::memory_order_release);  // its slot is free now
                 }
@@ -883,6 +893,7 @@ private:
     uint64_t ran_ = 0;       // the last batch the render thread ran (under m_)
     // the pipeline's record thread (Record), when the backend records on it (RecordOnThread)
     bool record_ = false, run_exited_ = false;
+    bool record_clears_ = false;  // the backend decides clears and hands them to record too
     std::deque<Segment> segments_;
     uint64_t segs_pushed_ = 0, segs_done_ = 0;  // under m_
     std::condition_variable seg_cv_, seg_done_cv_;

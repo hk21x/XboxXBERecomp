@@ -14,7 +14,7 @@ class D3D12Rec {
 public:
     enum Op : uint8_t {
         kPso, kRootCbv, kRootTable, kTopology, kVertexBuffers, kIndexBuffer, kDraw, kDrawIndexed, kViewport, kScissor,
-        kBlendFactor, kStencilRef, kTargets, kBarrier, kSrv, kMark,
+        kBlendFactor, kStencilRef, kTargets, kBarrier, kSrv, kMark, kClearRtv, kClearDsv,
     };
 
     bool Empty() const { return bytes_.empty(); }
@@ -64,6 +64,22 @@ public:
         Put(kSrv, SrvArgs{r, d, at});
     }
     void Mark(uint64_t v) { Put(kMark, v); }
+    void ClearRtv(D3D12_CPU_DESCRIPTOR_HANDLE h, const float* col, uint32_t n, const D3D12_RECT* r) {
+        Head(kClearRtv);
+        Raw(&h, sizeof h);
+        Raw(col, 16);
+        Raw(&n, sizeof n);
+        Raw(r, sizeof(*r) * n);
+    }
+    void ClearDsv(D3D12_CPU_DESCRIPTOR_HANDLE h, D3D12_CLEAR_FLAGS f, float z, uint8_t st, uint32_t n, const D3D12_RECT* r) {
+        Head(kClearDsv);
+        uint32_t fs[2] = {uint32_t(f), st};
+        Raw(&h, sizeof h);
+        Raw(fs, sizeof fs);
+        Raw(&z, sizeof z);
+        Raw(&n, sizeof n);
+        Raw(r, sizeof(*r) * n);
+    }
 
     // every command so far into cl, in order; mark: Aftermath's marker call (kMark)
     template <typename MarkFn>
@@ -140,6 +156,35 @@ public:
                     break;
                 }
                 case kMark: mark(Get<uint64_t>(p)); break;
+                case kClearRtv: {
+                    const uint8_t* q = p;
+                    D3D12_CPU_DESCRIPTOR_HANDLE h;
+                    float col[4];
+                    uint32_t n;
+                    std::memcpy(&h, q, sizeof h), q += sizeof h;
+                    std::memcpy(col, q, 16), q += 16;
+                    std::memcpy(&n, q, sizeof n), q += sizeof n;
+                    std::vector<D3D12_RECT> r(n);
+                    std::memcpy(r.data(), q, sizeof(D3D12_RECT) * n), q += sizeof(D3D12_RECT) * n;
+                    p += Size(size_t(q - p));
+                    cl->ClearRenderTargetView(h, col, n, n ? r.data() : nullptr);
+                    break;
+                }
+                case kClearDsv: {
+                    const uint8_t* q = p;
+                    D3D12_CPU_DESCRIPTOR_HANDLE h;
+                    uint32_t fs[2], n;
+                    float z;
+                    std::memcpy(&h, q, sizeof h), q += sizeof h;
+                    std::memcpy(fs, q, sizeof fs), q += sizeof fs;
+                    std::memcpy(&z, q, sizeof z), q += sizeof z;
+                    std::memcpy(&n, q, sizeof n), q += sizeof n;
+                    std::vector<D3D12_RECT> r(n);
+                    std::memcpy(r.data(), q, sizeof(D3D12_RECT) * n), q += sizeof(D3D12_RECT) * n;
+                    p += Size(size_t(q - p));
+                    cl->ClearDepthStencilView(h, D3D12_CLEAR_FLAGS(fs[0]), z, UINT8(fs[1]), n, n ? r.data() : nullptr);
+                    break;
+                }
             }
         }
         bytes_.clear();

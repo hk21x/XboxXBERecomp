@@ -41,7 +41,9 @@ public:
         std::filesystem::create_directories(app::ExeDir() / "cap");
         return true;
     }
+    bool ClearsRecorded() const override { return bool(drain_); }
     void Clear(const State& s, uint32_t n, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) override {
+        Decided(s);
         if (drawing_) reference::Clear(s, n, rects, flags, color, z, stencil);
     }
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {

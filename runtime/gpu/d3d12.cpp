@@ -324,6 +324,7 @@ public:
     // assembled on the render thread's prep thread: Draw takes it in place of assembling (point sprites too, which
     // change only the stages)
     bool RecordOnThread(std::function<void()> drain) override;
+    bool ClearsRecorded() const override { return record_thread_; }
     void RecordNext(const State& s) override;
     void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
                        const Assembled& pre, bool ok) override {
@@ -3775,12 +3776,13 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CLEAR_FLAGS cf = D3D12_CLEAR_FLAGS(((c.flags & kClearZ) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                                                  ((c.flags & kClearStencil) ? D3D12_CLEAR_FLAG_STENCIL : 0));
-        CL()->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f),
-                                   UINT8(c.stencil), UINT(rs.size()), rs.data());
+        // recorded (with the pipeline, record writes them after the draws before)
+        DRec().ClearDsv(Cpu(dsv_heap_.Get(), t.view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f), UINT8(c.stencil),
+                        UINT(rs.size()), rs.data());
         if (t.ms) {
             Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            CL()->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f),
-                                       UINT8(c.stencil), UINT(rs.size()), rs.data());
+            DRec().ClearDsv(Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f),
+                            UINT8(c.stencil), UINT(rs.size()), rs.data());
         }
     } else {
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
@@ -3792,10 +3794,10 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         if ((c.flags & kClearTarget) != kClearTarget) {
             ClearChannels(t, rs, c.flags, col);
         } else {
-            CL()->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
+            DRec().ClearRtv(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
             if (t.ms) {
                 Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                CL()->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
+                DRec().ClearRtv(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
             }
         }
     }
@@ -3805,6 +3807,19 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
 
 void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    // decided like a draw: its barriers and clears go into a packet record writes in order (one packet for each top
+    // level clear; a clear in a draw's place, State::blank_format, goes with that draw's)
+    struct DecideScope {
+        D3D12Backend& b;
+        bool top;
+        explicit DecideScope(D3D12Backend& be) : b(be), top(be.draw_depth_++ == 0) {
+            if (top) b.deciding_ = true, b.packet_->draw = false;
+        }
+        ~DecideScope() {
+            b.draw_depth_--;
+            if (top) b.EndDecide();
+        }
+    } decide_scope{*this};
     if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
         g_perf.face_skips++;
         return;
@@ -4366,10 +4381,12 @@ void LogPerf() {
              p.runs ? double(p.run_draws) / double(p.runs) : 0.0);
         LOGR("perf: draw's other steps per frame, ms: before assembly %.2f, targets %.2f, checks and note %.2f, after "
              "geometry %.2f | consts: vertex constants %.2f, filled %.2f, uploaded %.2f | render thread: state %.2f, "
-             "batches %.2f | record thread: %.2f | resting cube faces: %.0f draws and clears left out", p.pre / n,
+             "batches %.2f, waiting for record %.2f (%.1f times) | record thread: %.2f | resting cube faces: %.0f draws "
+             "and clears left out", p.pre / n,
              p.bind_targets / n, p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n, p.k_dc / n,
              g_perf_state_ns.exchange(0) / n / 1e6, g_perf_batch_ns.exchange(0) / n / 1e6,
-             g_perf_record_ns.exchange(0) / n / 1e6, p.face_skips / n);
+             g_perf_drain_ns.exchange(0) / n / 1e6, g_perf_drains.exchange(0) / n, g_perf_record_ns.exchange(0) / n / 1e6,
+             p.face_skips / n);
         LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
              p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
         // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
