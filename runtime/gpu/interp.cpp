@@ -214,6 +214,10 @@ private:
     bool logged_ = false;
     Clock::time_point reported_{};
     uint32_t shown_ = 0, steps_ = 0, blended_steps_ = 0;
+    // what holds the frame rate, summed over the 10 s summary: the title's own time a step (its records to its present), the match
+    // and upload before the replays, the replays, the frames planned and the limit the late steps leave
+    double sum_drawing_ = 0, sum_prepare_ = 0, sum_replay_ = 0, sum_planned_ = 0, sum_limit_ = 0;
+    uint32_t replays_ = 0;
 };
 
 void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
@@ -659,6 +663,7 @@ void Interpolating::Replay(float alpha) {
     for (const Rec::Header& l : left) std::memcpy(kernel::HostPtr(l.va), l.bytes, HeaderSize(l.va));
     region_fence_[region_] = inner_->Fence();
     replay_seconds_ = std::chrono::duration<double>(Clock::now() - began).count();
+    sum_replay_ += replay_seconds_, replays_++;
 }
 
 void Interpolating::Present(const Surface& front) {
@@ -666,7 +671,9 @@ void Interpolating::Present(const Surface& front) {
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
+    const auto prepare_began = Clock::now();
     const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
+    sum_prepare_ += std::chrono::duration<double>(Clock::now() - prepare_began).count();
     if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
@@ -708,6 +715,7 @@ void Interpolating::Present(const Surface& front) {
             if (patience_ > kFirstPatience) patience_ = std::max(patience_ * 3 / 4, kFirstPatience);
         }
         const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
+        sum_drawing_ += drawing, sum_planned_ += frames, sum_limit_ += limit_;
         const double spacing = std::min(slot, usual / frames);
         if (t < rest_until_) {
             inner_->Present(front);
@@ -746,10 +754,19 @@ void Interpolating::Present(const Surface& front) {
     steps_++;
     if (t - reported_ > std::chrono::seconds(10)) {
         if (reported_ != Clock::time_point{} && blended_steps_)
+        {
             LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s%s", shown_, steps_, blended_steps_,
                  app::kGame.interp_sampled_targets_at_step ? " (what samples an unblended target at its step's place)" : "");
+            const double b = std::max(1u, blended_steps_);
+            LOGR("gpu: in-between frames, a step: the title %.2f ms, matching and upload %.2f ms, a replay %.2f ms (%u), frames planned "
+                 "%.2f, limit %.2f",
+                 sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
+                 replays_, sum_planned_ / b, sum_limit_ / b);
+        }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
+        sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
+        replays_ = 0;
     }
     now_.swap(before_);
     before_count_ = count_;
