@@ -205,6 +205,7 @@ private:
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
+    uint32_t front_header_ = 0, front_size_ = 0;  // the frame presented last (interp_hold_small_targets)
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
     int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience, late_ = 0;
@@ -527,6 +528,18 @@ bool Interpolating::Match() {
 
 void Interpolating::Replay(float alpha) {
     const auto began = Clock::now();
+    // GameInfo::interp_hold_small_targets: in an in-between frame, what goes to a target smaller than the frame is left as its
+    // step drew it (the frame's size from the front buffer last presented)
+    const bool hold = alpha != 1 && app::kGame.interp_hold_small_targets && front_size_;
+    const auto small = [&](const Surface& t) {
+        if (!hold || !t.header || t.header == front_header_) return false;
+        // the size as the guest's surface header holds it (common, data, lock, format, size) when the state does not carry it
+        const uint32_t size = t.size ? t.size : kernel::R32(t.header + 16);
+        if (!size) return false;
+        const uint32_t w = (size & 0xFFF) + 1, h = ((size >> 12) & 0xFFF) + 1;
+        const uint32_t fw = (front_size_ & 0xFFF) + 1, fh = ((front_size_ >> 12) & 0xFFF) + 1;
+        return w < fw || h < fh;
+    };
     // as the title left them, afterwards
     std::vector<Rec::Header> left;
     std::unordered_map<uint32_t, bool> seen;
@@ -544,12 +557,13 @@ void Interpolating::Replay(float alpha) {
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
             case Rec::Clear:
-                inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
+                if (!small(r.s->rt)) inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
                 break;
             case Rec::Copy:
-                inner_->Copy(r.s1, r.s2, r.a, r.b, r.c);
+                if (!small(r.s2)) inner_->Copy(r.s1, r.s2, r.a, r.b, r.c);
                 break;
             case Rec::Draw: {
+                if (small(r.s->rt)) break;
                 const uint8_t* indices = r.has_bytes ? r.bytes.data() : nullptr;
                 State& d = *r.s;
                 std::array<State::Stream, 16> streams = d.streams;
@@ -613,6 +627,7 @@ void Interpolating::Replay(float alpha) {
 
 void Interpolating::Present(const Surface& front) {
     const auto t = Clock::now();
+    front_header_ = front.header, front_size_ = front.size;
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
@@ -696,7 +711,8 @@ void Interpolating::Present(const Surface& front) {
     steps_++;
     if (t - reported_ > std::chrono::seconds(10)) {
         if (reported_ != Clock::time_point{} && blended_steps_)
-            LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s", shown_, steps_, blended_steps_);
+            LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s%s", shown_, steps_, blended_steps_,
+                 app::kGame.interp_hold_small_targets ? " (small targets held as their step drew them)" : "");
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
     }
