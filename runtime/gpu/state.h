@@ -8,6 +8,10 @@
 // this to D3D12; nothing here models the console's GPU.
 namespace gpu {
 
+// ultrawide 2D: guest pixels from the frame's left or right edge that a vertex may be and still count as on it
+// (DrawSpan, the shaders' 1.5, the reference renderer)
+constexpr float kEdgeNear = 1.5f;
+
 // D3DRS indices of the XDK 5849 build this title links, taken from its own tables
 enum : uint32_t {
     kRsDeferredFirst = 92,

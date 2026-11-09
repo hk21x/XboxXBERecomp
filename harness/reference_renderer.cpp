@@ -213,7 +213,7 @@ void DecodeBlocks(const TextureDesc& d, Host host, const std::vector<uint8_t>& i
 // a P8 texture through the stage's palette (D3DPalette: Common, its top two bits the size code; Data, the colours'
 // physical address), as the renderers' ReadStagePalette
 // as the renderers' shaders (kVsHelpers): a vertex on or past the frame's left or right edge
-bool AtFrameEdge(float x, float width) { return x <= 0.5f || x >= width - 0.5f; }
+bool AtFrameEdge(float x, float width) { return x <= gpu::kEdgeNear || x >= width - gpu::kEdgeNear; }
 
 std::shared_ptr<Image> FindImage(uint32_t header, uint32_t palette_header) {
     TextureDesc d;
@@ -1335,11 +1335,11 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         for (uint32_t vi = 0; vi < as.vertex_count; vi++)
             if (squeezable[vi]) lo = std::min(lo, verts[vi].pos[0] / ax), hi = std::max(hi, verts[vi].pos[0] / ax);
         // State::squeeze_beyond: squeezed whole and moved by squeeze_shift
-        const bool pillared = pillar && lo <= 0.5f && hi >= w - 0.5f;  // only what spans the frame (the renderers' Pillarbox)
+        const bool pillared = pillar && lo <= gpu::kEdgeNear && hi >= w - gpu::kEdgeNear;  // only what spans the frame (the renderers' Pillarbox)
         if (pillar && !pillared) squeeze = hud_squeeze;
-        bool spans = !s.squeeze_beyond && !pillared && ((lo <= 0.5f && hi >= w - 0.5f) ||
+        bool spans = !s.squeeze_beyond && !pillared && ((lo <= gpu::kEdgeNear && hi >= w - gpu::kEdgeNear) ||
                                            // an untextured fill ending on one edge (the renderers' DrawSpan)
-                                           (!s.textures[0] && lo >= -2.0f && hi <= w + 2.0f && (lo <= 0.5f || hi >= w - 0.5f)));
+                                           (app::kGame.edge_fills && !s.textures[0] && lo >= -2.0f && hi <= w + 2.0f && (lo <= 0.5f || hi >= w - 0.5f)));
         const float shift = s.squeeze_beyond ? s.squeeze_shift : 0.0f;
         // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
         const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;

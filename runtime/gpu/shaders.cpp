@@ -759,7 +759,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     // ultrawide: 2D squeezed as pretransformed draws are (FixedVertexHlsl), at the near plane by its w (4 or less);
     // a matrix program's only when the draw's matrix is 2D (hud.x 1 otherwise: gpu::ScreenDraw)
     if (app::kGame.squeeze_screen_programs && (ScreenProgram(prog) || MatrixProgram(prog) >= 0))
-        s += "    if ((hud.x < 0 || (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5)) && (hud.z == 0 || oPos.w <= 4))\n"
+        s += "    if ((hud.x < 0 || (oPos.x > 1.5 && oPos.x < hud.y * 2 - 1.5)) && (hud.z == 0 || oPos.w <= 4))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
     s += kVsEpilogue;
     return s;
@@ -805,12 +805,13 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    float4 rhw = " + v(0, "float4(0,0,0,1)") + ";\n";
         s += "    float w = rhw.w == 0 ? 1 : 1 / rhw.w;\n";
         s += "    oPos = float4(rhw.xy, rhw.z / surf.z, w);\n";
-        // ultrawide: 2D drawn in a centred 16:9 part; a corner on the frame's left or right edge stays there (HUD bars
-        // reaching the edge keep reaching it, full screen passes and full width lines keep their width)
+        // ultrawide: 2D drawn in a centred 16:9 part; a corner on the frame's left or right edge, or within a pixel and a
+        // half of it (gpu::kEdgeNear), stays there (HUD bars reaching the edge keep reaching it, full screen passes and
+        // full width lines keep their width)
         // a depth tested draw (hud.z) only at the near plane: 2D drawn with depth on, not a glow out in the world
         // hud.x negative: no corner kept on an edge (a draw not spanning the frame, gpu::DrawSpan: EoN's driving radar;
         // State::squeeze_beyond)
-        s += "    if ((hud.x < 0 || (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5)) && (hud.z == 0 || rhw.w >= 0.25))\n"
+        s += "    if ((hud.x < 0 || (oPos.x > 1.5 && oPos.x < hud.y * 2 - 1.5)) && (hud.z == 0 || rhw.w >= 0.25))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
         // State::pillar_fill: the picture enlarged about the centre to its own shape (zclip.z the scale, .w the centre)
         s += "    if (zclip.z > 0) oPos.y = zclip.w + (oPos.y - zclip.w) * zclip.z;\n";

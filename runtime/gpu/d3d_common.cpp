@@ -1016,7 +1016,9 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
     if (!ScreenExtent(s, a, lo, hi, top, bottom)) return kSpanFrame;
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
-    if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
+    // within a pixel and a half of both edges (PGR2's result screen draws its blurred frame from x -1 to 639; the
+    // shaders keep a corner that near an edge on it)
+    if (lo <= kEdgeNear && hi >= width - kEdgeNear) return kSpanFrame;
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
     // radar's tiles) do not (GameInfo::edge_fills)
