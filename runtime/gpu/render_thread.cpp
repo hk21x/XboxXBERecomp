@@ -124,6 +124,9 @@ uint64_t CheckHash(const State& s, const std::vector<Range>& ranges) {
     return h;
 }
 
+// a 16 byte value all zero, in SSE2 (_mm_testz_si128 is SSE4.1: a build without that target, Debug, failed)
+inline bool AllZero(__m128i v) { return _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) == 0xFFFF; }
+
 // equal bytes, 16 at a time: most of the state is compared on every draw
 bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
     size_t i = 0;
@@ -131,7 +134,7 @@ bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
     for (; i + 16 <= n; i += 16)
         diff = _mm_or_si128(diff, _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i)),
                                                 _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i))));
-    if (!_mm_testz_si128(diff, diff)) return false;
+    if (!AllZero(diff)) return false;
     return i == n || !std::memcmp(a + i, b + i, n - i);
 }
 
@@ -447,7 +450,7 @@ private:
                                                       _mm_xor_si128(_mm_loadu_si128(a + 1), _mm_loadu_si128(b + 1))),
                                          _mm_or_si128(_mm_xor_si128(_mm_loadu_si128(a + 2), _mm_loadu_si128(b + 2)),
                                                       _mm_xor_si128(_mm_loadu_si128(a + 3), _mm_loadu_si128(b + 3))));
-                if (!_mm_testz_si128(d, d)) Send(off, now + off, 64);
+                if (!AllZero(d)) Send(off, now + off, 64);
             }
             if (off < end) Delta(sent + off, now + off, end - off);
         }
