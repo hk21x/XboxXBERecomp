@@ -654,8 +654,8 @@ Target* D3D11Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     }
     t.data = data;
     TextureDesc d;
-    t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
-    t.swizzled32 = !depth && !t.linear32 && Describe(s.header, d) && Format(d.format).swizzled &&
+    t.linear32 = depth || (DescribeSurface(s, d) && d.linear && Format(d.format).bits == 32);
+    t.swizzled32 = !depth && !t.linear32 && DescribeSurface(s, d) && Format(d.format).swizzled &&
                    !Format(d.format).compressed && Format(d.format).bits == 32;
     t.bytes = depth ? sw * sh * 4 : GuestPitch(sw) * sh;
     t.epoch = DirtyEpoch(data);
@@ -728,7 +728,7 @@ bool D3D11Backend::BindTargets(const State& s) {
 // CPU pixels of a colour surface into its target, scaled
 void D3D11Backend::UploadTarget(Target& t, const Surface& s) {
     TextureDesc d;
-    if (!Describe(s.header, d) || Format(d.format).depth) return;
+    if (!DescribeSurface(s, d) || Format(d.format).depth) return;
     std::vector<uint8_t> px;
     uint32_t pitch;
     // after a Sync only the pixels the CPU changed go over the picture, which stays at render scale
