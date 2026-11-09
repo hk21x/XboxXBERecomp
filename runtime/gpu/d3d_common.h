@@ -198,7 +198,8 @@ Span DrawSpan(const State& s, const Assembled& a, float width);
 void SqueezeBeyond(const State& s, float hud[4]);
 // State::pillar_aspect: a screen space draw spanning a screen shaped target squeezed whole to that shape (hud[0]
 // negative), after hud[1] is set
-void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4]);
+// zoom: the draw constants' zclip[2] and [3], a vertical scale and its centre (State::pillar_fill); left 0 otherwise
+void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4], float zoom[2], float gh);
 // a depth target sampled as format: through a depth format the console compares (a shadow map), through a 32 bit
 // colour format it reads the word's bytes (PGR2's depth of field weighs its blur by them)
 void DepthRead(uint32_t format, TexInfo& info);

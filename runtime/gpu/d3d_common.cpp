@@ -1019,8 +1019,8 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
-    // radar's tiles) do not
-    if (!s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
+    // radar's tiles) do not (GameInfo::edge_fills)
+    if (app::kGame.edge_fills && !s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
         return kSpanFrame;
     // a textured bar the viewport's full height so (GameInfo::edge_bars)
     if (app::kGame.edge_bars && s.textures[0] && k < 0 && lo >= -kEdgeSlack && hi <= width + kEdgeSlack &&
@@ -1039,12 +1039,19 @@ void SqueezeBeyond(const State& s, float hud[4]) {
     hud[0] = -k;
 }
 
-void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4]) {
+void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4], float zoom[2], float gh) {
     if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1 || aspect <= s.pillar_aspect + 1e-3f) return;
     if (s.pillar_format && (!s.textures[0] || (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) != s.pillar_format)) return;
     // only a picture spanning the frame, into a centred box: a panel narrowed in place showed hard edges inside the
     // vignette drawn over it at its old size (PGR2's title movie)
     if (DrawSpan(s, a, hud[1] * 2) != kSpanFrame) return;
+    if (s.pillar_fill && gh > 0) {
+        // the frame's width kept, the picture's height enlarged to its shape about the centre (top and bottom cropped)
+        hud[0] = 1;
+        zoom[0] = aspect / s.pillar_aspect;
+        zoom[1] = gh * 0.5f;
+        return;
+    }
     hud[0] = -(s.pillar_aspect / aspect);
 }
 

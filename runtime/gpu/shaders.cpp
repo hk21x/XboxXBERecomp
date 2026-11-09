@@ -812,6 +812,8 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         // State::squeeze_beyond)
         s += "    if ((hud.x < 0 || (oPos.x > 0.5 && oPos.x < hud.y * 2 - 0.5)) && (hud.z == 0 || rhw.w >= 0.25))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
+        // State::pillar_fill: the picture enlarged about the centre to its own shape (zclip.z the scale, .w the centre)
+        s += "    if (zclip.z > 0) oPos.y = zclip.w + (oPos.y - zclip.w) * zclip.z;\n";
     } else {
         s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
         s += "    float4 cp = mul(ip, wvp);\n";

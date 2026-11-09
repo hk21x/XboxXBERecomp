@@ -234,6 +234,9 @@ struct State {
     // whole to it about the centre, pillarboxed instead of stretched across a wider frame
     float pillar_aspect = 0;
     uint32_t pillar_format = 0;
+    // set with pillar_aspect: such a picture is enlarged about the centre until it fills the frame's width (its top and
+    // bottom cropped) instead of pillarboxed: not stretched, and nothing left uncovered at the sides
+    bool pillar_fill = false;
     // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
     // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
     int squeeze_margin = 0;

@@ -1345,9 +1345,18 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;
         if (!s.squeeze_beyond && !pillared && !spans && right - left < w - 1 && lo <= left + 0.5f && hi >= right - 0.5f) squeeze = 1;
         if (!spans) clip_squeeze = squeeze;
+        // State::pillar_fill: the width kept, the picture enlarged about the centre to its own shape (the renderers'
+        // Pillarbox, zclip.z and .w)
+        if (pillared && s.pillar_fill) {
+            const float k = app::FrameAspect() / s.pillar_aspect, ay = float(s.aa_y), cy = float(rt.h) * 0.5f;
+            for (uint32_t vi = 0; vi < as.vertex_count; vi++)
+                if (squeezable[vi]) verts[vi].pos[1] = (cy + (verts[vi].pos[1] / ay - cy) * k) * ay;
+            squeeze = 1;
+            clip_squeeze = 1;
+        }
         for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
             float x = verts[vi].pos[0] / ax;
-            if (squeezable[vi] && !(spans && AtFrameEdge(x, w)))
+            if (squeezable[vi] && !(spans && AtFrameEdge(x, w)) && squeeze != 1)
                 verts[vi].pos[0] = (pivot + (x + shift - pivot) * squeeze) * ax;
         }
     }

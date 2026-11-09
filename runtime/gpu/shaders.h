@@ -140,7 +140,8 @@ struct DrawConstants {
                          // [2] depth tested; [3] W-buffered: z kept within w (no far plane clipping)
     float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
     float vattr[16][4];  // State::vattr
-    float zclip[4];      // the depth clip planes, near and far, as depth from 0 to 1 (-2 and 2: none)
+    float zclip[4];      // the depth clip planes, near and far, as depth from 0 to 1 (-2 and 2: none); [2] and [3] a
+                         // pretransformed picture's vertical scale and its centre (State::pillar_fill, Pillarbox), 0 none
 };
 
 }  // namespace gpu
