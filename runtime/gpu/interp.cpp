@@ -18,6 +18,7 @@
 #include "app/app.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/texture.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 
@@ -64,6 +65,7 @@ struct Rec {
     };
     std::vector<Kept> kept;
     Surface s1, s2;
+    uint32_t rt_w = 0, rt_h = 0;  // diagnosis: the target size set when drawn
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
@@ -103,17 +105,12 @@ public:
         Rec& r = Next(Rec::Draw);
         Keep(r, s);
         r.a = prim, r.b = start, r.c = count;
+        SurfaceSize(s.rt, r.rt_w, r.rt_h);
         r.headers.clear();
-        const auto add = [&](uint32_t va) {
-            if (!va) return;
-            Rec::Header h{va, {}};
-            std::memcpy(h.bytes, kernel::HostPtr(va), HeaderSize(va));
-            r.headers.push_back(h);
-        };
-        for (const auto& stream : s.streams) add(stream.vb);
-        for (uint32_t t : s.textures) add(t);
+        for (const auto& stream : s.streams) AddHeader(r, stream.vb);
+        for (uint32_t t : s.textures) AddHeader(r, t);
         KeepVertices(r, s, start, count, indices);
-        for (uint32_t p : s.palettes) add(p);
+        for (uint32_t p : s.palettes) AddHeader(r, p);
         r.has_bytes = indices != nullptr;
         if (indices) r.bytes.assign(indices, indices + size_t(count) * 2);
     }
@@ -157,6 +154,14 @@ private:
     static uint32_t HeaderSize(uint32_t va) {
         const uint32_t type = kernel::R32(va) & 0x70000;
         return type < 0x20000 || type == 0x30000 ? 12 : kHeaderBytes;
+    }
+    static void AddHeader(Rec& r, uint32_t va) {
+        if (!va) return;
+        for (const Rec::Header& h : r.headers)
+            if (h.va == va) return;
+        Rec::Header h{va, {}};
+        std::memcpy(h.bytes, kernel::HostPtr(va), HeaderSize(va));
+        r.headers.push_back(h);
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
     bool UploadKept();
@@ -205,6 +210,7 @@ private:
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
+    uint64_t size_mismatch_ = 0, size_checked_ = 0;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
@@ -652,6 +658,19 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t e = 0; e < 16; e++) m[e] = p.transforms[kFixed[i]][e] + (m[e] - p.transforms[kFixed[i]][e]) * alpha;
                     }
                 }
+                {
+                    // diagnosis: a target's header describing another size now than when the step set it (the title reusing it):
+                    // the renderers take the size set (DescribeSurface), as the GPU renderers keep a small target per size
+                    TextureDesc now;
+                    if (d.rt.header && Describe(d.rt.header, now) && (now.width != r.rt_w || now.height != r.rt_h)) {
+                        size_mismatch_++;
+                        static int told = 0;
+                        if (told++ < 8)
+                            LOGR("gpu: in-between frames: rec %zu drew into %08X at %ux%u, its header says %ux%u by now (the size set is used)",
+                                 i, d.rt.data, r.rt_w, r.rt_h, now.width, now.height);
+                    }
+                    size_checked_++;
+                }
                 inner_->Draw(d, r.a, r.b, r.c, indices);
                 if (fixed)
                     for (size_t i = 0; i < std::size(kFixed); i++) d.transforms[kFixed[i]] = fixed_was[i];
@@ -674,7 +693,14 @@ void Interpolating::Present(const Surface& front) {
     const auto prepare_began = Clock::now();
     const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
     sum_prepare_ += std::chrono::duration<double>(Clock::now() - prepare_began).count();
-    if (Test() && blend) {
+    static const bool test_paced = std::getenv("XBE_INTERP_TEST_PACED") != nullptr;
+    if (Test() && blend && test_paced) {
+        // as the paced frames go (below): from the step before towards this one, never this step's own picture last
+        for (int i = 0; i < Test(); i++) {
+            Replay(float(i) / float(Test()));
+            inner_->Present(front);
+        }
+    } else if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
             inner_->Present(front);
@@ -762,6 +788,8 @@ void Interpolating::Present(const Surface& front) {
                  "%.2f, limit %.2f",
                  sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
                  replays_, sum_planned_ / b, sum_limit_ / b);
+            LOGR("gpu: in-between frames: %llu of %llu replayed draws found their target's header describing another size than set (the size set is used)",
+                 (unsigned long long)size_mismatch_, (unsigned long long)size_checked_);
         }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;

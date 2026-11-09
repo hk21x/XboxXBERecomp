@@ -1533,8 +1533,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (!CreateTargetView(t)) return nullptr;
     t.data = slot.data;
     TextureDesc d;
-    t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
-    t.swizzled32 = !depth && !t.linear32 && Describe(s.header, d) && Format(d.format).swizzled &&
+    t.linear32 = depth || (DescribeSurface(s, d) && d.linear && Format(d.format).bits == 32);
+    t.swizzled32 = !depth && !t.linear32 && DescribeSurface(s, d) && Format(d.format).swizzled &&
                    !Format(d.format).compressed && Format(d.format).bits == 32;
     t.bytes = GuestPitch(slot.gw) * slot.gh;
     if (depth) t.bytes = slot.gw * slot.gh * 4;
@@ -1566,8 +1566,7 @@ bool D3D12Backend::BindTargets(const State& s) {
     bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
     bool colour = SimpleState(s, kMColorWriteEnable) != 0;
     uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
-                         s.rt.header ? kernel::R32(s.rt.header + 12) : 0, s.rt.header ? kernel::R32(s.rt.header + 16) : 0,
-                         s.zs.header ? kernel::R32(s.zs.header + 12) : 0, s.zs.header ? kernel::R32(s.zs.header + 16) : 0};
+                         s.rt.format, s.rt.size, s.zs.format, s.zs.size};  // as set (DescribeSurface)
     uint64_t key = Hash(words, sizeof(words));
     uint64_t valid = presents_ << 24 ^ targets_gen_;
     Target* rt;
@@ -1737,7 +1736,7 @@ ComPtr<ID3D12Resource> D3D12Backend::CreatePixelTexture(const std::vector<uint8_
 void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
     g_perf.rtups++;
     TextureDesc d;
-    if (!Describe(s.header, d) || Format(d.format).depth) return;
+    if (!DescribeSurface(s, d) || Format(d.format).depth) return;
     std::vector<uint8_t> px;
     uint32_t pitch;
     // after a Sync only the pixels the CPU changed go over the picture, which stays at render scale
