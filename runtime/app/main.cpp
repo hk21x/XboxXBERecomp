@@ -281,9 +281,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetForegroundWindow(hwnd);
             return 0;
         case WM_CLOSE:
+            // who closes it (a relaunched instance once ended at once, before its handover, with no quit asked for)
+            LOGR("window: WM_CLOSE (%s, %s)", InSendMessage() ? "sent from another thread or process" : "posted or sent here",
+                 app::HandingOver() ? "while handing over" : "after the handover");
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            LOGR("window: WM_DESTROY");
             PostQuitMessage(0);
             return 0;
     }
@@ -440,12 +444,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL got;
+    while ((got = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
     if (app::g_mode_changed) ChangeDisplaySettingsW(nullptr, 0);
-    LOGR("the window closed");
+    // why the loop ended: WM_QUIT (got 0, its code) or an error (got -1); and whether the window was destroyed
+    LOGR("the window closed (GetMessage %d, quit code %llu, error %lu, window %s, %s)", int(got),
+         (unsigned long long)msg.wParam, got < 0 ? GetLastError() : 0ul, IsWindow(app::g_hwnd) ? "still there" : "destroyed",
+         app::HandingOver() ? "before its handover" : "after its handover");
     logx::Flush();
     kernel::Shutdown(0);
 }
