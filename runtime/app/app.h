@@ -238,10 +238,10 @@ struct GameInfo {
     bool (*texture_bound)(uint32_t header, uint32_t palette) = nullptr;
     // the title draws one frame a step of its game, and the frame cap asks for more: frames in between (gpu/interp.cpp), while true
     bool (*step_interpolation)() = nullptr;
-    // in-between frames leave targets smaller than the frame as their step drew them (a reflection or shadow style pass
-    // drawn from its own view each step cannot be blended, and redrawn among blended scenery the floor sampling it flickered:
-    // EoN's driving); off, they are drawn again with the rest
-    bool interp_hold_small_targets = false;
+    // in-between frames draw at the step's place a draw that samples a target drawn this step by draws that cannot be blended
+    // (a reflection pass drawn from a mirrored view each step: blended, what samples it slid against it, back and forth every
+    // other step: EoN's driving floor); off, every matched draw is blended
+    bool interp_sampled_targets_at_step = false;
     // while true, those frames carry on past the step instead of leading up to it: no delay, for what the player aims
     bool (*step_ahead)() = nullptr;
     // the title draws its world a few vertices at a time with nothing changed between (Agent Under Fire: thousands of draws a
