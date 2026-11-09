@@ -205,7 +205,6 @@ private:
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
-    uint32_t front_header_ = 0, front_size_ = 0;  // the frame presented last (interp_hold_small_targets)
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
     int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience, late_ = 0;
@@ -528,17 +527,21 @@ bool Interpolating::Match() {
 
 void Interpolating::Replay(float alpha) {
     const auto began = Clock::now();
-    // GameInfo::interp_hold_small_targets: in an in-between frame, what goes to a target smaller than the frame is left as its
-    // step drew it (the frame's size from the front buffer last presented)
-    const bool hold = alpha != 1 && app::kGame.interp_hold_small_targets && front_size_;
-    const auto small = [&](const Surface& t) {
-        if (!hold || !t.header || t.header == front_header_) return false;
-        // the size as the guest's surface header holds it (common, data, lock, format, size) when the state does not carry it
-        const uint32_t size = t.size ? t.size : kernel::R32(t.header + 16);
-        if (!size) return false;
-        const uint32_t w = (size & 0xFFF) + 1, h = ((size >> 12) & 0xFFF) + 1;
-        const uint32_t fw = (front_size_ & 0xFFF) + 1, fh = ((front_size_ >> 12) & 0xFFF) + 1;
-        return w < fw || h < fh;
+    // GameInfo::interp_sampled_targets_at_step: the memory of targets drawn this step by draws that are not blended (no match,
+    // or a leap); a draw sampling one of them is drawn at the step's place, as what it samples is
+    std::vector<uint32_t> unblended_targets;
+    if (alpha != 1 && app::kGame.interp_sampled_targets_at_step)
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev >= 0 || r.derived || r.peer >= 0 || !r.s->rt.data) continue;
+            const uint32_t d = r.s->rt.data & 0x0FFFFFFF;
+            if (std::find(unblended_targets.begin(), unblended_targets.end(), d) == unblended_targets.end()) unblended_targets.push_back(d);
+        }
+    const auto samples_unblended = [&](const State& st) {
+        for (uint32_t t : st.textures)
+            if (t && std::find(unblended_targets.begin(), unblended_targets.end(), kernel::R32(t + 4) & 0x0FFFFFFF) != unblended_targets.end())
+                return true;
+        return false;
     };
     // as the title left them, afterwards
     std::vector<Rec::Header> left;
@@ -557,13 +560,12 @@ void Interpolating::Replay(float alpha) {
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
             case Rec::Clear:
-                if (!small(r.s->rt)) inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
+                inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
                 break;
             case Rec::Copy:
-                if (!small(r.s2)) inner_->Copy(r.s1, r.s2, r.a, r.b, r.c);
+                inner_->Copy(r.s1, r.s2, r.a, r.b, r.c);
                 break;
             case Rec::Draw: {
-                if (small(r.s->rt)) break;
                 const uint8_t* indices = r.has_bytes ? r.bytes.data() : nullptr;
                 State& d = *r.s;
                 std::array<State::Stream, 16> streams = d.streams;
@@ -574,7 +576,8 @@ void Interpolating::Replay(float alpha) {
                     kernel::W32(h + 8, 0);
                     d.streams[kept.stream].vb = h;
                 }
-                const bool blend = r.prev >= 0 && alpha != 1;
+                const bool at_step = !unblended_targets.empty() && samples_unblended(*r.s);
+                const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
                 if (blend) {
                     const Rec& p = before_[size_t(r.prev)];
                     if (r.turning) {
@@ -584,11 +587,11 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
                     }
-                } else if (r.derived && alpha != 1) {
+                } else if (r.derived && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
                         for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
-                } else if (r.peer >= 0 && alpha != 1) {
+                } else if (r.peer >= 0 && alpha != 1 && !at_step) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
                     for (uint32_t k = 0; k < kRegisters; k++) {
@@ -627,7 +630,6 @@ void Interpolating::Replay(float alpha) {
 
 void Interpolating::Present(const Surface& front) {
     const auto t = Clock::now();
-    front_header_ = front.header, front_size_ = front.size;
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
@@ -712,7 +714,7 @@ void Interpolating::Present(const Surface& front) {
     if (t - reported_ > std::chrono::seconds(10)) {
         if (reported_ != Clock::time_point{} && blended_steps_)
             LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s%s", shown_, steps_, blended_steps_,
-                 app::kGame.interp_hold_small_targets ? " (small targets held as their step drew them)" : "");
+                 app::kGame.interp_sampled_targets_at_step ? " (what samples an unblended target at its step's place)" : "");
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
     }
