@@ -78,6 +78,11 @@ uint64_t KeyOf(const Rec& r) {
     uint64_t h = 0xCBF29CE484222325ull;
     auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
     mix(r.a), mix(r.b), mix(r.c), mix(s.vs_handle), mix(s.rt.header);
+    // and the target's memory: a title draws one surface header into two pictures on alternate steps (EoN's driving: its
+    // environment maps at 811C0000 and 813C0000 through one header), and a draw matched to the other picture's of the step
+    // before blended two views into one. Unmatched, they are drawn at the step's place, and what samples them with them
+    // (GameInfo::interp_sampled_targets_at_step)
+    mix(s.rt.data);
     // stage 0's texture only: the other stages can hold a binding the program does not read that changes from one step to the
     // next (EoN's driving: stage 2 bound one step and not the next), and lost the match of a whole floor's scenery and its decals
     mix(s.textures[0]);
