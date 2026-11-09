@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -527,6 +528,21 @@ bool Interpolating::Match() {
 
 void Interpolating::Replay(float alpha) {
     const auto began = Clock::now();
+    // diagnosis: a file named interp_table in the working folder (the run folder headless) logs the next 8 replays' draws and how
+    // each was blended, to pair with the reference renderer's probes (PROBES, which name each writing draw's program, count and
+    // textures) on a pixel that flickers
+    static int diag_left = 0, diag_replay = 0;
+    diag_replay++;
+    if (!diag_left) {
+        if (std::FILE* f = std::fopen("interp_table", "rb")) {
+            std::fclose(f);
+            std::remove("interp_table");
+            diag_left = 8;
+        }
+    }
+    const bool diag_table = diag_left > 0;
+    if (diag_table) diag_left--;
+    if (diag_table) LOGR("gpu: in-between table: replay %d alpha %.2f records %zu", diag_replay, alpha, count_);
     // GameInfo::interp_sampled_targets_at_step: the memory of targets drawn this step by draws that are not blended (no match,
     // or a leap); a draw sampling one of them is drawn at the step's place, as what it samples is
     std::vector<uint32_t> unblended_targets;
@@ -543,6 +559,19 @@ void Interpolating::Replay(float alpha) {
                 return true;
         return false;
     };
+    // and every pass of the same thing with it: draws of one matrix are one mesh drawn again (a light or shadow modulated over it),
+    // and one at the step's place with another blended put the second pass beside the first, darkening the wrong pixels in every
+    // in-between frame (measured with the reference renderer's probes at Train Chase's barrier)
+    const auto matrix_of = [](const Rec& r) {
+        uint64_t h = 0xCBF29CE484222325ull;
+        const auto* b = reinterpret_cast<const uint8_t*>(r.vsc.data());
+        for (size_t k = 0; k < kMatrixRegisters * sizeof(r.vsc[0]); k++) h = (h ^ b[k]) * 0x100000001B3ull;
+        return h;
+    };
+    std::unordered_map<uint64_t, bool> at_step_matrix;
+    if (!unblended_targets.empty())
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && samples_unblended(*now_[i].s)) at_step_matrix[matrix_of(now_[i])] = true;
     // as the title left them, afterwards
     std::vector<Rec::Header> left;
     std::unordered_map<uint32_t, bool> seen;
@@ -576,7 +605,11 @@ void Interpolating::Replay(float alpha) {
                     kernel::W32(h + 8, 0);
                     d.streams[kept.stream].vb = h;
                 }
-                const bool at_step = !unblended_targets.empty() && samples_unblended(*r.s);
+                const bool at_step = !at_step_matrix.empty() && at_step_matrix.count(matrix_of(r));
+                if (diag_table)
+                    LOGR("gpu: in-between table: %d rec %zu %s vs %08X count %u tex %08X %08X %08X %08X rt %08X", diag_replay, i,
+                         alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? "derived" : r.peer >= 0 ? "peer" : "none",
+                         r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header);
                 const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
                 if (blend) {
                     const Rec& p = before_[size_t(r.prev)];
