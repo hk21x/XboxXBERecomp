@@ -14,8 +14,11 @@ get_filename_component(SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 include(FetchContent)
 # json, zip and xz, each pinned by hash (MIT, MIT, 0BSD; listed in THIRD_PARTY.txt)
+# json.hpp: the release's asset, else the same file at the tag (GitHub's release download answered 504 for hours,
+# 2026-11-09, and a tag's launcher failed to build); CMake tries the URLs in turn, the hash holds for both
 FetchContent_Declare(nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp
+        https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp
     URL_HASH SHA256=aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
     DOWNLOAD_NO_EXTRACT TRUE)
 FetchContent_Declare(miniz
