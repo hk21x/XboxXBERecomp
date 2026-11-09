@@ -1238,8 +1238,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], sd) && !FindReplacement(sd.data)) Sharpen2D(sd);
         }
     if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
-        app::FrameAspect() > app::kGame.hud_aspect + 1e-3f)
-        squeeze = app::kGame.hud_aspect / app::FrameAspect();
+        app::FrameAspect() > app::HudAspect() + 1e-3f)
+        squeeze = app::HudAspect() / app::FrameAspect();
     // State::pillar_aspect: squeezed whole to that shape (the renderers' Pillarbox)
     const bool pillar = s.pillar_aspect > 0 && (as.pretransformed || screen) && slot[0] >= 0 && rt.ok &&
                         (rt.h == 480 || rt.h == 576) && rt.w >= rt.h && app::FrameAspect() > s.pillar_aspect + 1e-3f &&
