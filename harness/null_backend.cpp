@@ -8,6 +8,9 @@
 // zeros) within 30 frames, then memdump is removed
 // poke in the run folder: lines "address size value" (hex address, size 1 2 or 4, value decimal or 0x hex) written to
 // guest memory at the next present, then poke is removed (to meet a condition by hand: achievements)
+#include <atomic>
+#include <functional>
+#include <thread>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +24,7 @@
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "gpu/texture.h"
+#include "gpu/vertex.h"
 #include "harness.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
@@ -37,20 +41,122 @@ public:
         std::filesystem::create_directories(app::ExeDir() / "cap");
         return true;
     }
+    bool ClearsRecorded() const override { return bool(drain_); }
     void Clear(const State& s, uint32_t n, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) override {
+        Decided(s);
         if (drawing_) reference::Clear(s, n, rects, flags, color, z, stencil);
     }
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
         draws_++;
+        Decided(s);
         if (drawing_) reference::Draw(s, prim, start, count, indices);
         if (list_) List(s, prim, start, count);
         harness::AuditDraw(s, prim, start, count, indices);
+    }
+    uint64_t perf_frames_ = 0, perf_draws_ = 0;
+    // XBE_CHECK_RECORD=1 (with XBE_RENDER_THREAD=1): this backend takes the pipeline's record thread. Each draw keeps
+    // a hash of its state, and every 41st draw drains record as D3D12's direct list writes do; the record thread's
+    // copy of the state must hash the same, draw for draw, in order
+    bool RecordOnThread(std::function<void()> drain) override {
+        const char* e = std::getenv("XBE_CHECK_RECORD");
+        if (!(e && *e == '1')) return false;
+        drain_ = std::move(drain);
+        LOGR("record check: draws recorded on the record thread, each checked against its draw's state");
+        return true;
+    }
+    static uint64_t RecordHash(const State& s) {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](const void* p, size_t n) {
+            for (size_t i = 0; i < n; i++) h = (h ^ static_cast<const uint8_t*>(p)[i]) * 1099511628211ull;
+        };
+        mix(s.simple.data(), sizeof(s.simple));
+        mix(s.vsc.data(), sizeof(s.vsc));
+        mix(&s.viewport, sizeof(s.viewport));
+        mix(&s.vs_handle, sizeof(s.vs_handle));
+        return h;
+    }
+    void Decided(const State& s) {
+        if (!drain_) return;
+        static uint64_t n = 0;
+        // a draw's record may lag: the ring as D3D12's (64), waiting while full
+        if (made_ - recorded_.load(std::memory_order_acquire) >= kRing) drain_();  // as D3D12's HandOver
+        ring_[made_ % kRing] = RecordHash(s);
+        made_++;
+        if (++n % 97 == 0) drain_();
+    }
+    void RecordNext(const State& s) override {
+        static uint64_t n = 0, wrong = 0;
+        uint64_t i = recorded_.load(std::memory_order_relaxed);
+        if (i >= made_.load(std::memory_order_acquire)) {
+            if (wrong++ < 8) LOGR("record check: record ran ahead of decide (draw %llu)", (unsigned long long)i);
+        } else if (RecordHash(s) != ring_[i % kRing] && wrong++ < 8) {
+            LOGR("record check: draw %llu recorded with another state than it was decided with", (unsigned long long)i);
+        }
+        recorded_.fetch_add(1, std::memory_order_release);
+        if (++n % 200000 == 0)
+            LOGR("record check: %llu draws recorded, %llu wrong", (unsigned long long)n, (unsigned long long)wrong);
+    }
+    static constexpr uint64_t kRing = 64;
+    std::function<void()> drain_;
+    uint64_t ring_[kRing] = {};
+    std::atomic<uint64_t> made_{0}, recorded_{0};
+
+    // XBE_CHECK_PRE=1: each draw the prep thread assembled is assembled again here, on the render thread, and compared
+    void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
+                       const gpu::Assembled& pre, bool ok) override {
+        static const bool check = [] {
+            const char* e = std::getenv("XBE_CHECK_PRE");
+            return e && *e == '1';
+        }();
+        if (check) {
+            static gpu::Assembled again;
+            static uint64_t n = 0, wrong = 0;
+            bool ok2 = gpu::Assemble(s, prim, start, count, indices, again);
+            const char* why = SameAssembly(pre, ok, again, ok2);
+            n++;
+            if (why && wrong++ < 8) LOGR("prep check: draw %llu assembled differently (%s)", (unsigned long long)n, why);
+            if (n % 200000 == 0)
+                LOGR("prep check: %llu draws assembled ahead, %llu different", (unsigned long long)n, (unsigned long long)wrong);
+        }
+        Draw(s, prim, start, count, indices);
+    }
+    static const char* SameAssembly(const gpu::Assembled& a, bool oka, const gpu::Assembled& b, bool okb) {
+        if (oka != okb) return "drawn or not";
+        if (!oka) return nullptr;
+        if (a.regs != b.regs || a.vertex_count != b.vertex_count || a.topology != b.topology || a.strip != b.strip ||
+            a.pretransformed != b.pretransformed || a.decode != b.decode)
+            return "layout";
+        for (int r = 0; r < 16; r++)  // only the registers in use: Assemble leaves the others as they were
+            if ((a.regs >> r) & 1 && std::memcmp(&a.elements[size_t(r)], &b.elements[size_t(r)], sizeof(a.elements[0])))
+                return "elements";
+        if (a.buffer_count != b.buffer_count) return "buffer count";
+        for (uint32_t i = 0; i < a.buffer_count; i++) {
+            if (a.buffers[i].bytes != b.buffers[i].bytes || a.buffers[i].stride != b.buffers[i].stride) return "buffer size";
+            if (std::memcmp(a.buffers[i].src, b.buffers[i].src, a.buffers[i].bytes)) return "vertex bytes";
+        }
+        if (a.index_count != b.index_count || a.draw_count != b.draw_count || a.base_vertex != b.base_vertex ||
+            a.index16 != b.index16)
+            return "draw";
+        if (a.index_count && std::memcmp(a.index_src, b.index_src, size_t(a.index_count) * (a.index16 ? 2 : 4)))
+            return "indices";
+        return nullptr;
     }
     void Copy(const Surface& src, const Surface& dst, uint32_t n, uint32_t rects, uint32_t points) override {
         if (drawing_) reference::Copy(src, dst, n, rects, points);
         else CopySurfaceMemory(src, dst, n, rects, points);
     }
     void Present(const Surface& front) override {
+        // XBE_PERF with the render thread on: its own times, every 600 frames
+        static const bool perf = std::getenv("XBE_PERF") != nullptr;
+        if (perf && ++perf_frames_ % 600 == 0) {
+            uint64_t d = draws_ - perf_draws_;
+            perf_draws_ = draws_;
+            LOGR("perf: render thread per frame: state %.3f ms, batches %.3f ms, prep %.3f ms, %.0f draws | title: "
+                 "recording %.3f ms, waiting %.3f ms",
+                 gpu::g_perf_state_ns.exchange(0) / 600.0 / 1e6, gpu::g_perf_batch_ns.exchange(0) / 600.0 / 1e6,
+                 gpu::g_perf_prep_ns.exchange(0) / 600.0 / 1e6, d / 600.0, gpu::g_perf_capture_ns.exchange(0) / 600.0 / 1e6,
+                 gpu::g_perf_wait_ns.exchange(0) / 600.0 / 1e6);
+        }
         if (list_) {
             std::fclose(list_);
             list_ = nullptr;

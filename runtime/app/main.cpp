@@ -237,6 +237,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_KEYDOWN:
             if (wp == VK_F3) DumpThreads();
+            if (wp == VK_F8 && !diag::g_f8_pressed) {
+                LOGR("F8: experiments set to start now begin");
+                diag::g_f8_pressed = true;
+            }
             if (wp == VK_F12 && !(lp & (1 << 30))) RequestScreenshot();
             if (wp == VK_F4) {
                 LOGR("F4: frame log requested");
@@ -277,9 +281,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetForegroundWindow(hwnd);
             return 0;
         case WM_CLOSE:
+            // who closes it (a relaunched instance once ended at once, before its handover, with no quit asked for)
+            LOGR("window: WM_CLOSE (%s, %s)", InSendMessage() ? "sent from another thread or process" : "posted or sent here",
+                 app::HandingOver() ? "while handing over" : "after the handover");
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            LOGR("window: WM_DESTROY");
             PostQuitMessage(0);
             return 0;
     }
@@ -366,6 +374,14 @@ void Pace(uint32_t vblanks) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetUnhandledExceptionFilter(app::WriteCrashDump);
     std::signal(SIGABRT, [](int) { app::WriteCrashDump(nullptr); });
+    // the C runtime's invalid parameter (a bad printf argument, a closed handle...) ends the process at once, without
+    // the filter above: logged and dumped first
+    _set_invalid_parameter_handler([](const wchar_t* expr, const wchar_t* fn, const wchar_t* file, unsigned line, uintptr_t) {
+        LOGE("the C runtime's invalid parameter handler: %ls in %ls (%ls:%u)", expr ? expr : L"?", fn ? fn : L"?",
+             file ? file : L"?", line);
+        app::WriteCrashDump(nullptr);
+        std::_Exit(3);
+    });
     timeBeginPeriod(1);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // one log a session: a relaunch into another image carries on its predecessor's
@@ -428,12 +444,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL got;
+    while ((got = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
     if (app::g_mode_changed) ChangeDisplaySettingsW(nullptr, 0);
-    LOGR("the window closed");
+    // why the loop ended: WM_QUIT (got 0, its code) or an error (got -1); and whether the window was destroyed
+    LOGR("the window closed (GetMessage %d, quit code %llu, error %lu, window %s, %s)", int(got),
+         (unsigned long long)msg.wParam, got < 0 ? GetLastError() : 0ul, IsWindow(app::g_hwnd) ? "still there" : "destroyed",
+         app::HandingOver() ? "before its handover" : "after its handover");
     logx::Flush();
     kernel::Shutdown(0);
 }

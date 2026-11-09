@@ -157,6 +157,24 @@ int main(int argc, char** argv) {
     Frame(3);
     Shot("1_display");
 
+    // a new resolution while the window is open (1280x800 from the Display page): the window is placed again inside it
+    {
+        auto fits = [](float sw, float sh) {
+            ImGuiWindow* win = ImGui::FindWindowByName("##settings");
+            return win && win->Pos.x >= 0 && win->Pos.y >= 0 && win->Pos.x + win->Size.x <= sw && win->Pos.y + win->Size.y <= sh;
+        };
+        auto resize = [&](int nw, int nh) {
+            io.DisplaySize = ImVec2(float(nw), float(nh));
+            g_image = {nw, nh, std::vector<uint8_t>(size_t(nw * nh) * 3)};
+            Frame(2);
+        };
+        resize(1280, 800);
+        CHECK(fits(1280, 800));
+        Shot("1b_display_1280x800");
+        resize(w, h);
+        CHECK(fits(float(w), float(h)));
+    }
+
     // down to Display mode... the first row of Display is Monitor (two monitors here): down to Vertical sync, A toggles
     bool vsync = s.vsync;
     Tap(input::kDown), Tap(input::kDown), Tap(input::kDown);

@@ -27,6 +27,7 @@
 #include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/vertex.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 
@@ -56,6 +57,9 @@ struct Cmd {
     int32_t vs = -1, ps = -1;     // index in Batch::vs / ps: the shader changed
     bool joinable = false;        // a triangle list the next draw with the same state may add to (GameInfo::merge_draws)
     Surface s1, s2;
+    uint64_t check = 0;           // XBE_CHECK_STATE: the title's state, hashed (CheckHash)
+    int32_t pre = -1;             // a draw the prep thread assembled: its slot in Threaded::pre_ring_
+    bool pre_ok = false;          // and Assemble's answer
 };
 
 struct Batch {
@@ -86,6 +90,43 @@ std::vector<Range> StateRanges() {
     };
 }
 
+// XBE_CHECK_STATE=1 (a test, headless too): every draw checks the render thread's copy of the state against the
+// title's (the plain data of StateRanges, State::vsc_gen left out: the render thread's own), and that a vertex
+// constant count (State::vsc_gen) the backend reuses uploads by always stands for the same constants
+bool CheckState() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_CHECK_STATE");
+        bool v = e && *e == '1';
+        if (v) LOGR("render thread: XBE_CHECK_STATE=1, every draw's state checked against the title's");
+        return v;
+    }();
+    return on;
+}
+
+uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h) {
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+uint64_t CheckHash(const State& s, const std::vector<Range>& ranges) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&s);
+    const size_t gen = size_t(reinterpret_cast<const uint8_t*>(&s.vsc_gen) - b), gen_end = gen + sizeof(s.vsc_gen);
+    uint64_t h = 1469598103934665603ull;
+    for (const Range& r : ranges) {
+        size_t from = r.off, to = r.off + r.len;
+        if (gen >= from && gen_end <= to) {
+            h = Fnv(b + from, gen - from, h);
+            h = Fnv(b + gen_end, to - gen_end, h);
+        } else {
+            h = Fnv(b + from, to - from, h);
+        }
+    }
+    return h;
+}
+
+// a 16 byte value all zero, in SSE2 (_mm_testz_si128 is SSE4.1: a build without that target, Debug, failed)
+inline bool AllZero(__m128i v) { return _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) == 0xFFFF; }
+
 // equal bytes, 16 at a time: most of the state is compared on every draw
 bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
     size_t i = 0;
@@ -93,7 +134,7 @@ bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
     for (; i + 16 <= n; i += 16)
         diff = _mm_or_si128(diff, _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i)),
                                                 _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i))));
-    if (!_mm_testz_si128(diff, diff)) return false;
+    if (!AllZero(diff)) return false;
     return i == n || !std::memcmp(a + i, b + i, n - i);
 }
 
@@ -105,6 +146,24 @@ public:
     explicit Threaded(std::unique_ptr<Backend> inner) : inner_(std::move(inner)), ranges_(StateRanges()) {
         ring_ = mem::AllocSystem(kHeaderRing, 64);
         cur_ = NewBatch();
+        defer_ = inner_->DeferWork(true);
+        pre_ = [] {
+            const char* e = std::getenv("XBE_PRE_ASSEMBLE");
+            bool on = !(e && *e == '0');
+            LOGR("render thread: draws assembled %s", on ? "one step ahead on the prep thread" : "by the render thread (XBE_PRE_ASSEMBLE=0)");
+            return on;
+        }();
+        if (pre_) {
+            pre_ring_.resize(kPre);
+            std::thread([this] { Prep(); }).detach();
+        }
+        record_ = [&] {
+            const char* e = std::getenv("XBE_RECORD_THREAD");
+            return !(e && *e == '0') && inner_->RecordOnThread([this] { Drain(); });
+        }();
+        record_clears_ = record_ && inner_->ClearsRecorded();
+        record_reports_ = record_ && inner_->ReportsRecorded();
+        if (record_) std::thread([this] { Record(); }).detach();
         std::thread([this] { Run(); }).detach();
     }
     ~Threaded() override {
@@ -136,6 +195,7 @@ public:
             }
             cur_->cmds.push_back(c);
         }
+        if (CheckState()) cur_->cmds.back().check = CheckHash(s, ranges_);
         for (uint32_t tex : s.textures) Use(tex);
         for (uint32_t pal : s.palettes) Use(pal);
         for (const auto& st : s.streams) Use(st.vb);
@@ -191,6 +251,7 @@ public:
         Cmd c{Op::Present};
         c.s1 = front;
         c.s1.header = Header(front.header);
+        c.check = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());  // when the title finished the frame
         cur_->cmds.push_back(c);
         Use(front.header);
         uint64_t id = Submit();
@@ -268,7 +329,10 @@ private:
     // a vertex the list might not keep first
     bool Mergeable(const State& s, uint32_t prim, uint32_t count, const uint8_t* indices) const {
         constexpr uint32_t kFlat = 0x1D00;
-        return merge_ && indices && (prim == 5 || prim == 6) && count >= 3 && !(s.vs_handle & 1) && (s.vs_handle & 0xE) != 0x4 &&
+        // vertex programs too with XBE_MERGE_DRAWS=2 (experiment): their constants are state, so a run has the same ones
+        // (not 2D: a title whose programs draw it squeezed is left out, merge_programs_)
+        return merge_ && indices && (prim == 5 || prim == 6) && count >= 3 && (!(s.vs_handle & 1) || merge_programs_) &&
+               (s.vs_handle & 0xE) != 0x4 &&
                !s.input_active && !s.blank_format && !s.simple[kMCountEnable >> 2] && s.simple[kMShadeMode >> 2] != kFlat;
     }
 
@@ -382,8 +446,12 @@ private:
     void Delta(const void* field, const void* value, size_t n) {
         uint8_t* sent = reinterpret_cast<uint8_t*>(&sent_) + At(sent_, field);
         if (Same(sent, static_cast<const uint8_t*>(value), n)) return;
-        std::memcpy(sent, value, n);
-        uint32_t head[2] = {uint32_t(At(sent_, field)), uint32_t(n)};
+        Send(At(sent_, field), value, n);
+    }
+    // n bytes at offset off of the State, changed: kept as sent and put in the batch
+    void Send(size_t off, const void* value, size_t n) {
+        std::memcpy(reinterpret_cast<uint8_t*>(&sent_) + off, value, n);
+        uint32_t head[2] = {uint32_t(off), uint32_t(n)};
         size_t at = cur_->bytes.size();
         cur_->bytes.resize(at + 8 + n);
         std::memcpy(cur_->bytes.data() + at, head, 8);
@@ -395,9 +463,21 @@ private:
         const uint8_t* now = reinterpret_cast<const uint8_t*>(&s);
         Cmd c{Op::State};
         size_t first = cur_->bytes.size();
-        for (const Range& r : ranges_)
-            for (size_t off = r.off, end = r.off + r.len; off < end; off += 64)
-                Delta(reinterpret_cast<const uint8_t*>(&sent_) + off, now + off, std::min<size_t>(64, end - off));
+        uint8_t* sent = reinterpret_cast<uint8_t*>(&sent_);
+        for (const Range& r : ranges_) {
+            // whole 64 byte pieces in one pass, stopping only at one that changed; the same pieces Delta would send
+            size_t off = r.off, end = r.off + r.len;
+            for (; off + 64 <= end; off += 64) {
+                const __m128i* a = reinterpret_cast<const __m128i*>(sent + off);
+                const __m128i* b = reinterpret_cast<const __m128i*>(now + off);
+                __m128i d = _mm_or_si128(_mm_or_si128(_mm_xor_si128(_mm_loadu_si128(a), _mm_loadu_si128(b)),
+                                                      _mm_xor_si128(_mm_loadu_si128(a + 1), _mm_loadu_si128(b + 1))),
+                                         _mm_or_si128(_mm_xor_si128(_mm_loadu_si128(a + 2), _mm_loadu_si128(b + 2)),
+                                                      _mm_xor_si128(_mm_loadu_si128(a + 3), _mm_loadu_si128(b + 3))));
+                if (!AllZero(d)) Send(off, now + off, 64);
+            }
+            if (off < end) Delta(sent + off, now + off, end - off);
+        }
         std::array<uint32_t, 4> textures;
         for (size_t i = 0; i < 4; i++) textures[i] = Header(s.textures[i]);
         Delta(&sent_.textures, &textures, sizeof(textures));
@@ -458,10 +538,12 @@ private:
         if (!id || done_.load() >= id) return;
         if (id >= cur_->id) id = Submit();
         auto t = Clock::now();
+        wanted_.store(id);  // the render thread settles once it has run this batch, not after more
         {
             std::unique_lock lock(m_);
             done_cv_.wait(lock, [&] { return done_.load() >= id; });
         }
+        wanted_.store(~0ull);
         uint64_t ns = Ns(t);
         g_perf_wait_ns += ns;
         g_perf_wait_kind_ns[size_t(kind)] += ns;
@@ -471,11 +553,230 @@ private:
         }
     }
 
+    // a batch the render thread (or, with the pipeline, the record thread) has finished: done once the backend
+    // settled the work its draws put off. That is done for several batches together: when no batch waits, after kHold
+    // of them, or once the title waits for one already run
+    void SettleBatches() {
+        inner_->Settle();
+        {
+            std::lock_guard lock(m_);
+            done_.store(unsettled_);
+        }
+        done_cv_.notify_all();
+        unsettled_ = 0;
+        held_ = 0;
+    }
+    void Complete(Batch* b) {
+        uint64_t id = b->id;
+        b->cmds.clear();
+        b->bytes.clear();
+        b->vs.clear();
+        b->ps.clear();
+        {
+            std::lock_guard lock(m_);
+            free_.push_back(b);
+            if (!defer_) done_.store(id);
+        }
+        if (!defer_) {
+            done_cv_.notify_all();
+            return;
+        }
+        unsettled_ = id;
+        if (++held_ >= kHold || wanted_.load() <= id) SettleBatches();
+    }
+
     void Run() {
-        using SetDescription = HRESULT(WINAPI*)(HANDLE, PCWSTR);
-        if (auto set = reinterpret_cast<SetDescription>(
-                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
-            set(GetCurrentThread(), L"render");
+        NameThread(L"render");
+        // batches from the prep thread when it runs, else straight from the title
+        std::deque<Batch*>& source = pre_ ? ready_ : queue_;
+        std::condition_variable& source_cv = pre_ ? ready_cv_ : cv_;
+        for (;;) {
+            Batch* b;
+            {
+                std::unique_lock lock(m_);
+                if (!record_ && source.empty() && unsettled_) {
+                    lock.unlock();
+                    SettleBatches();
+                    continue;
+                }
+                source_cv.wait(lock, [&] { return (pre_ ? prep_exited_ : stop_) || !source.empty(); });
+                if (source.empty()) break;
+                b = source.front();
+                source.pop_front();
+            }
+            static const bool perf = diag::Perf();
+            auto t = perf ? Clock::now() : Clock::time_point{};
+            run_batch_ = b;
+            seg_from_ = 0;
+            for (size_t i = 0; i < b->cmds.size(); i++) {
+                const Cmd& c = b->cmds[i];
+                run_cmd_ = i;
+                // with the pipeline, anything but a state change, a draw or (when the backend records them) a clear
+                // writes the list: record drains first
+                if (record_ && c.op != Op::State && c.op != Op::Draw && !(c.op == Op::Clear && record_clears_) &&
+                    !((c.op == Op::ClearReport || c.op == Op::GetReport) && record_reports_)) {
+                    g_perf_fence_ops[c.op == Op::Copy ? 0 : c.op == Op::Present ? 1 : c.op == Op::Sync ? 2
+                                     : c.op == Op::RecordLate ? 3 : c.op == Op::Flush ? 4 : 5]++;
+                    PushSegment(i, false);
+                    WaitRecorded();
+                }
+                Execute(*b, c);
+            }
+            if (perf) g_perf_batch_ns += Ns(t);
+            uint64_t id = b->id;
+            if (pre_) {
+                {
+                    std::lock_guard lock(m_);
+                    ran_ = id;
+                }
+                ran_cv_.notify_all();
+            }
+            if (record_) {
+                PushSegment(b->cmds.size(), true);  // record finishes the batch
+                run_batch_ = nullptr;
+            } else {
+                run_batch_ = nullptr;
+                Complete(b);
+            }
+        }
+        if (record_) {
+            {
+                std::lock_guard lock(m_);
+                run_exited_ = true;
+            }
+            seg_cv_.notify_all();
+            return;
+        }
+        std::lock_guard lock(m_);
+        exited_ = true;
+        done_cv_.notify_all();
+    }
+
+    // The pipeline's record thread: the render thread hands it each batch in segments (up to a command that writes
+    // the list, and the rest with the batch's last); it keeps its own copy of the state from the segments' changes and
+    // records their draws, then finishes the batch (the title may then reuse what its draws read)
+    struct Segment {
+        Batch* b;
+        size_t from, to;
+        bool last;
+    };
+    void PushSegment(size_t to, bool last) {
+        if (to <= seg_from_ && !last) return;
+        {
+            std::lock_guard lock(m_);
+            segments_.push_back({run_batch_, seg_from_, to, last});
+            segs_pushed_++;
+        }
+        seg_from_ = to;
+        seg_cv_.notify_one();
+    }
+    // the render thread: once record has done every segment handed to it
+    void WaitRecorded() {
+        static const bool perf = diag::Perf();
+        auto t = perf ? Clock::now() : Clock::time_point{};
+        {
+            std::unique_lock lock(m_);
+            seg_done_cv_.wait(lock, [&] { return segs_done_ == segs_pushed_; });
+        }
+        if (perf) {
+            g_perf_drain_ns += Ns(t);
+            g_perf_drains++;
+        }
+    }
+    // the backend's drain: what the draw being decided follows goes to record, and the render thread waits for it
+    void Drain() {
+        if (run_batch_) PushSegment(run_cmd_, false);
+        WaitRecorded();
+    }
+    void Record() {
+        NameThread(L"render record");
+        for (;;) {
+            Segment g;
+            {
+                std::unique_lock lock(m_);
+                if (segments_.empty() && unsettled_) {
+                    lock.unlock();
+                    SettleBatches();
+                    continue;
+                }
+                seg_cv_.wait(lock, [&] { return run_exited_ || !segments_.empty(); });
+                if (segments_.empty()) break;
+                g = segments_.front();
+                segments_.pop_front();
+            }
+            static const bool perf = diag::Perf();
+            auto t = perf ? Clock::now() : Clock::time_point{};
+            for (size_t i = g.from; i < g.to; i++) {
+                const Cmd& c = g.b->cmds[i];
+                if (c.op == Op::State) {
+                    if (ApplyState(rec_state_, *g.b, c) || !rec_vsc_count_) rec_vsc_count_++;
+                    rec_state_.vsc_gen = rec_vsc_count_;
+                } else if (c.op == Op::ClearReport && record_reports_) {
+                    inner_->ClearReport();
+                } else if (c.op == Op::GetReport && record_reports_) {
+                    inner_->GetReport(c.a);
+                } else if (c.op == Op::Draw || (c.op == Op::Clear && record_clears_)) {
+                    inner_->RecordNext(rec_state_);
+                    if (c.pre >= 0) pre_used_.fetch_add(1, std::memory_order_release);  // its slot is free now
+                }
+            }
+            if (g.last) Complete(g.b);
+            if (perf) g_perf_record_ns += Ns(t);
+            {
+                std::lock_guard lock(m_);
+                segs_done_++;
+            }
+            seg_done_cv_.notify_all();
+        }
+        std::lock_guard lock(m_);
+        exited_ = true;
+        done_cv_.notify_all();
+    }
+
+    void Check(const Cmd& c) {
+        static uint64_t draws = 0, wrong = 0, stale = 0, last_gen = 0, last_vsc = 0;
+        draws++;
+        if (CheckHash(state_, ranges_) != c.check && wrong++ < 8)
+            LOGR("render thread: check: draw %llu's state differs from the title's", (unsigned long long)draws);
+        uint64_t vsc = Fnv(reinterpret_cast<const uint8_t*>(state_.vsc.data()), sizeof(state_.vsc), 1469598103934665603ull);
+        // the count only goes up: one that goes back may name constants an older upload held
+        if (((state_.vsc_gen == last_gen && vsc != last_vsc) || state_.vsc_gen < last_gen) && stale++ < 8)
+            LOGR("render thread: check: draw %llu has count %llu with other vertex constants", (unsigned long long)draws,
+                 (unsigned long long)state_.vsc_gen);
+        last_gen = state_.vsc_gen;
+        last_vsc = vsc;
+        if (draws % 200000 == 0)
+            LOGR("render thread: check: %llu draws, %llu with a different state, %llu with a stale vertex constant count",
+                 (unsigned long long)draws, (unsigned long long)wrong, (unsigned long long)stale);
+    }
+
+    // a state command's changes into st; true when they touched the vertex constants
+    static bool ApplyState(State& st, const Batch& b, const Cmd& c) {
+        const uint8_t* data = b.bytes.data() + c.data;
+        uint8_t* s = reinterpret_cast<uint8_t*>(&st);
+        static const State layout;
+        static const size_t vsc_from = At(layout, &layout.vsc), vsc_to = vsc_from + sizeof(layout.vsc);
+        bool vsc = false;
+        for (const uint8_t* p = data; p < data + c.size;) {
+            uint32_t head[2];
+            std::memcpy(head, p, 8);
+            std::memcpy(s + head[0], p + 8, head[1]);
+            vsc |= head[0] < vsc_to && head[0] + head[1] > vsc_from;
+            p += 8 + head[1];
+        }
+        if (c.vs >= 0) st.vs = b.vs[size_t(c.vs)];
+        if (c.ps >= 0) st.ps = b.ps[size_t(c.ps)];
+        return vsc;
+    }
+
+    // The prep thread, one step before the render thread (XBE_PRE_ASSEMBLE, on unless 0): it takes the title's batches
+    // first, keeps its own copy of the state and assembles their draws (gpu::Assemble reads only the state, the
+    // indices and guest memory) into pre_ring_, then hands the batch on. A command that may write guest memory on the
+    // render thread (all but state, draws, clears, gamma and report clears: read-backs, copies, presents, reports)
+    // leaves its batch's later draws to the render thread, and the next batch waits until the render thread has run
+    // this one: a draw never reads vertices from before such a command.
+    void Prep() {
+        NameThread(L"render prep");
         for (;;) {
             Batch* b;
             {
@@ -485,49 +786,101 @@ private:
                 b = queue_.front();
                 queue_.pop_front();
             }
-            for (const Cmd& c : b->cmds) Execute(*b, c);
-            uint64_t id = b->id;
-            b->cmds.clear();
-            b->bytes.clear();
-            b->vs.clear();
-            b->ps.clear();
+            if (wait_for_) {
+                std::unique_lock lock(m_);
+                ran_cv_.wait(lock, [&] { return ran_ >= wait_for_; });
+                wait_for_ = 0;
+            }
+            static const bool perf = diag::Perf();
+            auto t = perf ? Clock::now() : Clock::time_point{};
+            bool ahead = true;
+            for (Cmd& c : b->cmds) {
+                if (c.op == Op::State) {
+                    ApplyState(prep_state_, *b, c);
+                } else if (c.op == Op::Draw) {
+                    if (!ahead) continue;
+                    // a slot is free once the render thread drew what it held (kPre draws ago)
+                    while (pre_made_ - pre_used_.load(std::memory_order_acquire) >= kPre) std::this_thread::yield();
+                    size_t slot = size_t(pre_made_ % kPre);
+                    c.pre_ok = Assemble(prep_state_, c.a, c.b, c.c, c.d ? b->bytes.data() + c.data : nullptr, pre_ring_[slot]);
+                    c.pre = int32_t(slot);
+                    pre_made_++;
+                } else if (c.op != Op::Clear && c.op != Op::Gamma && c.op != Op::ClearReport) {
+                    ahead = false;
+                    wait_for_ = b->id;
+                }
+            }
+            if (perf) g_perf_prep_ns += Ns(t);
             {
                 std::lock_guard lock(m_);
-                free_.push_back(b);
-                done_.store(id);
+                ready_.push_back(b);
             }
-            done_cv_.notify_all();
+            ready_cv_.notify_one();
         }
-        std::lock_guard lock(m_);
-        exited_ = true;
-        done_cv_.notify_all();
+        {
+            std::lock_guard lock(m_);
+            prep_exited_ = true;
+        }
+        ready_cv_.notify_all();
+    }
+
+    static void NameThread(const wchar_t* name) {
+        using SetDescription = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+        if (auto set = reinterpret_cast<SetDescription>(
+                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))))
+            set(GetCurrentThread(), name);
     }
 
     void Execute(const Batch& b, const Cmd& c) {
         const uint8_t* data = b.bytes.data() + c.data;
         switch (c.op) {
             case Op::State: {
-                uint8_t* s = reinterpret_cast<uint8_t*>(&state_);
-                for (const uint8_t* p = data; p < data + c.size;) {
-                    uint32_t head[2];
-                    std::memcpy(head, p, 8);
-                    std::memcpy(s + head[0], p + 8, head[1]);
-                    p += 8 + head[1];
-                }
-                if (c.vs >= 0) state_.vs = b.vs[size_t(c.vs)];
-                if (c.ps >= 0) state_.ps = b.ps[size_t(c.ps)];
+                static const bool perf = diag::Perf();
+                auto t = perf ? Clock::now() : Clock::time_point{};
+                // the count is the render thread's own, set again after every change: a change sent in whole 64 byte
+                // chunks carries the title's 0 over it (it sits next to vsc)
+                if (ApplyState(state_, b, c) || !vsc_count_) vsc_count_++;
+                state_.vsc_gen = vsc_count_;
+                if (perf) g_perf_state_ns += Ns(t);
                 break;
             }
-            case Op::Draw: inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr); break;
+            case Op::Draw:
+                if (CheckState()) Check(c);
+                if (c.pre >= 0) {
+                    inner_->DrawAssembled(state_, c.a, c.b, c.c, c.d ? data : nullptr, pre_ring_[size_t(c.pre)], c.pre_ok);
+                    if (!record_) pre_used_.fetch_add(1, std::memory_order_release);  // else once recorded
+                } else {
+                    inner_->Draw(state_, c.a, c.b, c.c, c.d ? data : nullptr);
+                }
+                break;
             case Op::Clear: inner_->Clear(state_, c.a, c.size ? data : nullptr, c.b, c.c, c.f, c.d); break;
             case Op::Copy: inner_->Copy(c.s1, c.s2, c.a, c.b, c.c); break;
-            case Op::Present: inner_->Present(c.s1); break;
+            case Op::Present: {
+                inner_->Present(c.s1);
+                // XBE_PERF: how long after the title finished the frame it was presented, and how that changes from frame
+                // to frame (motion is set by the title's clock; a delay that varies shows as judder at any frame rate)
+                static const bool perf = diag::Perf();
+                if (perf && c.check) {
+                    static int64_t last = -1;
+                    int64_t now = int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+                    int64_t delay = now - int64_t(c.check);
+                    g_perf_delay_ns += uint64_t(std::max<int64_t>(delay, 0));
+                    if (last >= 0) g_perf_delay_jitter_ns += uint64_t(std::llabs(delay - last));
+                    g_perf_delays++;
+                    last = delay;
+                }
+                break;
+            }
             case Op::Sync: inner_->Sync(c.a, 0); break;
             case Op::RecordLate: inner_->RecordLate(c.a); break;
             case Op::Flush: inner_->Flush(); break;
             case Op::Gamma: inner_->SetGamma(data); break;
-            case Op::ClearReport: inner_->ClearReport(); break;
-            case Op::GetReport: inner_->GetReport(c.a); break;
+            case Op::ClearReport:
+                if (!record_reports_) inner_->ClearReport();  // else the record thread's, in order with the draws
+                break;
+            case Op::GetReport:
+                if (!record_reports_) inner_->GetReport(c.a);
+                break;
         }
     }
 
@@ -537,6 +890,13 @@ private:
         const char* e = std::getenv("XBE_MERGE_DRAWS");
         bool on = e && *e ? *e != '0' : app::kGame.merge_draws;
         if (on) LOGR("gpu: runs of draws with the same state are merged");
+        return on;
+    }();
+    // not for a title whose programs draw 2D the renderers squeeze per draw (GameInfo::squeeze_screen_programs)
+    const bool merge_programs_ = [] {
+        const char* e = std::getenv("XBE_MERGE_DRAWS");
+        bool on = e && *e == '2' && !app::kGame.squeeze_screen_programs;
+        if (on) LOGR("gpu: XBE_MERGE_DRAWS=2, vertex program draws are merged too (experiment)");
         return on;
     }();
 
@@ -574,7 +934,36 @@ private:
     std::deque<Batch*> queue_;
     std::vector<Batch*> free_;
     std::atomic<uint64_t> done_{0};
+    uint64_t vsc_count_ = 0;  // vertex constant changes so far (State::vsc_gen), only ever up
+    std::atomic<uint64_t> wanted_{~0ull};  // the batch the title waits for
+    bool defer_ = false;                   // the backend puts work off until Settle
+    static constexpr uint32_t kHold = 16;  // batches run before their put off work is settled
     bool stop_ = false, exited_ = false;
+    // the prep thread (Prep): batches it has assembled, waiting for the render thread
+    bool pre_ = false, prep_exited_ = false;
+    static constexpr uint64_t kPre = 2048;  // assembled draws in flight, many batches' worth
+    std::vector<Assembled> pre_ring_;
+    uint64_t pre_made_ = 0;                // the prep thread's
+    std::atomic<uint64_t> pre_used_{0};    // the render thread's
+    State prep_state_;
+    std::deque<Batch*> ready_;
+    std::condition_variable ready_cv_;
+    uint64_t ran_ = 0;       // the last batch the render thread ran (under m_)
+    // the pipeline's record thread (Record), when the backend records on it (RecordOnThread)
+    bool record_ = false, run_exited_ = false;
+    bool record_clears_ = false;  // the backend decides clears and hands them to record too
+    bool record_reports_ = false;  // visibility test reports are record's
+    std::deque<Segment> segments_;
+    uint64_t segs_pushed_ = 0, segs_done_ = 0;  // under m_
+    std::condition_variable seg_cv_, seg_done_cv_;
+    Batch* run_batch_ = nullptr;  // the render thread's: the batch it runs, its command, the next segment's start
+    size_t run_cmd_ = 0, seg_from_ = 0;
+    State rec_state_;
+    uint64_t rec_vsc_count_ = 0;
+    uint64_t unsettled_ = 0;  // the batches finished but not settled yet (whichever thread finishes batches)
+    uint32_t held_ = 0;
+    uint64_t wait_for_ = 0;  // the prep thread's: a batch that may write guest memory, run before the next is assembled
+    std::condition_variable ran_cv_;
 };
 
 }  // namespace

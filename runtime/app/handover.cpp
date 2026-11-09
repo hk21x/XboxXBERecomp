@@ -39,6 +39,7 @@ bool HandingOver() { return g_handing; }
 void FinishHandover() {
     if (!g_handing.exchange(false)) return;
     OpenGameWindow(false);
+    LOGR("handover: the window is this instance's; the previous one closes");
     SetEvent(g_ready);
     CloseHandle(g_ready);
 }

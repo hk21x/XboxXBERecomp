@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include <dxgiformat.h>
+#include <emmintrin.h>
 
 #include "core/log.h"
 #include "kernel/kernel.h"
@@ -229,7 +230,22 @@ bool Pretransformed(const State& s) {
 IndexBounds IndexRange(const uint8_t* ip, uint32_t count) {
     uint16_t lo16 = 0xFFFF;
     uint16_t hi16 = 0;
-    for (uint32_t i = 0; i < count; i++) {
+    uint32_t i = 0;
+    // 8 at a time: SSE2 has signed 16 bit min and max only, so each index is offset by 0x8000 first
+    if (count >= 16) {
+        const __m128i flip = _mm_set1_epi16(int16_t(0x8000));
+        __m128i lo = _mm_set1_epi16(0x7FFF), hi = _mm_set1_epi16(int16_t(0x8000));
+        for (; i + 8 <= count; i += 8) {
+            __m128i v = _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(ip + i * 2)), flip);
+            lo = _mm_min_epi16(lo, v);
+            hi = _mm_max_epi16(hi, v);
+        }
+        alignas(16) uint16_t l[8], h[8];
+        _mm_store_si128(reinterpret_cast<__m128i*>(l), _mm_xor_si128(lo, flip));
+        _mm_store_si128(reinterpret_cast<__m128i*>(h), _mm_xor_si128(hi, flip));
+        for (int k = 0; k < 8; k++) lo16 = std::min(lo16, l[k]), hi16 = std::max(hi16, h[k]);
+    }
+    for (; i < count; i++) {
         uint16_t v;
         std::memcpy(&v, ip + i * 2, 2);
         lo16 = std::min(lo16, v);
@@ -268,13 +284,40 @@ uint32_t StrideOf(const State& s, const VertexShader& layout, const VertexShader
 constexpr uint32_t kStrideAlign = 4;            // the input assembler reads strides in dwords
 constexpr uint32_t kElementOffsetEnd = 0x10000;  // the element offset is stored as uint16_t
 
+// a stride the input assembler cannot read (not whole dwords: PGR2's 10 byte NORMSHORT3 meshes) is repacked: each
+// vertex's elements copied to aligned places in a whole dword vertex (AddRepacked), cheaper than converting them;
+// an element read past the stride takes the next vertex's bytes, as the console does (PGR2 reads a NORMPACKED3 at
+// byte 10 of its 10 byte vertices)
+uint32_t Restride(uint32_t stride) { return stride % kStrideAlign ? (stride + kStrideAlign - 1) & ~(kStrideAlign - 1) : 0; }
+
+// per stream: whole vertices' worth of the elements' offsets, moved to the buffer's start. 007: Everything or
+// Nothing's MI6 Training gives its third enemy's elements offsets of 60172 to 60196 in a 28 byte stride (the mesh
+// 2149 vertices into its buffer); the input assembler's limit is 2047, and NVIDIA GPUs hung on them
+void StreamShifts(const State& s, const Inputs& inputs, uint32_t* shift) {
+    std::fill(shift, shift + 16, ~0u);
+    for (int k = 0; k < inputs.nregs; k++) {
+        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
+        shift[in.stream] = std::min(shift[in.stream], in.offset);
+    }
+    for (int k = 0; k < inputs.nregs; k++) {
+        const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
+        uint32_t stride = StrideOf(s, inputs.layout, in);
+        if (stride && Restride(stride)) continue;  // copied out vertex by vertex: from its first element (see Restride)
+        if (stride && shift[in.stream] >= stride) shift[in.stream] = shift[in.stream] / stride * stride;
+        else shift[in.stream] = 0;
+    }
+}
+
 bool RawReadable(const State& s, const Inputs& inputs) {
+    uint32_t shift[16];
+    StreamShifts(s, inputs, shift);  // the element offset the input assembler gets is past the stream's shift
     for (int k = 0; k < inputs.nregs; k++) {
         const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
         HostElement he = HostFormat(in.type);
         uint32_t stride = StrideOf(s, inputs.layout, in);
-        bool readable = he.format && stride && stride % kStrideAlign == 0 && in.offset < kElementOffsetEnd &&
-                        in.offset % std::min<uint32_t>(he.bytes, 4) == 0;
+        uint32_t align = std::min<uint32_t>(he.bytes, 4);
+        bool readable = he.format && stride && in.offset - shift[in.stream] < kElementOffsetEnd &&
+                        (Restride(stride) || in.offset % align == 0);
         if (!readable) {
             LOG_FIRST(32, "vertex: converted on the CPU: v%d type %02X offset %u stride %u", inputs.regs[k], in.type,
                       in.offset, stride);
@@ -296,11 +339,11 @@ void GatherVertices(const State& s, const DrawRange& d, const uint8_t* data, uin
 // returns the buffer slot the stream got; overhang: bytes the stream's elements read past the last vertex's stride
 // (a declaration longer than the stride reads the next vertex's bytes, as the console does), dense buffers only
 int AddRawBuffer(const State& s, const VertexShader& layout, const VertexShader::Input& in, const DrawRange& d,
-                 bool dense, uint32_t overhang, Assembled& out) {
+                 bool dense, uint32_t overhang, uint32_t shift, Assembled& out) {
     using namespace kernel;
     const auto& st = s.streams[size_t(in.stream)];
     uint32_t stride = StrideOf(s, layout, in);
-    const uint8_t* data = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(st.vb + kResData))));
+    const uint8_t* data = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(st.vb + kResData)))) + shift;
     int slot = int(out.buffer_count);
     if (dense) {
         out.buffers[out.buffer_count++] = {data + size_t(d.first_vertex) * stride, d.span * stride + overhang, stride};
@@ -309,6 +352,38 @@ int AddRawBuffer(const State& s, const VertexShader& layout, const VertexShader:
         GatherVertices(s, d, data, stride, g);
         out.buffers[out.buffer_count++] = {g.data(), d.count * stride, stride};
     }
+    return slot;
+}
+
+// a repacked stream (Restride): each vertex's elements copied to their places in a vertex of wide bytes, in range order
+// when dense, else in draw order; an element past the stride reads the next vertex's bytes, as the console does
+int AddRepacked(const State& s, const Inputs& inputs, int stream, const DrawRange& d, bool dense, uint32_t shift,
+                uint32_t wide, const uint32_t* place, Assembled& out) {
+    using namespace kernel;
+    struct Part {
+        uint32_t from, to, bytes;
+    } parts[16];
+    int nparts = 0;
+    uint32_t stride = 0;
+    for (int k = 0; k < inputs.nregs; k++) {
+        int reg = inputs.regs[k];
+        const auto& in = inputs.layout.inputs[size_t(reg)];
+        if (in.stream != stream) continue;
+        stride = StrideOf(s, inputs.layout, in);
+        parts[nparts++] = {in.offset - shift, place[reg], HostFormat(in.type).bytes};
+    }
+    const auto& st = s.streams[size_t(stream)];
+    const uint8_t* data = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(st.vb + kResData)))) + shift;
+    int slot = int(out.buffer_count);
+    auto& g = out.gathered[out.buffer_count];
+    uint32_t n = dense ? d.span : d.count;
+    g.assign(size_t(n) * wide, 0);
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t* v = data + size_t(dense ? d.first_vertex + i : DrawVertex(s, d, i)) * stride;
+        uint8_t* o = &g[size_t(i) * wide];
+        for (int p = 0; p < nparts; p++) std::memcpy(o + parts[p].to, v + parts[p].from, parts[p].bytes);
+    }
+    out.buffers[out.buffer_count++] = {g.data(), n * wide, wide};
     return slot;
 }
 
@@ -332,7 +407,26 @@ uint32_t MinVertices(uint32_t prim) {
 bool DrawNative(const DrawRange& d, bool dense, Assembled& out) {
     out.strip = d.prim == 4 || d.prim == 6;
     out.topology = NativeTopology(d.prim);
-    if (d.ip && dense) {
+    // XBE_REBASE_INDICES=1 (experiment): the indices copied with the lowest taken off, 32 bit, base vertex 0, in place of
+    // the title's 16 bit ones with a negative base vertex
+    static const bool rebase = [] {
+        const char* e = std::getenv("XBE_REBASE_INDICES");
+        bool v = e && *e == '1';
+        if (v) LOGR("gpu: XBE_REBASE_INDICES=1, indices rebased on the CPU (base vertex 0)");
+        return v;
+    }();
+    if (d.ip && dense && rebase) {
+        out.indices.resize(d.count);
+        for (uint32_t i = 0; i < d.count; i++) {
+            uint16_t v;
+            std::memcpy(&v, d.ip + size_t(i) * 2, 2);
+            out.indices[i] = uint32_t(v) - d.first;
+        }
+        out.index_src = out.indices.data();
+        out.index16 = false;
+        out.index_count = d.count;
+        out.base_vertex = 0;
+    } else if (d.ip && dense) {
         out.index_src = d.ip;
         out.index16 = true;
         out.index_count = d.count;
@@ -379,19 +473,36 @@ bool AssembleRaw(const State& s, const Inputs& inputs, const DrawRange& d, Assem
     int slot[16];
     std::fill(std::begin(slot), std::end(slot), -1);
     uint32_t end[16] = {};  // per stream: the furthest byte an element reads, from the vertex's start
+    uint32_t shift[16];
+    StreamShifts(s, inputs, shift);
     for (int k = 0; k < inputs.nregs; k++) {
         const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
-        end[in.stream] = std::max(end[in.stream], in.offset + HostFormat(in.type).bytes);
+        end[in.stream] = std::max(end[in.stream], in.offset - shift[in.stream] + HostFormat(in.type).bytes);
     }
+    // repacked streams (Restride): each element's place in the copied vertex, in register order at its alignment
+    uint32_t place[16] = {}, wide[16] = {};
+    for (int k = 0; k < inputs.nregs; k++) {
+        int reg = inputs.regs[k];
+        const auto& in = inputs.layout.inputs[size_t(reg)];
+        if (!Restride(StrideOf(s, inputs.layout, in))) continue;
+        uint32_t bytes = HostFormat(in.type).bytes, align = std::min<uint32_t>(bytes, 4);
+        place[reg] = (wide[in.stream] + align - 1) / align * align;
+        wide[in.stream] = place[reg] + bytes;
+    }
+    for (uint32_t& w : wide) w = (w + kStrideAlign - 1) & ~(kStrideAlign - 1);
     for (int k = 0; k < inputs.nregs; k++) {
         int reg = inputs.regs[k];
         const auto& in = inputs.layout.inputs[size_t(reg)];
         if (slot[in.stream] < 0) {
             uint32_t stride = StrideOf(s, inputs.layout, in);
-            slot[in.stream] = AddRawBuffer(s, inputs.layout, in, d, dense, end[in.stream] > stride ? end[in.stream] - stride : 0, out);
+            slot[in.stream] = wide[in.stream]
+                                  ? AddRepacked(s, inputs, in.stream, d, dense, shift[in.stream], wide[in.stream], place, out)
+                                  : AddRawBuffer(s, inputs.layout, in, d, dense, end[in.stream] > stride ? end[in.stream] - stride : 0,
+                                                 shift[in.stream], out);
         }
         HostElement he = HostFormat(in.type);
-        out.elements[size_t(reg)] = {he.format, uint8_t(slot[in.stream]), uint16_t(in.offset)};
+        uint32_t at = wide[in.stream] ? place[reg] : in.offset - shift[in.stream];
+        out.elements[size_t(reg)] = {he.format, uint8_t(slot[in.stream]), uint16_t(at)};
         out.decode |= uint64_t(he.decode) << (reg * 4);
     }
     out.vertex_count = dense ? d.span : d.count;
@@ -499,6 +610,8 @@ bool Assemble(const State& state, uint32_t prim, uint32_t start, uint32_t count,
     // the vertex range the draw reads
     IndexBounds bounds = {0, count - 1};
     if (ip) bounds = IndexRange(ip, count);
+    out.index_first = bounds.first;
+    out.index_last = bounds.last;
     DrawRange d;
     d.prim = prim;
     d.start = start;

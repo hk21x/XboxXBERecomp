@@ -50,7 +50,7 @@ bool WritePng(const std::filesystem::path& path, const std::vector<uint8_t>& bgr
     if (SUCCEEDED(hr)) hr = frame->WritePixels(h, w * 4, UINT(bgra.size()), const_cast<BYTE*>(bgra.data()));
     if (SUCCEEDED(hr)) hr = frame->Commit();
     if (SUCCEEDED(hr)) hr = encoder->Commit();
-    if (FAILED(hr)) LOGR("screenshot: could not write %s (%08X)", path.filename().u8string().c_str(), unsigned(hr));
+    if (FAILED(hr)) LOGR("screenshot: could not write %s (%08X)", reinterpret_cast<const char*>(path.filename().u8string().c_str()), unsigned(hr));
     return SUCCEEDED(hr);
 }
 
@@ -73,7 +73,7 @@ void SaveScreenshot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h) {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (WritePng(path, bgra, w, h)) {
             g_saved_ms = NowMs();
-            LOGR("screenshot: %s (%ux%u)", path.filename().u8string().c_str(), w, h);
+            LOGR("screenshot: %s (%ux%u)", reinterpret_cast<const char*>(path.filename().u8string().c_str()), w, h);
         }
         CoUninitialize();
     }).detach();

@@ -13,15 +13,19 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <map>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -35,6 +39,8 @@
 #include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/copy_pool.h"
+#include "gpu/d3d12_rec.h"
 #include "gpu/d3d_common.h"
 #include "gpu/ext.h"
 #include "gpu/shaders.h"
@@ -50,6 +56,7 @@ namespace {
 
 constexpr int kFrames = 3;
 constexpr uint64_t kStaleFrames = 8;  // frames a target may go unused and still be read back
+constexpr uint32_t kStaleReadMax = 1 << 20;  // a long unused target read back if unchanged: up to this size
 constexpr uint64_t kUploadSize = 64ull << 20;
 // a draw starting with less than this left in the frame's ring waits for the GPU and starts the ring over
 constexpr uint64_t kUploadReserve = 8ull << 20;
@@ -84,15 +91,31 @@ struct Perf {
     double wait = 0;
     double swap = 0;
     double sync = 0;
+    double pre = 0, bind_targets = 0, notes = 0, post = 0;  // Draw outside its timed steps, ms
+    double k_vsc = 0, k_fill = 0, k_dc = 0;                // consts: vertex constants, the draw constants filled, uploaded
+    double replay = 0;                 // recorded commands written into the list, ms (inside the steps' own times)
+    uint64_t runs = 0, run_draws = 0;  // the times they were, and their draws
+    double settle = 0;                      // put off vertex copies, ms
+    uint64_t deferred = 0, settles = 0;     // their bytes, and the times they were run
     // counts and bytes
     uint64_t draws = 0;
     uint64_t reused_vsc = 0, reused_dc = 0, reused_tables = 0;  // per draw uploads and tables found already made
     uint64_t stage_last = 0, stage_memo = 0, stage_target = 0, stage_full = 0;  // bound stages, by how they were found
+    double t_last = 0, t_memo = 0, t_target = 0, t_full = 0, t_empty = 0;      // the time they took, ms, by the same
+    double f_pre = 0, f_replace = 0, f_sharpen = 0, f_palette = 0, f_lookup = 0, f_desc = 0, f_view = 0;  // a full bind's steps, ms
+    double e_find = 0, e_create = 0, e_check = 0, e_cube = 0;  // its texture entry step: found, made, checked, cube copies
+    uint64_t e_cubes = 0;
+    double c_find = 0, c_resolve = 0, c_shrink = 0, c_copy = 0;  // a cube copy's faces: found, resolved, shrunk, copied, ms
+    double s_make = 0;  // Shrink's new textures, ms
     uint64_t same_samplers = 0, same_views = 0;                  // draws with the last draw's samplers, views
     double t_targets = 0;                                        // BindTargets, ms
     uint64_t verts = 0;
     uint64_t upload = 0;
     uint64_t overflow = 0;
+    uint64_t flushes = 0;  // lists the CPU waited for the GPU to finish (Submit(true))
+    uint64_t face_skips = 0;
+    uint64_t drain_why[5] = {};  // the backend's drains by where (DrainRecord)  // draws and clears into a cube face resting this frame (GameInfo::cube_face_hz)
+    double flush_wait = 0;  // that wait, ms
     uint64_t sigs = 0;
     uint64_t sig_bytes = 0;
     uint64_t texups = 0;
@@ -108,6 +131,7 @@ struct Perf {
     uint64_t lates = 0;
 };
 Perf g_perf;
+float CubeFaceHz();  // GameInfo::cube_face_hz, or XBE_CUBE_FACE_HZ
 struct PerfScope {
     double& acc;
     PerfClock::time_point t = PerfNow();
@@ -122,6 +146,74 @@ bool CaptureOn() {
 
 // rows of a texture upload start D3D12_TEXTURE_DATA_PITCH_ALIGNMENT apart
 uint32_t UploadPitch(uint32_t row_bytes) { return (row_bytes + 255) & ~255u; }
+
+// resources' names as given (a lost device's report names the copies' resources by them)
+std::unordered_map<const void*, std::string>& Names() {
+    static std::unordered_map<const void*, std::string> names;
+    return names;
+}
+std::string NameOf(const void* o) {
+    auto it = Names().find(o);
+    if (it != Names().end()) return it->second;
+    char b[24];
+    snprintf(b, sizeof(b), "%p", o);
+    return b;
+}
+
+// NVIDIA Aftermath event markers, XBE_NV_MARKERS=1 on a test PC with the DLL: one per draw, its list and draw number
+// in the marker's value (list << 20 | draw), so a crash dump names the draw each GPU context had reached
+namespace nvmark {
+using SetMarker = int(__cdecl*)(void*, const void*, uint32_t);
+SetMarker set = nullptr;
+void* ctx = nullptr;
+void Init(ID3D12GraphicsCommandList* cl) {
+    const char* e = std::getenv("XBE_NV_MARKERS");
+    if (!e || *e != '1') return;
+    HMODULE nv = GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll");
+    using Create = int(__cdecl*)(IUnknown*, void**);
+    auto create = nv ? reinterpret_cast<Create>(GetProcAddress(nv, "GFSDK_Aftermath_DX12_CreateContextHandle")) : nullptr;
+    int r = create ? create(cl, &ctx) : -1;
+    if (r == 0x1) set = reinterpret_cast<SetMarker>(GetProcAddress(nv, "GFSDK_Aftermath_SetEventMarker"));
+    LOGR("d3d12: NVIDIA Aftermath event markers %s (result %08X)", set ? "on, one per draw" : "failed", unsigned(r));
+}
+inline void Mark(uint64_t list, uint32_t draw) {
+    uint64_t v = (list << 20) | (draw & 0xFFFFF);
+    if (set) set(ctx, &v, sizeof v);  // copied by Aftermath, so the dump carries it
+}
+// at a lost device: the last marker the GPU reached, read in the process (GFSDK_Aftermath_GetData)
+uint64_t Report() {
+    if (!set) return ~0ull;
+    struct Data { union { void* data; uint64_t align; }; uint32_t size; int status; } d{};
+    using GetData = int(__cdecl*)(uint32_t, void* const*, Data*);
+    auto get = reinterpret_cast<GetData>(GetProcAddress(GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll"), "GFSDK_Aftermath_GetData"));
+    int r = get ? get(1, &ctx, &d) : -1;
+    uint64_t v = 0;
+    if (d.data && d.size >= sizeof v) std::memcpy(&v, d.data, sizeof v);
+    static const char* kStatus[] = {"not started", "executing", "finished", "invalid"};
+    LOGR("d3d12: Aftermath's last marker: list %llu draw %llu%s, context %s (result %08X)", (unsigned long long)(v >> 20),
+         (unsigned long long)(v & 0xFFFFF), (v & 0xFFFFF) == 0xFFFFF ? " (its start)" : "",
+         unsigned(d.status) < 4 ? kStatus[d.status] : "?", unsigned(r));
+    return r == 0x1 && d.data ? v : ~0ull;
+}
+}  // namespace nvmark
+
+// a resource's debug name, shown by DRED and NVIDIA's Aftermath when the GPU faults on it
+void Name(ID3D12Object* o, const char* fmt, ...) {
+    if (!o) return;
+    char b[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    {
+        static std::mutex m;  // decide's textures and record's upload buffers are named from both threads
+        std::lock_guard lock(m);
+        Names()[o] = b;
+    }
+    wchar_t w[96];
+    for (size_t i = 0; i < sizeof(b); i++) w[i] = wchar_t(uint8_t(b[i]));
+    o->SetName(w);
+}
 
 D3D12_RESOURCE_DESC BufferDesc(uint64_t bytes) {
     D3D12_RESOURCE_DESC bd{};
@@ -188,6 +280,8 @@ struct Tex {
     uint64_t palette = 0;  // hash of the colours a P8 texture was decoded with
     uint64_t faces = 0;    // a cube's frame its faces drawn on the GPU were last copied in
     uint8_t flags = 0;  // Extension::Decoded's
+    uint64_t made = 0;     // the present it was made at
+    uint32_t uploads = 0;  // times its bytes were uploaded
 };
 
 // Blit's settings past the source and its rectangle
@@ -200,6 +294,7 @@ struct BlitOptions {
     bool over = false;        // premultiplied over the target, which keeps its alpha
     bool final = false;       // the finished frame: psfinal with the settings' FXAA and sharpening (taps, alpha unused)
     uint32_t samples = 1;     // the target's (an MSAA twin's)
+    ID3D12Resource* mix = nullptr;  // the last frame, the source over it at the weight mul (psmix)
 };
 
 // Shrink's settings past the source and the size
@@ -228,6 +323,20 @@ public:
     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                uint32_t stencil) override;
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
+    // assembled on the render thread's prep thread: Draw takes it in place of assembling (point sprites too, which
+    // change only the stages)
+    bool RecordOnThread(std::function<void()> drain) override;
+    bool ClearsRecorded() const override { return record_thread_; }
+    // visibility tests: their queries are record's, and so are the report clears and reads in between the draws
+    bool ReportsRecorded() const override { return record_thread_; }
+    void RecordNext(const State& s) override;
+    void DrawAssembled(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices,
+                       const Assembled& pre, bool ok) override {
+        pre_ = &pre;
+        pre_ok_ = ok;
+        Draw(s, prim, start, count, indices);
+        pre_ = nullptr;
+    }
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override;
     void Present(const Surface& front) override;
     void Sync(uint32_t data, uint32_t size) override;
@@ -235,13 +344,15 @@ public:
     bool DeliverLate(uint32_t data) override;
     void RecordLate(uint32_t data) override;
     void Flush() override;
+    bool DeferWork(bool on) override { return defer_ = on && vcopies_.On(); }
+    void Settle() override;
     void SetGamma(const uint8_t* ramp) override;
     void ClearReport() override { counted_.clear(); }
     // done once the list being recorded, the next fence value, has run
     void GetReport(uint32_t report) override { reports_.push_back({report, counted_, fence_value_ + 1}); }
 
     ID3D12Device* Device() override { return dev_.Get(); }
-    ID3D12GraphicsCommandList* List() override { return cl_.Get(); }
+    ID3D12GraphicsCommandList* List() override { return CLAt(__func__); }
     void Release(ComPtr<ID3D12Resource> r) override { CurrentFrame().garbage.push_back(std::move(r)); }
     D3D12_CPU_DESCRIPTOR_HANDLE View(const Target& t) override { return Cpu(rtv_heap_.Get(), t.view, rtv_inc_); }
     void Unbind() override { bound_rt_ = bound_ds_ = nullptr; }
@@ -261,6 +372,7 @@ private:
         uint64_t used = 0;
         uint64_t fence = 0;
         std::vector<ComPtr<ID3D12Resource>> garbage;
+        std::vector<ComPtr<ID3D12Resource>> shrinks;  // shrunk copies this frame drew, to Shrink's pool once it is done
         uint32_t srv = 0;
     };
     struct Alloc {
@@ -273,6 +385,7 @@ private:
     Alloc Upload(uint64_t size, uint64_t align = 256);
     Frame& CurrentFrame() { return frames_[frame_ % kFrames]; }
     uint32_t AllocSrvSlots(uint32_t n);
+    void MakeDescriptorRoom();
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(ID3D12DescriptorHeap* h, uint32_t i, uint32_t inc) {
         auto c = h->GetCPUDescriptorHandleForHeapStart();
         c.ptr += size_t(i) * inc;
@@ -287,6 +400,83 @@ private:
     void Begin();
     void Submit(bool wait);
     void WaitFence(uint64_t value);
+    // the frame's resources let go once the GPU is done with them; XBE_KEEP_RELEASED=1 (experiment) keeps every one
+    uint64_t released_ = 0;
+    std::vector<ComPtr<ID3D12Resource>> kept_;
+    // the cube faces the GPU draws (found by CopyCubeTargets), by target address: drawn at most cube_face_hz times a
+    // second each, staggered, resting (their draws and clears left out) in the frames between
+    struct CubeFace {
+        double due = 0;  // seconds: drawn in the first frame from then
+        bool rest = false;
+    };
+    std::unordered_map<uint32_t, CubeFace> cube_faces_;
+    double FaceClock() const;
+    bool FaceResting(uint32_t data) {
+        if (cube_faces_.empty() || !data) return false;
+        auto it = cube_faces_.find(data & 0x0FFFFFFF);
+        return it != cube_faces_.end() && it->second.rest;
+    }
+    void PlanCubeFaces();
+    // Textures placed in large heaps (CreatePlacedResource), XBE_PLACED_TEXTURES=0 for one committed resource each:
+    // CreateCommittedResource took about 0.5 ms a texture, and PGR2 streams in up to 400 in a frame (hitches of 30 to
+    // 240 ms on Harry's PC). First fit in 64 MB heaps of textures only (no targets), ranges joined again when freed
+    struct TexHeap {
+        ComPtr<ID3D12Heap> heap;
+        std::map<uint64_t, uint64_t> free;  // offset, bytes
+    };
+    struct TexPlace {
+        uint32_t heap;
+        uint64_t offset, bytes;
+    };
+    static constexpr uint64_t kTexHeapBytes = 64ull << 20;
+    static constexpr uint64_t kPlacedMax = 16ull << 20;  // bigger textures are committed resources of their own
+    std::vector<TexHeap> tex_heaps_;
+    std::unordered_map<ID3D12Resource*, TexPlace> placed_;
+    std::vector<ComPtr<ID3D12Resource>> placed_wait_;  // released textures something else may still hold
+    bool TexHeapAlloc(uint64_t bytes, uint64_t align, TexPlace& at);
+    void TexHeapFree(const TexPlace& at);
+    bool CreatePlacedTexture(D3D12_RESOURCE_DESC& td, ComPtr<ID3D12Resource>& res);
+    void DropGarbage(Frame& f) {
+        static const bool keep = [] {
+            const char* e = std::getenv("XBE_KEEP_RELEASED");
+            bool v = e && *e == '1';
+            if (v) LOGR("d3d12: XBE_KEEP_RELEASED=1, no resource is ever released");
+            return v;
+        }();
+        released_ += f.garbage.size();
+        if (keep) for (auto& r : f.garbage) kept_.push_back(std::move(r));
+        if (!keep) {
+            // placed textures: their heap range is free once nothing else holds them
+            for (auto& r : f.garbage)
+                if (r && placed_.count(r.Get())) placed_wait_.push_back(std::move(r));
+            for (size_t i = 0; i < placed_wait_.size();) {
+                ID3D12Resource* r = placed_wait_[i].Get();
+                r->AddRef();
+                if (r->Release() == 1) {
+                    auto it = placed_.find(r);
+                    TexHeapFree(it->second);
+                    placed_.erase(it);
+                    placed_wait_[i] = std::move(placed_wait_.back());
+                    placed_wait_.pop_back();
+                } else {
+                    i++;
+                }
+            }
+        }
+        f.garbage.clear();
+        // a finished frame's shrunk copies wait for the next of their size, a copy source as Shrink left them
+        for (auto& r : f.shrinks) {
+            D3D12_RESOURCE_DESC rd = r->GetDesc();
+            auto& pool = shrink_pool_[uint64_t(rd.Width) << 32 | rd.Height];
+            if (pool.size() < kShrinkPool) pool.push_back(std::move(r));
+        }
+        f.shrinks.clear();
+    }
+    // Shrink's new textures took about 0.5 ms each: a cube texture's upscaled faces, shrunk every frame, cost PGR2's
+    // races 1.5 ms a frame. Each shrink still has its own texture within a frame (one shared by all six faces hung the
+    // GPU); the frame's are reused once the GPU is done with it
+    static constexpr size_t kShrinkPool = 16;
+    std::unordered_map<uint64_t, std::vector<ComPtr<ID3D12Resource>>> shrink_pool_;
     void SetFullViewport(uint32_t w, uint32_t h);
     void SetBlitTarget(D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, uint32_t h);
     void Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], bool gamma, bool alpha, uint32_t taps = 1,
@@ -351,7 +541,31 @@ private:
     void SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc);
     void SetBlendFactorStencilRef(const State& s);
     void DrawGeometry(const Assembled& a);
+    struct DrawPacket;
+    void Record(DrawPacket& p, PerfClock::time_point& perf_post);
+    // packets in flight between decide and record: a ring; inline (no record thread) only the first is used
+    static constexpr uint32_t kPackets = 64;
+    std::vector<std::unique_ptr<DrawPacket>> packets_;
+    DrawPacket* packet_ = MakePackets(packets_);  // the one being decided
+    uint64_t packets_made_ = 0;                   // decide's: handed to record
+    std::atomic<uint64_t> packets_done_{0};       // record's: recorded
+    bool record_thread_ = false;                  // RecordOnThread: record runs on the render thread's record thread
+    void HandOver();                              // the decided packet to record, and the next packet_
+    static DrawPacket* MakePackets(std::vector<std::unique_ptr<DrawPacket>>& v);
+    std::mutex ring_m_;  // the upload ring and the views' slots: decide and record both take them
+    std::mutex copies_m_;  // vcopies_: record adds, the render thread's lists and record's settles run them
+    std::vector<ComPtr<ID3D12Resource>> overflow_;  // Upload's own buffers since the last Submit (under ring_m_)
+    uint64_t RingUsed() {
+        std::lock_guard lock(ring_m_);
+        return CurrentFrame().used;
+    }
+    // what record reads of the draw's targets and stage 0 (set from its packet)
+    float rec_point_scale_ = 1;
+    float rec_spp_ = 1;  // the draw's targets' samples per console pixel (visibility tests)
+    uint32_t rec_vp_w_ = 0, rec_vp_h_ = 0, rec_vp_gh_ = 0;
+    D3D12_SAMPLER_DESC rec_sd_{};  // stage 0's sampler, for the note
     void UploadVertexBuffers(const Assembled& a);
+    void RunCopies();
     // visibility tests
     bool EnsureQueries();
     uint32_t BeginCountedDraw(const State& s);
@@ -361,7 +575,7 @@ private:
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
     // Blit's pipeline
-    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool final = false, uint32_t samples = 1);
+    ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false, bool final = false, uint32_t samples = 1, bool mix = false);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC FullScreenPipelineDesc(ID3DBlob* vs, ID3DBlob* ps, DXGI_FORMAT rtv) const;
     // Init, in order, each callee right after its caller
     bool CreateDevice();
@@ -382,6 +596,13 @@ private:
     void BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt);
     bool SmaaFrame(Target& t);  // Settings::smaa: the frame through SMAA's passes into smaa_[2], false when it cannot
     bool EnsureSmaa(uint32_t w, uint32_t h);
+    void HoldFrame(Target& t, const Surface& front);
+    // HoldFrame: the last two images of a title blending its frames
+    ComPtr<ID3D12Resource> hold_[2];
+    D3D12_RESOURCE_STATES hold_state_[2] = {D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST};
+    int hold_last_ = 0;
+    bool hold_live_ = false;
+    float hold_w_ = 1;
     void RenderUi();
     void ReleaseOldTextures();
     void ResetFrame();
@@ -390,8 +611,9 @@ private:
     void RescaleTargets();
     // per draw uploads and descriptor tables made earlier in the same ring generation are used again; the generation
     // moves on whenever the upload or descriptor ring starts over
-    uint64_t ring_gen_ = 1;
+    std::atomic<uint64_t> ring_gen_{1};  // record moves it on too (a views' wrap in AllocSrvSlots)
     uint64_t vsc_gen_ = 0, dc_gen_ = 0, tables_gen_ = 0;
+    uint64_t vsc_count_ = 0;  // State::vsc_gen of the vertex constants last uploaded
     D3D12_GPU_VIRTUAL_ADDRESS vsc_va_ = 0, dc_va_ = 0;
     std::vector<uint8_t> vsc_last_, dc_last_;
     std::unordered_map<uint64_t, uint32_t> tables_;
@@ -407,7 +629,11 @@ private:
         float bf[4] = {};
         uint32_t sref = ~0u;
     } ds_cache_;
-    void ForgetDrawState() { ds_cache_ = {}; }
+    // record's cache: written by others only once record has drained
+    void ForgetDrawState() {
+        DrainRecord(2);
+        ds_cache_ = {};
+    }
     // what earlier draws of this frame found, for the same inputs: a guest texture's binding by stage, the colour and
     // depth targets for the same surfaces; both start over each frame and whenever a target is made, dropped or
     // rescaled (targets_gen_)
@@ -417,6 +643,8 @@ private:
         D3D12_SHADER_RESOURCE_VIEW_DESC sv;
         TexInfo info;
         bool replaced;
+        uint32_t tw, th, tl, tf, tu;  // stage 0's for the draw notes
+        uint64_t tmade;
     };
     std::unordered_map<uint64_t, StageMemo> stage_memo_;
     // each stage's last memo entry, and what it was asked for: most draws bind what the draw before them did
@@ -450,12 +678,12 @@ private:
     void SetRootCbv(uint32_t i, D3D12_GPU_VIRTUAL_ADDRESS va) {
         if (root_args_[i] == va) return;
         root_args_[i] = va;
-        cl_->SetGraphicsRootConstantBufferView(i, va);
+        rec_.RootCbv(i, va);
     }
     void SetRootTable(uint32_t i, D3D12_GPU_DESCRIPTOR_HANDLE h) {
         if (root_args_[i] == h.ptr) return;
         root_args_[i] = h.ptr;
-        cl_->SetGraphicsRootDescriptorTable(i, h);
+        rec_.RootTable(i, h);
     }
     // a screen shaped target shown wider than its guest shape (16:9, ultrawide) gets more pixels across than down
     float aspect_ = 0;  // app::FrameAspect() the targets were made for
@@ -506,6 +734,8 @@ private:
     // EnsureTarget's steps, in call order
     TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt, uint32_t gw = 0, uint32_t gh = 0);
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
+    std::unordered_map<uint64_t, Target>::iterator ColourTargetAt(uint32_t data);
+    std::unordered_map<uint32_t, uint64_t> small_colour_;  // an address's colour target smaller than the frame, last made or found
     bool TargetStale(uint32_t data) const;
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
     bool CreateTargetResource(Target& t, const Surface& s);
@@ -548,6 +778,9 @@ private:
 
     ComPtr<IDXGIFactory4> factory_;
     ComPtr<ID3D12Device> dev_;
+    bool debug_ = false;
+    ComPtr<ID3D12InfoQueue> info_;  // the debug layer's messages, with XBE_D3D12_DEBUG
+    void LogDebugMessages();
     ComPtr<IDXGIAdapter3> adapter3_;  // for the video memory in use (logged when a pipeline cannot be made)
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swap_;
@@ -568,7 +801,35 @@ private:
     uint64_t fence_value_ = 0;
     Frame frames_[kFrames];
     uint64_t frame_ = 0;
-    ComPtr<ID3D12GraphicsCommandList> cl_;
+    ComPtr<ID3D12GraphicsCommandList> cl_;  // written through CLAt(__func__), which replays rec_ first
+    D3D12Rec rec_;                          // the draws' commands, in order (stage A of docs/render-parallel.md); record's
+    // The pipeline (docs/render-parallel.md): while a draw is decided its own commands (barriers, targets) go into its
+    // packet, which record appends to rec_ first. Anything that writes the list itself, or record's caches, first lets
+    // record drain (drain_, set by the render thread when record runs on a thread of its own; nothing to do inline)
+    bool deciding_ = false;
+    int draw_depth_ = 0;  // Draw within Draw (point sprites)
+    void EndDecide();
+    std::function<void()> drain_;
+    // drain_why_: where the drains come from, for XBE_PERF (0 CL, 1 Submit, 2 ForgetDrawState, 3 a full packet ring,
+    // 4 a captured draw)
+    void DrainRecord(int why = 0) {
+        if (!drain_) return;
+        g_perf.drain_why[why]++;
+        drain_();
+    }
+    D3D12Rec& DRec();
+    // which functions write the list directly (XBE_PERF: their drains, by function)
+    ID3D12GraphicsCommandList* CLAt(const char* fn) {
+        if (drain_ && diag::Perf()) NoteDrain(fn);
+        DrainRecord();
+        TakeDecided();
+        FlushRec();
+        return cl_.Get();
+    }
+    void NoteDrain(const char* fn);
+    std::unordered_map<const char*, uint64_t> drain_fns_;
+    void TakeDecided();  // a draw being decided: its commands so far into rec_, before something written after them
+    void FlushRec();
     ComPtr<ID3D12DescriptorHeap> srv_heap_;
     ComPtr<ID3D12DescriptorHeap> smp_heap_;
     ComPtr<ID3D12DescriptorHeap> rtv_heap_;
@@ -585,7 +846,7 @@ private:
     std::unordered_map<uint64_t, uint64_t> shader_src_;  // vertex and pixel program keys to source hash
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> psos_;
     std::unordered_map<uint64_t, uint32_t> samplers_;
-    uint32_t smp_used_ = 0;
+    std::atomic<uint32_t> smp_used_{0};
     std::unordered_map<uint64_t, Target> targets_;
     std::unordered_map<uint32_t, uint64_t> target_used_;  // target address to the frame it was last used
     std::unordered_map<uint64_t, Tex> textures_;  // by data address, a P8 texture's with its palette's above
@@ -601,6 +862,43 @@ private:
     uint32_t cap_vs_ = 0;  // the last draw's vertex shader: a new one lists the constants
     bool cap_vs_before_ = false;  // XBE_CAPTURE_DRAWS=vs: the target saved before the first such draw
     std::unordered_map<uint32_t, uint32_t> reloads_;  // targets reloaded from guest memory, for the log
+    // the last draws recorded, for the report of a lost device: the command list (counted by Submit), the draw's
+    // number in it, its geometry, shaders, target and first two textures
+    struct DrawNote {
+        uint64_t list = 0;
+        uint32_t n = 0, topo = 0, count = 0, indexed = 0, base = 0, rt = 0, t0 = 0, t1 = 0;
+        uint64_t vs = 0, ps = 0;
+        uint32_t buffers = 0, bytes = 0, stride = 0;
+        float v0[4] = {};  // the first buffer's first vertex, its first four floats
+        uint32_t lo = 0, hi = 0;  // an indexed draw's lowest and highest index, with the base added
+        bool counted = false;      // drawn while the title counts its pixels (an occlusion query)
+        // stage 0: a guest texture's resource (width, height, levels, DXGI format, made at, uploads) and the sampler
+        uint32_t tw = 0, th = 0, tl = 0, tf = 0, tu = 0;
+        uint64_t tmade = 0;
+        D3D12_SAMPLER_DESC sd{};
+    };
+    std::array<DrawNote, 128> draw_notes_{};
+    DrawNote stage0_;  // stage 0's texture and sampler for the next note
+    std::vector<DrawNote> list_notes_;               // every draw of the list being recorded
+    std::deque<std::vector<DrawNote>> sent_notes_;   // and of the last lists sent (several may be on the GPU at once)
+    // the copies recorded into the same lists: the draw they came before, what they copied
+    struct CopyNote {
+        uint32_t before = 0;
+        std::string text;
+    };
+    std::vector<CopyNote> list_copies_;
+    const Assembled* pre_ = nullptr;  // DrawAssembled's draw
+    bool pre_ok_ = false;
+    CopyPool vcopies_;     // guest vertex bytes put off (DeferWork), copied before the GPU or the title needs them
+    bool defer_ = false;
+    std::deque<std::vector<CopyNote>> sent_copies_;
+    void CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, const D3D12_TEXTURE_COPY_LOCATION* src,
+                    const D3D12_BOX* box);
+    uint32_t draw_note_ = 0, list_draws_ = 0;
+    uint32_t list_seen_ = 0;  // draws asked for in the list, those left out too
+    uint64_t lists_ = 0;
+    void ReportRemoved(const char* where);
+    void LogDrawNote(const DrawNote& d, const char* mark);
     uint32_t cap_frame_ = 0, cap_frames_ = 1;  // XBE_CAPTURE_FRAMES=N: N frames in a row, this one's number
     char cap_stamp_[16] = {};
     std::unordered_set<uint32_t> cap_seen_;
@@ -688,9 +986,51 @@ bool D3D12Backend::Init(uint32_t width, uint32_t height) {
 }
 
 bool D3D12Backend::CreateDevice() {
-    if (GetEnvironmentVariableW(L"XBE_D3D12_DEBUG", nullptr, 0)) {
+    // XBE_D3D12_DEBUG=1 the debug layer, 2 with GPU based validation (slow); its messages go to the log
+    // (LogDebugMessages). It needs Windows' Graphics Tools (Settings, Optional features)
+    if (const char* e = std::getenv("XBE_D3D12_DEBUG"); e && *e) {
         ComPtr<ID3D12Debug> dbg;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) {
+            dbg->EnableDebugLayer();
+            debug_ = true;
+            ComPtr<ID3D12Debug1> dbg1;
+            bool gpu = *e == '2' && SUCCEEDED(dbg.As(&dbg1));
+            if (gpu) dbg1->SetEnableGPUBasedValidation(TRUE);
+            LOGR("d3d12: debug layer on%s", gpu ? ", with GPU based validation" : "");
+        } else {
+            LOGR("d3d12: XBE_D3D12_DEBUG set but the debug layer is not there (install Graphics Tools: Settings, "
+                 "System, Optional features)");
+        }
+    }
+    // NVIDIA Aftermath's crash dumps, before the device is made as NVIDIA asks (a test PC: its DLL beside the exe, see
+    // below): the dump written beside the log, logs\eon-<time>.nv-gpudmp. Declared here:
+    // GFSDK_Aftermath_EnableGpuCrashDumps(version, watched APIs (1 DX), flags, dump callback, 3 more callbacks, user)
+    if (HMODULE nv = LoadLibraryW((app::ExeDir() / L"GFSDK_Aftermath_Lib.x64.dll").c_str())) {
+        using DumpCb = void(__cdecl*)(const void*, uint32_t, void*);
+        using Enable = int(__cdecl*)(uint32_t, uint32_t, uint32_t, DumpCb, void*, void*, void*, void*);
+        DumpCb write = [](const void* dump, uint32_t size, void*) {
+            SYSTEMTIME tm;
+            GetLocalTime(&tm);
+            wchar_t name[64];
+            swprintf(name, 64, L"eon-%02u%02u%02u.nv-gpudmp", tm.wHour, tm.wMinute, tm.wSecond);
+            std::filesystem::path p = app::ExeDir() / L"logs" / name;
+            if (FILE* f = _wfopen(p.c_str(), L"wb")) {
+                fwrite(dump, 1, size, f);
+                fclose(f);
+            }
+            LOGR("d3d12: NVIDIA Aftermath crash dump written, %u bytes: %s", size, p.string().c_str());
+        };
+        auto enable = reinterpret_cast<Enable>(GetProcAddress(nv, "GFSDK_Aftermath_EnableGpuCrashDumps"));
+        int r = enable ? enable(0x21B, 0x1, 0, write, nullptr, nullptr, nullptr, nullptr) : -1;
+        LOGR("d3d12: NVIDIA Aftermath crash dumps %s (result %08X)", r == 0x1 ? "on" : "failed", unsigned(r));
+    }
+    // Device Removed Extended Data: what the GPU last finished and where it faulted, for the report of a lost device
+    {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        }
     }
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory_)))) return false;
     // dedicated GPU first on hybrid laptops
@@ -704,10 +1044,29 @@ bool D3D12Backend::CreateDevice() {
         LOGE("d3d12: no device");
         return false;
     }
+    if (debug_ && SUCCEEDED(dev_.As(&info_))) info_->SetMessageCountLimit(4096);
+    // NVIDIA Aftermath, on a test PC only: with NVIDIA's GFSDK_Aftermath_Lib.x64.dll beside the exe (not shipped: its
+    // licence), markers, resource tracking, shader debug info and call stacks on, so the Aftermath Monitor's crash
+    // dump names the resource at a page fault. Declared here: GFSDK_Aftermath_DX12_Initialize(version, flags, device)
+    if (HMODULE nv = LoadLibraryW((app::ExeDir() / L"GFSDK_Aftermath_Lib.x64.dll").c_str())) {
+        using Init = int(__cdecl*)(uint32_t, uint32_t, ID3D12Device*);
+        constexpr uint32_t kVersion = 0x21B;  // GFSDK_Aftermath_Version_API, SDK 2026.3
+        constexpr uint32_t kFlags = 0x1 | 0x2 | 0x8 | 0x10 | 0x40000000;  // markers, resources, debug info, errors, stacks
+        auto init = reinterpret_cast<Init>(GetProcAddress(nv, "GFSDK_Aftermath_DX12_Initialize"));
+        int r = init ? init(kVersion, kFlags, dev_.Get()) : -1;
+        LOGR("d3d12: NVIDIA Aftermath %s (result %08X)", r == 0x1 ? "on: markers, resource tracking, call stacks" : "failed",
+             unsigned(r));
+    }
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     if (adapter) adapter.As(&adapter3_);
-    LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
+    // the driver's version (the user mode driver's, as the vendor numbers it in its last parts)
+    LARGE_INTEGER umd{};
+    if (adapter && SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd)))
+        LOGR("D3D12 adapter: %ls, driver %u.%u.%u.%u", ad.Description, unsigned(umd.HighPart >> 16), unsigned(umd.HighPart & 0xFFFF),
+             unsigned(uint32_t(umd.LowPart) >> 16), unsigned(umd.LowPart & 0xFFFF));
+    else
+        LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     dev_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_));
@@ -810,11 +1169,13 @@ void D3D12Backend::CreateFrames() {
         D3D12_RESOURCE_DESC bd = BufferDesc(kUploadSize);
         dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                       IID_PPV_ARGS(&f.upload));
+        Name(f.upload.Get(), "upload ring %u (%llu MB)", unsigned(&f - &frames_[0]), (unsigned long long)(kUploadSize >> 20));
         f.upload->Map(0, nullptr, reinterpret_cast<void**>(&f.map));
     }
     dev_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, frames_[0].alloc.Get(), nullptr, IID_PPV_ARGS(&cl_));
+    nvmark::Init(cl_.Get());
 }
 
 // gamma ramp as a 256 x 1 lookup
@@ -836,25 +1197,89 @@ void D3D12Backend::LoadSettings() {
 
 void D3D12Backend::Begin() {
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), smp_heap_.Get()};
-    cl_->SetDescriptorHeaps(2, heaps);
-    cl_->SetGraphicsRootSignature(root_.Get());
+    CLAt(__func__)->SetDescriptorHeaps(2, heaps);
+    CLAt(__func__)->SetGraphicsRootSignature(root_.Get());
     bound_rt_ = bound_ds_ = nullptr;
     std::fill(std::begin(root_args_), std::end(root_args_), 0);  // a new list holds no root arguments
     ForgetDrawState();
+    list_draws_ = 0;
+    list_seen_ = 0;
+    nvmark::Mark(lists_, 0xFFFFF);  // the list's start
+}
+
+// the render thread's, timed apart; Submit's own is in the time of whatever submitted
+void D3D12Backend::Settle() {
+    if (!vcopies_.Pending()) return;
+    PerfScope perf{g_perf.settle};
+    RunCopies();
+}
+
+void D3D12Backend::RunCopies() {
+    std::lock_guard lock(copies_m_);  // record adds them, the render thread's lists and record's settles run them
+    if (!vcopies_.Pending()) return;
+    g_perf.deferred += vcopies_.Pending();
+    g_perf.settles++;
+    vcopies_.Run();
+}
+
+// the recorded commands into the list: before anything is written to it directly, and before it is sent
+void D3D12Backend::FlushRec() {
+    if (rec_.Empty()) return;
+    PerfScope perf{g_perf.replay};
+    g_perf.runs++;
+    g_perf.run_draws += rec_.Draws();
+    rec_.Replay(dev_.Get(), cl_.Get(), [](uint64_t v) {
+        if (nvmark::set) nvmark::set(nvmark::ctx, &v, sizeof v);
+    });
 }
 
 void D3D12Backend::Submit(bool wait) {
-    if (HRESULT hr = cl_->Close(); FAILED(hr))
+    DrainRecord(1);
+    TakeDecided();
+    {
+        std::lock_guard lock(ring_m_);
+        for (auto& r : overflow_) CurrentFrame().garbage.push_back(std::move(r));
+        overflow_.clear();
+    }
+    RunCopies();  // the list reads the copies' upload memory
+    FlushRec();
+    if (HRESULT hr = cl_->Close(); FAILED(hr)) {
         LOG_FIRST(4, "d3d12: command list close failed %08X (device %08X)", unsigned(hr), unsigned(dev_->GetDeviceRemovedReason()));
+        ReportRemoved("closing a command list");
+    }
     ID3D12CommandList* lists[] = {cl_.Get()};
     queue_->ExecuteCommandLists(1, lists);
+    lists_++;
+    sent_notes_.push_back(std::move(list_notes_));
+    sent_copies_.push_back(std::move(list_copies_));
+    if (sent_notes_.size() > 6) {
+        list_notes_ = std::move(sent_notes_.front());  // its storage reused
+        sent_notes_.pop_front();
+        sent_copies_.pop_front();
+    }
+    list_notes_.clear();
+    list_copies_.clear();
     queue_->Signal(fence_.Get(), ++fence_value_);
     Frame& f = CurrentFrame();
     f.fence = fence_value_;
-    if (wait) {
+    // XBE_SYNC_GPU=1 (experiment): every list waited for once sent, so the GPU never runs alongside the CPU
+    static const bool sync = [] {
+        const char* e = std::getenv("XBE_SYNC_GPU");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_SYNC_GPU=1, every command list waited for");
+        return v;
+    }();
+    if (sync && !wait) {
         WaitFence(fence_value_);
+        ReportRemoved("a list waited for");  // before the next list records markers over Aftermath's last ones
+    }
+    if (wait) {
+        auto perf_w = PerfNow();
+        WaitFence(fence_value_);
+        g_perf.flushes++;
+        g_perf.flush_wait += PerfMs(perf_w);
         f.alloc->Reset();
-        f.garbage.clear();
+        DropGarbage(f);
         f.used = 0;
         f.srv = 0;
         ring_gen_++;
@@ -872,29 +1297,32 @@ void D3D12Backend::Flush() {
 void D3D12Backend::WaitFence(uint64_t value) {
     fence_->SetEventOnCompletion(value, event_);
     // a wait past 5 s is logged (a GPU that stopped, or work that takes that long), then waited out
-    for (int i = 0; WaitForSingleObject(event_, 5000) == WAIT_TIMEOUT; i++)
+    for (int i = 0; WaitForSingleObject(event_, 5000) == WAIT_TIMEOUT; i++) {
         if (i < 4)
             LOGR("d3d12: still waiting for the GPU after %d s (fence %llu of %llu, device %08X)", (i + 1) * 5,
                  (unsigned long long)fence_->GetCompletedValue(), (unsigned long long)value,
                  unsigned(dev_->GetDeviceRemovedReason()));
+        ReportRemoved("waiting for the GPU");
+    }
 }
 
 void D3D12Backend::SetFullViewport(uint32_t w, uint32_t h) {
     ForgetDrawState();
     D3D12_VIEWPORT vp{0, 0, float(w), float(h), 0, 1};
     D3D12_RECT scissor{0, 0, LONG(w), LONG(h)};
-    cl_->RSSetViewports(1, &vp);
-    cl_->RSSetScissorRects(1, &scissor);
+    CLAt(__func__)->RSSetViewports(1, &vp);
+    CLAt(__func__)->RSSetScissorRects(1, &scissor);
 }
 
 // one w x h colour target for a Blit, the draw's bound targets forgotten
 void D3D12Backend::SetBlitTarget(D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, uint32_t h) {
-    cl_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     SetFullViewport(w, h);
 }
 
 D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
+    std::lock_guard lock(ring_m_);  // decide's texture uploads and record's constants and geometry
     Frame& f = CurrentFrame();
     g_perf.upload += size;
     uint64_t o = (f.used + align - 1) & ~(align - 1);
@@ -910,17 +1338,45 @@ D3D12Backend::Alloc D3D12Backend::Upload(uint64_t size, uint64_t align) {
     D3D12_RESOURCE_DESC bd = BufferDesc((size + kOwnAlign - 1) & ~(kOwnAlign - 1));
     dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                   IID_PPV_ARGS(&r));
+    Name(r.Get(), "upload of its own, %llu bytes (present %llu)", (unsigned long long)size, (unsigned long long)presents_);
     uint8_t* p = nullptr;
     r->Map(0, nullptr, reinterpret_cast<void**>(&p));
-    f.garbage.push_back(r);
+    overflow_.push_back(r);  // into the frame's garbage at the next Submit (record may hold the ring lock here)
     return {r.Get(), 0, p, r->GetGPUVirtualAddress()};
 }
 
+// A draw takes a few view and sampler slots (16 kept in hand). When the frame's views or the samplers would run
+// out, the GPU first finishes everything recorded (Flush): reusing a slot a recorded draw still reads gave that draw
+// other descriptors, which hung NVIDIA GPUs (EoN's MI6 Training: 7800 draws a frame used up the frame's 32768 views
+// and the ring started again over its first draws). Called before a draw records anything.
+void D3D12Backend::MakeDescriptorRoom() {
+    // with record on its own thread, the packets in flight may each take a table and samplers more than seen here
+    const uint32_t room = 16 + (drain_ ? 4 * kPackets : 0);
+    uint32_t srv;
+    {
+        std::lock_guard lock(ring_m_);
+        srv = CurrentFrame().srv;
+    }
+    bool views = srv + room > kSrvCount / kFrames, samplers = smp_used_.load(std::memory_order_relaxed) + room > kSamplerCount;
+    if (!views && !samplers) return;
+    static int told = 0;
+    if (told++ < 4)
+        LOGR("d3d12: %s nearly used up (views %u of %u this frame, samplers %u of %u): the GPU finishes first",
+             views ? "descriptors" : "samplers", srv, kSrvCount / kFrames, smp_used_.load(), kSamplerCount);
+    Flush();  // Submit(true): the frame's views start again
+    if (samplers) {
+        samplers_.clear();
+        smp_used_ = 0;
+    }
+}
+
 uint32_t D3D12Backend::AllocSrvSlots(uint32_t n) {
+    std::lock_guard lock(ring_m_);
     Frame& f = CurrentFrame();
     const uint32_t per = kSrvCount / kFrames;
     if (f.srv + n > per) {
-        LOG_FIRST(4, "d3d12: descriptor ring wrapped within a frame");
+        static int told = 0;
+        if (told++ < 4) LOGR("d3d12: descriptor ring wrapped within a frame (views a draw still reads may be overwritten)");
         f.srv = 0;
         ring_gen_++;
     }
@@ -937,7 +1393,7 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     b.Transition.StateBefore = cur;
     b.Transition.StateAfter = want;
-    cl_->ResourceBarrier(1, &b);
+    DRec().Barrier(b);
     cur = want;
 }
 
@@ -976,8 +1432,13 @@ bool D3D12Backend::CreateTargetResource(Target& t, const Surface& s) {
         cv.Format = td.Format;
         t.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
-    return SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.state, &cv,
-                                                   IID_PPV_ARGS(&t.res)));
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.state, &cv, IID_PPV_ARGS(&t.res))))
+        return false;
+    Name(t.res.Get(), "%s target %08X %ux%u (present %llu)", t.depth ? "depth" : "colour", mem::VirtualFromPhysical(s.data),
+         t.gw, t.gh, (unsigned long long)presents_);
+    LOGR("d3d12: %s target made at present %llu: %08X %ux%u (%ux%u here), DXGI format %u", t.depth ? "depth" : "colour",
+         (unsigned long long)presents_, mem::VirtualFromPhysical(s.data), t.gw, t.gh, t.w, t.h, unsigned(td.Format));
+    return true;
 }
 
 // a view from the free pool, cleared; false when the pool is empty
@@ -992,12 +1453,12 @@ bool D3D12Backend::CreateTargetView(Target& t) {
         dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         dev_->CreateDepthStencilView(t.res.Get(), &dv, Cpu(dsv_heap_.Get(), t.view, dsv_inc_));
         float one = 1;
-        cl_->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_),
+        CLAt(__func__)->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_),
                                    D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, one, 0, 0, nullptr);
     } else {
         dev_->CreateRenderTargetView(t.res.Get(), nullptr, Cpu(rtv_heap_.Get(), t.view, rtv_inc_));
         float black[4] = {0, 0, 0, 0};
-        cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
+        CLAt(__func__)->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
     }
     return true;
 }
@@ -1012,9 +1473,20 @@ constexpr int kKeyHeightShift = 48;
 // a smaller depth surface laid on the depth buffer's memory is a target of its own
 uint64_t D3D12Backend::SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const {
     uint64_t key = TargetMapKey(data, depth);
-    bool small_depth = depth && (gw != guest_w_ || gh != guest_h_);
-    if (!small_depth) return key;
+    // a surface smaller than the frame keeps a target per size: titles draw small textures at one address at two sizes
+    // in a frame (EoN's driving: 512x512 then 256x128 at 80F80000), which keyed by address alone were made again at
+    // each change, hundreds of times a second once frames in between replay the step
+    bool under_frame = gw != guest_w_ || gh != guest_h_;  // not "small": the Windows SDK's rpcndr.h defines it
+    if (!under_frame) return key;
     return key | uint64_t(gw) << kKeyWidthShift | uint64_t(gh) << kKeyHeightShift;
+}
+
+// the colour target at an address the CPU reads: the frame sized one, else the size last drawn there
+std::unordered_map<uint64_t, Target>::iterator D3D12Backend::ColourTargetAt(uint32_t data) {
+    auto it = targets_.find(TargetMapKey(data, false));
+    if (it != targets_.end()) return it;
+    auto last = small_colour_.find(data);
+    return last == small_colour_.end() ? targets_.end() : targets_.find(last->second);
 }
 
 // alt: the extension's bits of the key
@@ -1049,6 +1521,7 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (ext_ && !ext_->TargetKey(s, depth, alt)) return nullptr;
     TargetSlot slot = FindTargetSlot(s, depth, alt, gw, gh);
     target_used_[slot.data] = frame_;
+    if (!depth && (slot.gw != guest_w_ || slot.gh != guest_h_)) small_colour_[slot.data] = slot.key;
     if (slot.sized) return &slot.it->second;
     if (slot.it != targets_.end()) ReleaseTarget(slot.it);
     Target t;
@@ -1068,6 +1541,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (depth) t.bytes = slot.gw * slot.gh * 4;
     t.epoch = DirtyEpoch(slot.data);
     t.sig = MemSig(slot.data, t.bytes);
+    if (!depth) LOG_FIRST(48, "d3d12: colour target %08X %ux%u made (present %llu)", slot.data, slot.gw, slot.gh,
+                          (unsigned long long)presents_);
     auto& ref = targets_[slot.key] = std::move(t);
     targets_gen_++;
     return &ref;
@@ -1139,7 +1614,7 @@ bool D3D12Backend::BindTargets(const State& s) {
             rt ? Cpu(rtv_heap_.Get(), ms ? rt->ms_view : rt->view, rtv_inc_) : D3D12_CPU_DESCRIPTOR_HANDLE{};
         D3D12_CPU_DESCRIPTOR_HANDLE dh =
             ds ? Cpu(dsv_heap_.Get(), ms ? ds->ms_view : ds->view, dsv_inc_) : D3D12_CPU_DESCRIPTOR_HANDLE{};
-        cl_->OMSetRenderTargets(rt ? 1 : 0, rt ? &rh : nullptr, FALSE, ds ? &dh : nullptr);
+        DRec().Targets(rt ? &rh : nullptr, ds ? &dh : nullptr);
         bound_rt_ = rt;
         bound_ds_ = ds;
         bound_ms_ = ms;
@@ -1184,7 +1659,7 @@ void D3D12Backend::DrawDepthCopy(Target& src, Target& dst, ID3D12PipelineState* 
     Transition(src.res.Get(), src.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     Transition(dst.res.Get(), dst.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     D3D12_CPU_DESCRIPTOR_HANDLE dh = Cpu(dsv_heap_.Get(), dst.view, dsv_inc_);
-    cl_->OMSetRenderTargets(0, nullptr, FALSE, &dh);
+    CLAt(__func__)->OMSetRenderTargets(0, nullptr, FALSE, &dh);
     SetFullViewport(dst.w, dst.h);
     uint32_t slot = AllocSrvSlots(1);
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -1253,7 +1728,7 @@ ComPtr<ID3D12Resource> D3D12Backend::CreatePixelTexture(const std::vector<uint8_
     D3D12_TEXTURE_COPY_LOCATION src{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     src.PlacedFootprint.Offset = a.off;
     src.PlacedFootprint.Footprint = {DXGI_FORMAT_B8G8R8A8_UNORM, w, h, 1, row};
-    cl_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    CopyRegion(&dst, 0, 0, &src, nullptr);
     D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
     Transition(tex.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return tex;
@@ -1322,25 +1797,33 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
 void D3D12Backend::DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t srv_slot,
                                   std::optional<uint32_t> sampler_slot) {
     ForgetDrawState();
-    cl_->SetPipelineState(pso);
+    CLAt(__func__)->SetPipelineState(pso);
     SetRootCbv(0, cb);
     SetRootCbv(1, cb);
     SetRootTable(2, Gpu(srv_heap_.Get(), srv_slot, srv_inc_));
     // without a slot the passes take the blit samplers, looked up at this point as they always were
     uint32_t si = sampler_slot ? *sampler_slot : EnsureBlitSamplers();
     SetRootTable(3, Gpu(smp_heap_.Get(), si, smp_inc_));
-    cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cl_->DrawInstanced(3, 1, 0, 0);
+    CLAt(__func__)->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // counted with the title's draws, as DRED counts every draw (a lost device's report)
+    DrawNote blit;
+    blit.list = lists_;
+    blit.n = list_draws_++;
+    blit.topo = 99;  // the renderer's own blit
+    blit.count = 3;
+    list_notes_.push_back(blit);
+    CLAt(__func__)->DrawInstanced(3, 1, 0, 0);
 }
 
 void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect[4], const BlitOptions& o) {
-    uint32_t slot = AllocSrvSlots(2);
+    uint32_t slot = AllocSrvSlots(o.mix ? 3 : 2);
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = fmt;
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     dev_->CreateShaderResourceView(src, &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+    if (o.mix) dev_->CreateShaderResourceView(o.mix, &sv, Cpu(srv_heap_.Get(), slot + 2, srv_inc_));
     sv.Format = kBgra;
     dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + 1, srv_inc_));
     uint32_t si = EnsureBlitSamplers();
@@ -1351,16 +1834,50 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
     if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     std::memcpy(cb.cpu, c, sizeof(c));
-    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples);
+    ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples, o.mix != nullptr);
     if (!pso && final) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
     if (pso) DrawFullScreen(pso, cb.gpu, slot, si);
 }
 
 ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash) {
     // one source can hold several entry points
+    // XBE_SHADER_FLAGS (experiment): skip (no optimisation), o3, ieee (strict), comma separated; keyed apart in the cache
+    static const UINT flags = [] {
+        UINT f = D3DCOMPILE_OPTIMIZATION_LEVEL1;
+        const char* e = std::getenv("XBE_SHADER_FLAGS");
+        if (!e || !*e) return f;
+        std::string v = e;
+        if (v.find("skip") != std::string::npos) f = D3DCOMPILE_SKIP_OPTIMIZATION;
+        if (v.find("o3") != std::string::npos) f = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+        if (v.find("ieee") != std::string::npos) f |= D3DCOMPILE_IEEE_STRICTNESS;
+        LOGR("d3d12: XBE_SHADER_FLAGS=%s, shaders compiled with flags %X", e, f);
+        return f;
+    }();
     uint64_t profile_seed = Hash(profile, std::strlen(profile));
+    if (flags != D3DCOMPILE_OPTIMIZATION_LEVEL1) profile_seed = Hash(&flags, sizeof flags, profile_seed);
     uint64_t entry_seed = Hash(entry, std::strlen(entry), profile_seed);
     hash = Hash(src.data(), src.size(), entry_seed);
+    // XBE_DUMP_SHADERS=1: each shader's HLSL in logs\shaders\<hash>_<profile>.hlsl
+    static const bool dump = [] {
+        const char* e = std::getenv("XBE_DUMP_SHADERS");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_DUMP_SHADERS=1, shader sources in logs\\shaders");
+        return v;
+    }();
+    if (dump) {
+        static std::unordered_set<uint64_t> written;
+        if (written.insert(hash).second) {
+            std::filesystem::path dir = app::ExeDir() / L"logs" / L"shaders";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            char name[64];
+            snprintf(name, sizeof(name), "%016llX_%s.hlsl", (unsigned long long)hash, profile);
+            if (FILE* f = _wfopen((dir / name).c_str(), L"wb")) {
+                fwrite(src.data(), 1, src.size(), f);
+                fclose(f);
+            }
+        }
+    }
     auto it = blobs_.find(hash);
     if (it != blobs_.end()) return it->second.Get();
     if (ComPtr<ID3DBlob> kept; CachedShader(hash, kept.GetAddressOf())) {
@@ -1371,8 +1888,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     ComPtr<ID3DBlob> err;
     PerfScope perf_compile{g_perf.compile};
     g_perf.shaders++;
-    HRESULT hr = D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, entry, profile,
-                            D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &err);
+    HRESULT hr = D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, entry, profile, flags, 0, &code, &err);
     if (FAILED(hr)) {
         LOGE("d3d12: %s compile failed: %s", profile, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
         LOGE("%s", src.c_str());
@@ -1403,12 +1919,12 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC D3D12Backend::FullScreenPipelineDesc(ID3DBlob
     return d;
 }
 
-ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool final, uint32_t samples) {
-    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(final) << 33 | uint64_t(samples) << 40];
+ID3D12PipelineState* D3D12Backend::EnsureBlitPipeline(DXGI_FORMAT rtv, bool over, bool final, uint32_t samples, bool mix) {
+    auto& pso = blit_psos_[uint64_t(rtv) | uint64_t(over) << 32 | uint64_t(final) << 33 | uint64_t(mix) << 34 | uint64_t(samples) << 40];
     if (pso) return pso.Get();
     uint64_t h;
     ID3DBlob* vs = Compile(kBlitHlsl, "vs", "vs_5_0", h);
-    ID3DBlob* ps = Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h);
+    ID3DBlob* ps = Compile(kBlitHlsl, mix ? "psmix" : final ? "psfinal" : "psmain", "ps_5_0", h);
     if (!vs || !ps) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, rtv);
     d.SampleDesc.Count = samples;
@@ -1465,12 +1981,12 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
     }
     Alloc cb = Upload(256, 256);
     std::memcpy(cb.cpu, p, 8 * sizeof(float));
-    cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     SetFullViewport(w, h);
     if (blend >= 0) {
         float f[4] = {blend, blend, blend, blend};
         ForgetDrawState();
-        cl_->OMSetBlendFactor(f);
+        CLAt(__func__)->OMSetBlendFactor(f);
     }
     DrawFullScreen(pso, cb.gpu, slot);
     bound_rt_ = bound_ds_ = nullptr;
@@ -1486,11 +2002,13 @@ ID3D12Resource* D3D12Backend::Feedback(Target& t) {
         if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.fb_state, nullptr,
                                                  IID_PPV_ARGS(&t.fb)))) {
             return nullptr;
+        } else {
+            Name(t.fb.Get(), "feedback copy of %08X (present %llu)", t.data, (unsigned long long)presents_);
         }
     }
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Transition(t.fb.Get(), t.fb_state, D3D12_RESOURCE_STATE_COPY_DEST);
-    cl_->CopyResource(t.fb.Get(), t.res.Get());
+    CLAt(__func__)->CopyResource(t.fb.Get(), t.res.Get());
     Transition(t.fb.Get(), t.fb_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return t.fb.Get();
 }
@@ -1620,6 +2138,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
         if (ComPtr<ID3DBlob> blob; SUCCEEDED(pso->GetCachedBlob(&blob)) && blob) KeepPipeline(cache_key, blob->GetBufferPointer(), blob->GetBufferSize());
     }
     if (FAILED(hr)) {
+        ReportRemoved("making a pipeline");
         DXGI_QUERY_VIDEO_MEMORY_INFO vm{};
         if (adapter3_) adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
         LOGE("d3d12: pipeline creation failed %08X (samples %u, colour %u format %u, depth %u, topology %u, fill %u; "
@@ -1627,6 +2146,12 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
              unsigned(d.DSVFormat), k.topo, k.fill, (unsigned long long)(vm.CurrentUsage >> 20),
              (unsigned long long)(vm.Budget >> 20));
     }
+    // every pipeline made, kept in release builds: what a moment of play brings in that the frames before had not
+    LOGR("d3d12: pipeline %zu at present %llu: topology %u, colour %u format %u samples %u, depth %u (test %u write %u "
+         "func %u), stencil %u, blend %u %u/%u op %u mask %X, cull %u fill %u, bias %d slope %g, vs %016llX ps %016llX",
+         psos_.size() + 1, (unsigned long long)presents_, k.topo, k.has_rt, k.rtfmt, k.samples, k.has_ds, k.zen,
+         k.zwrite, k.zfunc, k.sten, k.blend, k.src, k.dst, k.op, k.wmask, k.cull, k.fill, k.zbias, k.zslope,
+         (unsigned long long)k.vs, (unsigned long long)k.ps);
     psos_[h] = pso;
     return pso.Get();
 }
@@ -1694,6 +2219,95 @@ bool SameTexture(const Tex& tx, const TextureDesc& d) {
            tx.d.depth == d.depth && tx.d.levels == d.levels && tx.d.cube == d.cube && tx.d.pitch == d.pitch;
 }
 
+bool D3D12Backend::TexHeapAlloc(uint64_t bytes, uint64_t align, TexPlace& at) {
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint32_t h = 0; h < tex_heaps_.size(); h++) {
+            auto& free = tex_heaps_[h].free;
+            for (auto it = free.begin(); it != free.end(); ++it) {
+                uint64_t start = (it->first + align - 1) / align * align, end = it->first + it->second;
+                if (start + bytes > end) continue;
+                uint64_t from = it->first;
+                free.erase(it);
+                if (start > from) free[from] = start - from;
+                if (start + bytes < end) free[start + bytes] = end - start - bytes;
+                at = {h, start, bytes};
+                return true;
+            }
+        }
+        if (pass) break;
+        // none fits: another heap
+        D3D12_HEAP_DESC hd{};
+        hd.SizeInBytes = kTexHeapBytes;
+        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+        TexHeap th;
+        if (FAILED(dev_->CreateHeap(&hd, IID_PPV_ARGS(&th.heap)))) return false;
+        th.free[0] = kTexHeapBytes;
+        tex_heaps_.push_back(std::move(th));
+        LOGR("d3d12: texture heap %zu made (%llu MB each)", tex_heaps_.size(), (unsigned long long)(kTexHeapBytes >> 20));
+    }
+    return false;
+}
+
+void D3D12Backend::TexHeapFree(const TexPlace& at) {
+    auto& free = tex_heaps_[at.heap].free;
+    uint64_t off = at.offset, bytes = at.bytes;
+    auto next = free.lower_bound(off);
+    if (next != free.end() && next->first == off + bytes) {  // joined with the range after it
+        bytes += next->second;
+        next = free.erase(next);
+    }
+    if (next != free.begin()) {  // and the one before
+        auto prev = std::prev(next);
+        if (prev->first + prev->second == off) {
+            prev->second += bytes;
+            return;
+        }
+    }
+    free[off] = bytes;
+}
+
+// false: the texture is made otherwise (too big, a heap could not be made, XBE_PLACED_TEXTURES=0)
+bool D3D12Backend::CreatePlacedTexture(D3D12_RESOURCE_DESC& td, ComPtr<ID3D12Resource>& res) {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_PLACED_TEXTURES");
+        bool v = !(e && *e == '0');
+        LOGR("d3d12: textures %s", v ? "placed in heaps" : "made as committed resources (XBE_PLACED_TEXTURES=0)");
+        return v;
+    }();
+    if (!on) return false;
+    // the small alignment where the driver allows it, else 64 KB
+    td.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+    D3D12_RESOURCE_ALLOCATION_INFO info = dev_->GetResourceAllocationInfo(0, 1, &td);
+    if (info.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+        td.Alignment = 0;
+        info = dev_->GetResourceAllocationInfo(0, 1, &td);
+    }
+    if (info.SizeInBytes == UINT64_MAX || info.SizeInBytes > kPlacedMax) {
+        td.Alignment = 0;
+        return false;
+    }
+    TexPlace at;
+    if (!TexHeapAlloc(info.SizeInBytes, info.Alignment, at)) {
+        td.Alignment = 0;
+        return false;
+    }
+    if (FAILED(dev_->CreatePlacedResource(tex_heaps_[at.heap].heap.Get(), at.offset, &td, D3D12_RESOURCE_STATE_COPY_DEST,
+                                          nullptr, IID_PPV_ARGS(&res)))) {
+        TexHeapFree(at);
+        td.Alignment = 0;
+        return false;
+    }
+    placed_[res.Get()] = at;
+    // the range may have held a texture released earlier: the new one takes the memory over before it is written
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    b.Aliasing.pResourceAfter = res.Get();
+    DRec().Barrier(b);
+    return true;
+}
+
 // false when the texture could not be made, its entry dropped
 bool D3D12Backend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, uint64_t key) {
     g_perf.newtex++;
@@ -1719,8 +2333,12 @@ bool D3D12Backend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo
     td.MipLevels = UINT16(tx.levels);
     td.Format = tx.fmt;
     td.SampleDesc.Count = 1;
-    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                             IID_PPV_ARGS(&tx.res)))) {
+    if (CreatePlacedTexture(td, tx.res) ||
+        SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&tx.res)))) {
+        Name(tx.res.Get(), "texture %08X %ux%u format %X (present %llu)", d.data, d.width, d.height, d.format,
+             (unsigned long long)presents_);
+    } else {
         textures_.erase(key);
         return false;
     }
@@ -1759,7 +2377,7 @@ void D3D12Backend::UploadTextureLevel(Tex& tx, uint32_t f, uint32_t l, const std
     dl.SubresourceIndex = sub;
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     sl.PlacedFootprint = fp;
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
 }
 
 void D3D12Backend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint8_t* p,
@@ -1818,6 +2436,13 @@ void ReadStagePalette(const State& s, int stage, const TextureDesc& d, StagePale
 ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                                DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
+    auto perf_f = PerfNow();
+    auto step = [&](double& acc) {
+        if (!diag::Perf()) return;
+        auto now = PerfClock::now();
+        acc += std::chrono::duration<double, std::milli>(now - perf_f).count();
+        perf_f = now;
+    };
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
@@ -1827,10 +2452,13 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             return res;
         }
     }
+    step(g_perf.f_replace);
     if (draw_2d_) Sharpen2D(d);
     else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
+    step(g_perf.f_sharpen);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
+    step(g_perf.f_palette);
     // a format no texture has: the header read is not a texture's. Named with its bytes, once each, and not bound
     if (&Format(d.format) == &Format(0xFFFFFFFFu)) {
         static std::atomic<int> said{0};
@@ -1846,7 +2474,16 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     Tex& tx = textures_[key];
     uint32_t total = TotalSize(d);
     bool same = SameTexture(tx, d);
+    step(g_perf.e_find);
     if (!same && !CreateTexture(tx, d, fi, key)) return nullptr;
+    if (!same) {
+        tx.made = presents_;
+        // every texture made, kept in release builds (as the pipelines)
+        LOGR("d3d12: texture %zu made at present %llu: data %08X format %X %ux%ux%u, %u levels%s%s, pitch %u",
+             textures_.size(), (unsigned long long)presents_, d.data, d.format, d.width, d.height, d.depth, d.levels,
+             d.cube ? ", cube" : "", d.linear ? ", linear" : "", d.pitch);
+    }
+    step(g_perf.e_create);
     // cheap change check once per frame: lock epochs plus a sample of the bytes
     if (tx.frame != presents_ + 1 || !same || tx.palette != palette.hash) {
         tx.frame = presents_ + 1;
@@ -1876,12 +2513,32 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
             g_perf.texups++;
             g_perf.texup_bytes += total;
             tx.sig = sig;
+            tx.uploads++;
             UploadTexture(tx, d, fi, p, palette.va ? palette.colours : nullptr, same);
         }
     }
-    if (d.cube && !fi.depth) CopyCubeTargets(tx, d);
+    step(g_perf.e_check);  // the change check and any upload
+    if (d.cube && !fi.depth) {
+        CopyCubeTargets(tx, d);
+        g_perf.e_cubes++;
+    }
+    step(g_perf.e_cube);
+    if (stage == 0) {
+        D3D12_RESOURCE_DESC rd = tx.res->GetDesc();
+        stage0_.tw = uint32_t(rd.Width), stage0_.th = rd.Height, stage0_.tl = rd.MipLevels, stage0_.tf = rd.Format;
+        stage0_.tmade = tx.made, stage0_.tu = tx.uploads;
+    }
+    step(g_perf.f_desc);
     FillTextureView(tx, d, stages.sv[stage]);
-    if (fi.depth) info.shadow = ShadowDepthKind(d.format);
+    step(g_perf.f_view);
+    // XBE_NO_SHADOW=1 (experiment): a depth texture read as a plain float texture, no comparison sampler
+    static const bool no_shadow = [] {
+        const char* e = std::getenv("XBE_NO_SHADOW");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_NO_SHADOW=1, depth textures sampled without comparison");
+        return v;
+    }();
+    if (fi.depth && !no_shadow) info.shadow = ShadowDepthKind(d.format);
     if (ext_) ext_->Sampled(d, nullptr, tx.flags, info);
     return tx.res.Get();
 }
@@ -1948,13 +2605,26 @@ ID3D12Resource* D3D12Backend::BindReplacement(const Replacement& r, const Textur
 void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
     if (tx.fmt != kBgra || tx.faces == presents_ + 1) return;
     tx.faces = presents_ + 1;
+    auto perf_c = PerfNow();
+    auto step = [&](double& acc) {
+        if (!diag::Perf()) return;
+        auto now = PerfClock::now();
+        acc += std::chrono::duration<double, std::milli>(now - perf_c).count();
+        perf_c = now;
+    };
     for (uint32_t f = 0; f < 6; f++) {
         uint32_t face = d.data + f * FaceSize(d);
-        auto it = targets_.find(TargetMapKey(face, false));
+        auto it = targets_.find(SizedTargetKey(face, false, d.width, d.height));
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
-        CopySource src = PrepareCopySource(t, {});
+        if (CubeFaceHz() > 0 && cube_faces_.size() < 64 && !cube_faces_.count(face & 0x0FFFFFFF))  // its turns staggered
+            cube_faces_[face & 0x0FFFFFFF] = {FaceClock() + f / (6.0 * CubeFaceHz()), false};
+        step(g_perf.c_find);
+        Resolve(t);
+        step(g_perf.c_resolve);
+        CopySource src = PrepareCopySource(t, {});  // Resolve again does nothing
+        step(g_perf.c_shrink);
         if (!src.res) continue;
         D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1962,14 +2632,16 @@ void D3D12Backend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         dl.SubresourceIndex = f * tx.levels;
         D3D12_TEXTURE_COPY_LOCATION sl{src.res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
         sl.SubresourceIndex = 0;
-        cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+        CopyRegion(&dl, 0, 0, &sl, nullptr);
         Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        // a shrunk copy is read by the recorded copy: kept until the frame is done
-        if (src.down) CurrentFrame().garbage.push_back(src.down);
+        // a shrunk copy is read by the recorded copy: kept until the frame is done, then reused by the next shrink
+        if (src.down) CurrentFrame().shrinks.push_back(src.down);
+        step(g_perf.c_copy);
     }
 }
 
 ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTextures& stages) {
+    if (stage == 0) stage0_ = {};
     TexInfo& info = stages.info[stage];
     D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[stage];
     info = {};
@@ -2018,9 +2690,15 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
             info = m->second.info;
             sv = m->second.sv;
             stages.replaced[stage] = m->second.replaced;
+            if (stage == 0) {
+                const StageMemo& h = m->second;
+                stage0_.tw = h.tw, stage0_.th = h.th, stage0_.tl = h.tl, stage0_.tf = h.tf, stage0_.tu = h.tu;
+                stage0_.tmade = h.tmade;
+            }
             return m->second.res;
         }
     }
+    auto perf_pre = PerfNow();  // XBE_PERF: a full bind's steps
     TextureDesc d;
     if (!Describe(header, d)) return nullptr;
     const FormatInfo& fi = Format(d.format);
@@ -2032,6 +2710,15 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    // a colour texture of another size than any target at its address: the frame sized target there, else the size
+    // last drawn there, as before targets were kept per size (EoN's Thermovision reads 640x480 target 8316CA00 as
+    // 320x240; a swizzled power of two header over a target)
+    if (tit == targets_.end() && !fi.depth) {
+        tit = targets_.find(TargetMapKey(d.data, false) | alt);
+        if (auto last = small_colour_.find(d.data); tit == targets_.end() && last != small_colour_.end())
+            if (auto t = targets_.find(last->second); t != targets_.end())
+                tit = targets_.find(SizedTargetKey(d.data, false, t->second.gw, t->second.gh) | alt);
+    }
     // a depth buffer read through a 32 bit colour format (its bytes, kTexDepthBytes) is kept under its depth key
     if (tit == targets_.end() && !fi.depth && DepthBytesOrder(d.format))
         tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height) | alt);
@@ -2077,8 +2764,9 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
     g_perf.stage_full++;
+    g_perf.f_pre += PerfMs(perf_pre);
     ID3D12Resource* res = BindGuestTexture(s, stage, d, fi, stages);
-    if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage]};
+    if (res && memo_ok && stage_memo_key_ == (presents_ << 24 ^ targets_gen_)) stage_memo_[memo_key] = {res, sv, info, stages.replaced[stage], stage0_.tw, stage0_.th, stage0_.tl, stage0_.tf, stage0_.tu, stage0_.tmade};
     return res;
 }
 
@@ -2104,6 +2792,7 @@ uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& s
     D3D12_SAMPLER_DESC sd[4];
     for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages.sv[i].Texture2D.MipLevels, stages.info[i].shadow, clamp, aniso,
                                                    stages.replaced[i]);
+    rec_sd_ = sd[0];  // record's (the note's); stage0_ is decide's
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return samplers_last_slot_ = it->second;
@@ -2128,15 +2817,44 @@ void D3D12Backend::EnsureVertexShader(const State& s, const Assembled& a, DrawSh
         return;
     }
     std::string src = VertexHlsl(s, a, sh);
+    // XBE_VS_EDIT=noprecise,noinf,rcpclamp (experiment): vertex shaders without precise, without infinite
+    // literals, or with reciprocals clamped as rcc's (a driver test: which construct an NVIDIA GPU hangs on)
+    static const std::string vs_edit = [] {
+        const char* e = std::getenv("XBE_VS_EDIT");
+        if (e && *e) LOGR("d3d12: XBE_VS_EDIT=%s", e);
+        return std::string(e ? e : "");
+    }();
+    if (!vs_edit.empty()) {
+        auto replace_all = [&src](const std::string& from, const std::string& to) {
+            for (size_t at = 0; (at = src.find(from, at)) != std::string::npos; at += to.size()) src.replace(at, from.size(), to);
+        };
+        if (vs_edit.find("noprecise") != std::string::npos) replace_all("precise ", "");
+        if (vs_edit.find("noskin") != std::string::npos) replace_all("a0 = mac_arl(", "a0 = 0 * mac_arl(");
+        if (vs_edit.find("rcpclamp") != std::string::npos)
+            replace_all("float4 ilu_rcp(float v) { return (1.0 / v).xxxx; }", "float4 ilu_rcp(float v) { return magclamp(1.0 / v).xxxx; }");
+    }
     sh.vs_code = Compile(sh.quad ? QuadHlsl(std::move(src)) : src, "main", "vs_5_0", sh.vh);
     shader_src_[sh.vkey] = sh.vh;
+    // kept in release builds: which title program each vertex shader was made for
+    LOGR("d3d12: vertex shader %016llX at present %llu: program handle %08X, %s", (unsigned long long)sh.vh,
+         (unsigned long long)presents_, s.vs_handle, sh.prog ? "a vertex program" : "fixed function");
 }
 
 bool D3D12Backend::BindStageTexturesAndTargets(const State& s, DrawTextures& stages) {
     auto perf_t = PerfNow();
     draw_rt_ = bound_rt_;
     draw_ds_ = bound_ds_;
-    for (int i = 0; i < 4; i++) stages.res[i] = BindTexture(s, i, stages);
+    for (int i = 0; i < 4; i++) {
+        // XBE_PERF: the time of each stage by how it was found
+        const uint64_t last = g_perf.stage_last, memo = g_perf.stage_memo, target = g_perf.stage_target, full = g_perf.stage_full;
+        auto perf_i = PerfNow();
+        stages.res[i] = BindTexture(s, i, stages);
+        if (diag::Perf()) {
+            double ms = PerfMs(perf_i);
+            (g_perf.stage_last != last ? g_perf.t_last : g_perf.stage_memo != memo ? g_perf.t_memo
+             : g_perf.stage_target != target ? g_perf.t_target : g_perf.stage_full != full ? g_perf.t_full : g_perf.t_empty) += ms;
+        }
+    }
     g_perf.bind += PerfMs(perf_t);
     // textures may have recorded copies that unbound the targets
     perf_t = PerfNow();
@@ -2192,9 +2910,13 @@ void D3D12Backend::FillTextureConstants(const State& s, const DrawTextures& stag
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                                    GuestExtent size, DrawConstants& c) {
     // the vertex constants: the last upload again when they have not changed (an extension may change the copy)
+    auto perf_k = PerfNow();
     D3D12_GPU_VIRTUAL_ADDRESS vsc_va = 0;
     float(*ext_vsc)[4] = nullptr;
-    if (!ext_ && vsc_gen_ == ring_gen_ && !std::memcmp(vsc_last_.data(), s.vsc.data(), sizeof(s.vsc))) {
+    // the render thread counts vsc's changes: the same count is the same constants, no compare needed
+    bool same_count = s.vsc_gen && s.vsc_gen == vsc_count_;
+    if (!ext_ && vsc_gen_ == ring_gen_ && (same_count || !std::memcmp(vsc_last_.data(), s.vsc.data(), sizeof(s.vsc)))) {
+        vsc_count_ = s.vsc_gen;
         vsc_va = vsc_va_;
         g_perf.reused_vsc++;
     } else {
@@ -2203,12 +2925,15 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         const uint8_t* b = reinterpret_cast<const uint8_t*>(s.vsc.data());
         vsc_last_.assign(b, b + sizeof(s.vsc));
         vsc_va = vsc_va_ = vc.gpu;
-        vsc_gen_ = ext_ ? 0 : ring_gen_;
+        vsc_gen_ = ext_ ? 0 : ring_gen_.load();
+        vsc_count_ = s.vsc_gen;
         ext_vsc = reinterpret_cast<float(*)[4]>(vc.cpu);
     }
+    g_perf.k_vsc += PerfMs(perf_k);
+    perf_k = PerfNow();
     FillSurfaceConstants(s, size, c);
     // points and lines: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
-    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = PointScale() * s.aa_y;
+    if (k.topo == uint32_t(Topology::Points) || k.topo == uint32_t(Topology::Lines)) c.surf[3] = rec_point_scale_ * s.aa_y;
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
     if (ext_ && ext_vsc) ext_->Constants(ext_vsc, c.ext, bound_rt_, k.blend ? k.src : 1);
@@ -2217,6 +2942,8 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
+    g_perf.k_fill += PerfMs(perf_k);
+    perf_k = PerfNow();
     // the draw constants likewise
     if (dc_gen_ == ring_gen_ && dc_last_.size() == sizeof(c) && !std::memcmp(dc_last_.data(), &c, sizeof(c))) {
         g_perf.reused_dc++;
@@ -2230,6 +2957,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     }
     SetRootCbv(0, vsc_va);
     SetRootCbv(1, dc_va_);
+    g_perf.k_dc += PerfMs(perf_k);
 }
 
 void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
@@ -2364,7 +3092,7 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
         } else {
             slot = AllocSrvSlots(4);
             for (int i = 0; i < 4; i++)
-                dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+                rec_.Srv(stages.res[i], stages.sv[i], Cpu(srv_heap_.Get(), slot + i, srv_inc_));
             if (tables_gen_ == ring_gen_) tables_[h] = slot;  // a wrap while allocating started a new generation
         }
         views_last_ = key;
@@ -2378,13 +3106,13 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
 
 // viewport covers the target, the guest viewport is in the shader; scissor clips to it
 void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawConstants& dc) {
-    const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
-    float W = float(b->w);
-    float H = float(b->h);
+    // the bound target's (colour, else depth) sizes, from the packet
+    float W = float(rec_vp_w_);
+    float H = float(rec_vp_h_);
     D3D12_VIEWPORT vp{0, 0, W, H, 0, 1};
     DrawStateCache& c = ds_cache_;
-    if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) cl_->RSSetViewports(1, &vp);
-    float sx = W / gw, sy = b->gh ? H * s.aa_y / b->gh : sx;  // across and down differ for a stretched target
+    if (!c.vp_ok || std::memcmp(&c.vp, &vp, sizeof(vp))) rec_.Viewport(vp);
+    float sx = W / gw, sy = rec_vp_gh_ ? H * s.aa_y / rec_vp_gh_ : sx;  // across and down differ for a stretched target
     LONG x0 = LONG(SqueezedX(dc.hud, s.viewport.x) * sx);
     LONG y0 = LONG(s.viewport.y * sy);
     LONG x1 = LONG(SqueezedX(dc.hud, s.viewport.x + s.viewport.w) * sx);
@@ -2402,7 +3130,7 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw, const DrawCon
     }
     D3D12_RECT rect{std::clamp<LONG>(x0, 0, LONG(W)), std::clamp<LONG>(y0, 0, LONG(H)),
                     std::clamp<LONG>(x1, 0, LONG(W)), std::clamp<LONG>(y1, 0, LONG(H))};
-    if (!c.vp_ok || std::memcmp(&c.sc, &rect, sizeof(rect))) cl_->RSSetScissorRects(1, &rect);
+    if (!c.vp_ok || std::memcmp(&c.sc, &rect, sizeof(rect))) rec_.Scissor(rect);
     c.vp = vp;
     c.sc = rect;
     c.vp_ok = true;
@@ -2413,12 +3141,12 @@ void D3D12Backend::SetBlendFactorStencilRef(const State& s) {
     BlendFactor(s, bf);
     DrawStateCache& c = ds_cache_;
     if (!c.bf_ok || std::memcmp(c.bf, bf, sizeof(bf))) {
-        cl_->OMSetBlendFactor(bf);
+        rec_.BlendFactor(bf);
         std::memcpy(c.bf, bf, sizeof(bf));
         c.bf_ok = true;
     }
     uint32_t sref = SimpleState(s, kMStencilRef) & 0xFF;
-    if (c.sref != sref) cl_->OMSetStencilRef(c.sref = sref);
+    if (c.sref != sref) rec_.StencilRef(c.sref = sref);
 }
 
 void D3D12Backend::UploadVertexBuffers(const Assembled& a) {
@@ -2426,25 +3154,31 @@ void D3D12Backend::UploadVertexBuffers(const Assembled& a) {
     for (uint32_t i = 0; i < a.buffer_count; i++) {
         const VertexBuffer& b = a.buffers[i];
         Alloc vb = Upload(b.bytes, 16);
-        std::memcpy(vb.cpu, b.src, b.bytes);
+        // guest memory stays as it is until the render thread tells the title these draws are done (Settle first);
+        // gathered or converted bytes are in scratch the next draw reuses
+        if (defer_ && uintptr_t(b.src) - uintptr_t(kernel::g_base) < (1ull << 32)) {
+            std::lock_guard lock(copies_m_);
+            vcopies_.Add(vb.cpu, b.src, b.bytes);
+        } else
+            std::memcpy(vb.cpu, b.src, b.bytes);
         vbv[i] = {vb.gpu, b.bytes, b.stride};
     }
-    cl_->IASetVertexBuffers(0, a.buffer_count, vbv);
+    rec_.VertexBuffers(a.buffer_count, vbv);
 }
 
 void D3D12Backend::DrawGeometry(const Assembled& a) {
     UploadVertexBuffers(a);
     int topo = int(PrimitiveTopology(a));
-    if (ds_cache_.topo != topo) cl_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(ds_cache_.topo = topo));
+    if (ds_cache_.topo != topo) rec_.Topology(D3D_PRIMITIVE_TOPOLOGY(ds_cache_.topo = topo));
     if (a.index_count) {
         uint32_t ibytes = a.index_count * (a.index16 ? 2 : 4);
         Alloc ib = Upload(ibytes, 4);
         std::memcpy(ib.cpu, a.index_src, ibytes);
         D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, ibytes, a.index16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
-        cl_->IASetIndexBuffer(&ibv);
-        cl_->DrawIndexedInstanced(a.index_count, 1, 0, a.base_vertex, 0);
+        rec_.IndexBuffer(ibv);
+        rec_.DrawIndexed(a.index_count, a.base_vertex);
     } else {
-        cl_->DrawInstanced(a.draw_count, 1, 0, 0);
+        rec_.Draw(a.draw_count);
     }
 }
 
@@ -2487,18 +3221,24 @@ bool D3D12Backend::EnsureQueries() {
 
 // a draw while the title counts visible pixels gets an occlusion query of its own, kNoQuery otherwise
 uint32_t D3D12Backend::BeginCountedDraw(const State& s) {
-    if (!s.simple[kMCountEnable >> 2] || !EnsureQueries()) return kNoQuery;
+    if (!s.simple[kMCountEnable >> 2]) return kNoQuery;
+    // XBE_NO_QUERIES=1 (experiment): no occlusion queries, every visibility test reports 0 pixels
+    static const bool none = [] {
+        const char* e = std::getenv("XBE_NO_QUERIES");
+        bool v = e && *e == '1';
+        if (v) LOGR("d3d12: XBE_NO_QUERIES=1, visibility tests report 0 pixels");
+        return v;
+    }();
+    if (none || !EnsureQueries()) return kNoQuery;
     uint32_t query = query_next_++ % kQueries;
-    cl_->BeginQuery(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
+    rec_.BeginQuery(query_heap_.Get(), query);  // record's: it writes the draw too
     return query;
 }
 
 void D3D12Backend::EndCountedDraw(uint32_t query) {
     if (query == kNoQuery) return;
-    cl_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
-    uint64_t at = uint64_t(query) * sizeof(uint64_t);
-    cl_->ResolveQueryData(query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, query, 1, query_rb_.Get(), at);
-    counted_.push_back({query, SamplesPerPixel()});
+    rec_.EndQuery(query_heap_.Get(), query_rb_.Get(), query);
+    counted_.push_back({query, rec_spp_});  // the samples per pixel decide found for the draw's targets
 }
 
 // the console counts its own pixels: the bound target's scale and multisampling come out
@@ -2529,13 +3269,115 @@ void D3D12Backend::DeliverReports() {
     }
 }
 
+// GameInfo::cube_face_hz, or XBE_CUBE_FACE_HZ
+float CubeFaceHz() {
+    static const float hz = [] {
+        float v = app::kGame.cube_face_hz;
+        if (const char* e = std::getenv("XBE_CUBE_FACE_HZ")) v = float(std::atof(e));
+        if (v > 0) LOGR("d3d12: cube map faces drawn at most %.0f times a second each", v);
+        return v;
+    }();
+    return hz;
+}
+
+double D3D12Backend::FaceClock() const {
+    static const auto start = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+// at a present: which faces the next frame draws. Only while frames run late (the last took longer than
+// kFaceBudget): a face due draws and is due again a period later (no further back than a period ago, so a slow frame
+// leaves no backlog), the others rest. A frame on time draws every face, so reflections are as before but in the
+// heaviest scenes
+void D3D12Backend::PlanCubeFaces() {
+    constexpr double kFaceBudget = 1.0 / 120;  // seconds a frame may take before faces start resting
+    static double last = FaceClock();
+    const double now = FaceClock(), took = now - last, period = 1.0 / CubeFaceHz();
+    last = now;
+    if (cube_faces_.empty()) return;
+    for (auto& [data, f] : cube_faces_) {
+        f.rest = took > kFaceBudget && now < f.due;
+        if (!f.rest) f.due = std::max(f.due + period, now - period);
+    }
+}
+
+// what a draw's decide half (Draw) hands its record half (Record)
+struct D3D12Backend::DrawPacket {
+    const State* s;
+    const Assembled* a;
+    uint32_t prim, count;
+    DrawShaders sh;
+    PsoKey k;
+    DrawTextures stages;
+    GuestExtent size;
+    DrawConstants c;  // wdepth and hud set by decide, the rest by record
+    PixelKey pk;
+    D3D12Rec pre;                       // decide's own commands (barriers, targets), before the draw's
+    ID3D12PipelineState* pso = nullptr;
+    float point_scale = 1;              // the bound targets' host pixels per console pixel
+    float spp = 1;                      // SamplesPerPixel, for a visibility test's count
+    uint32_t vp_w = 0, vp_h = 0, vp_gh = 0;  // the bound target's (colour, else depth)
+    DrawNote stage0;                    // stage 0's texture, for the note
+    bool draw = false;                  // false: only pre (the draw was left out, or recorded already)
+    Assembled own;                      // the draw's assembly when the prep thread did not do it
+};
+
+D3D12Backend::DrawPacket* D3D12Backend::MakePackets(std::vector<std::unique_ptr<DrawPacket>>& v) {
+    for (uint32_t i = 0; i < kPackets; i++) v.push_back(std::make_unique<DrawPacket>());
+    return v[0].get();
+}
+
+D3D12Rec& D3D12Backend::DRec() { return deciding_ ? packet_->pre : rec_; }
+
+// XBE_RECORD_THREAD=0, an extension or captures: record stays inline
+bool D3D12Backend::RecordOnThread(std::function<void()> drain) {
+    const char* e = std::getenv("XBE_RECORD_THREAD");
+    bool on = !(e && *e == '0') && !g_extension && diag::CaptureDir().empty();
+    LOGR("d3d12: draws recorded %s", on ? "on the record thread (decide and record side by side)"
+                                       : "with their decide (XBE_RECORD_THREAD=0, an extension or captures)");
+    if (!on) return false;
+    drain_ = std::move(drain);
+    record_thread_ = true;
+    return true;
+}
+
+void D3D12Backend::TakeDecided() {
+    if (deciding_) rec_.Append(packet_->pre);
+}
+
+
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    // the top level draw is decided into packet_: its commands go to the packet until it is handed to record, and a
+    // draw left out on the way leaves them (barriers already tracked) to record all the same
+    struct DecideScope {
+        D3D12Backend& b;
+        bool top;
+        explicit DecideScope(D3D12Backend& be) : b(be), top(be.draw_depth_++ == 0) {
+            if (top) b.deciding_ = true, b.packet_->draw = false;
+        }
+        ~DecideScope() {
+            b.draw_depth_--;
+            if (top) b.EndDecide();
+        }
+    } decide_scope{*this};
+    if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
+        g_perf.face_skips++;
+        return;
+    }
     if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
         Clear(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
         return;
     }
     PerfScope perf_draw{g_perf.draw};
+    auto perf_pre = PerfNow();
+    PerfClock::time_point perf_post{};
+    struct PostTime {  // from the draw's geometry to its return (the extension's EndDraw)
+        PerfClock::time_point& t;
+        ~PostTime() {
+            if (t != PerfClock::time_point{}) g_perf.post += PerfMs(t);
+        }
+    } post_time{perf_post};
     g_perf.draws++;
     if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
     // XBE_CAPTURE_DRAWS=vs:...: the target once before the first draw with that shader, before this draw binds anything
@@ -2548,6 +3390,23 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
             bound_rt_ = bound_ds_ = nullptr;  // the save may have drawn: the targets are bound again
         }
     }
+    // XBE_SKIP_TARGET=data (hex, experiment): draws into that target are left out
+    static const uint32_t skip_target = [] {
+        const char* e = std::getenv("XBE_SKIP_TARGET");
+        uint32_t v = e && *e ? uint32_t(std::strtoul(e, nullptr, 16)) & 0x0FFFFFFF : 0;
+        if (v) LOGR("d3d12: XBE_SKIP_TARGET leaves out draws into target %08X", v);
+        return v;
+    }();
+    if (skip_target && s.rt.data && (s.rt.data & 0x0FFFFFFF) == skip_target) return;
+    // XBE_SPLIT_DRAWS=N (experiment): the list is sent, and the GPU finishes it, every N draws
+    static const uint32_t split = [] {
+        const char* e = std::getenv("XBE_SPLIT_DRAWS");
+        uint32_t v = e ? uint32_t(std::strtoul(e, nullptr, 10)) : 0;
+        if (v) LOGR("d3d12: XBE_SPLIT_DRAWS=%u, a command list holds at most that many draws", v);
+        return v;
+    }();
+    if (split && list_draws_ >= split) Flush();
+    MakeDescriptorRoom();
     if (DepthCopy(s)) return;
     if (diag::SkippedDraw(s.vs_handle)) {
         static bool said = false;
@@ -2560,12 +3419,22 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (adjust.skip) return;
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
-    Assembled& a = asm_;
-    if (!AssembleDraw(s, prim, start, count, indices, a)) return;
+    g_perf.pre += PerfMs(perf_pre);
+    // with record on its own thread a draw assembled here goes with its packet (asm_ is the next draw's)
+    Assembled& scratch = record_thread_ ? packet_->own : asm_;
+    if (!pre_ && !AssembleDraw(s, prim, start, count, indices, scratch)) return;
+    if (pre_ && !pre_ok_) return;
+    const Assembled& a = pre_ ? *pre_ : scratch;
+    if (pre_) {
+        g_perf.verts += a.vertex_count;
+        g_perf.raw += a.vertices.empty();
+    }
     // past the ring every upload is a buffer of its own: seconds lost on a frame that draws a whole level once
-    if (CurrentFrame().used > kUploadSize - kUploadReserve) Submit(true);
+    if (RingUsed() > kUploadSize - kUploadReserve) Submit(true);
+    auto perf_bt = PerfNow();
     if (!BindTargets(s)) return;
     if (ext_ && ext_->Bound(*this, s, bound_rt_, bound_ds_, a.pretransformed) && !BindTargets(s)) return;
+    g_perf.bind_targets += PerfMs(perf_bt);
 
     // vertex shader
     auto perf_shaders = PerfNow();
@@ -2573,14 +3442,32 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (sh.prog) EnsureProgramHash(s);
     sh.vkey = VertexKey(s, a, sh);
     EnsureVertexShader(s, a, sh);
+    // XBE_SKIP_VS=hash,hash (hex, experiment): draws with those vertex shaders (the pipeline log's vs) left out
+    static const std::vector<uint64_t> skip_vs = [] {
+        std::vector<uint64_t> v;
+        if (const char* e = std::getenv("XBE_SKIP_VS"))
+            for (const char* p = e; *p;) {
+                char* end;
+                uint64_t h = std::strtoull(p, &end, 16);
+                if (end == p) break;
+                v.push_back(h);
+                p = *end ? end + 1 : end;
+            }
+        if (!v.empty()) LOGR("d3d12: XBE_SKIP_VS: %zu vertex shaders left out", v.size());
+        return v;
+    }();
+    if (!skip_vs.empty() && std::find(skip_vs.begin(), skip_vs.end(), sh.vh) != skip_vs.end()) return;
 
     g_perf.t_shaders += PerfMs(perf_shaders);
     // stage textures, then the pixel shader made for them
-    DrawTextures stages;
+    // decide writes the packet's parts in place: the constants alone are 2.8 KB a draw
+    DrawTextures& stages = packet_->stages;
+    stages = DrawTextures{};
     draw_2d_ = a.pretransformed || ScreenDraw(s);
     if (!BindStageTexturesAndTargets(s, stages)) return;
     perf_shaders = PerfNow();
-    PixelKey pk = MakePixelKey(s, stages.info);
+    PixelKey& pk = packet_->pk;
+    pk = MakePixelKey(s, stages.info);
     const diag::DrawTest& test = diag::DrawTests();
     bool tested = test.vs && s.vs_handle == test.vs;
     if (tested && test.alphakill) pk.alphakill = 0;
@@ -2620,7 +3507,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (tested) { static bool said = false; if (!said) { said = true; LOGR("d3d12: XBE_DRAW_TEST on for vertex shader %08X", test.vs); } }
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
-    if (ds_cache_.pso != pso) cl_->SetPipelineState(ds_cache_.pso = pso);
+    packet_->pso = pso;  // set by record, against its cache
     g_perf.pso += PerfMs(perf_pso);
 
     // constants
@@ -2628,7 +3515,8 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     GuestExtent size;
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     size = DrawnExtent(s, size);
-    DrawConstants c{};
+    DrawConstants& c = packet_->c;
+    c = DrawConstants{};
     std::memcpy(c.wdepth, wdepth, sizeof(wdepth));
     c.hud[0] = HudSqueeze(s, a);
     c.hud[2] = DepthTested(s) ? 1.0f : 0.0f;
@@ -2644,6 +3532,87 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
     SqueezeBeyond(s, c.hud);
+    Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud);
+    g_perf.consts += PerfMs(perf_consts);
+    // the rest is record's (docs/render-parallel.md): constants, views and samplers, viewport, geometry, the note
+    DrawPacket& p = *packet_;
+    p.s = &s;
+    p.a = &a;
+    p.prim = prim;
+    p.count = count;
+    p.sh = sh;
+    p.k = k;
+    p.size = size;
+    p.point_scale = PointScale();
+    const Target* vt = bound_rt_ ? bound_rt_ : bound_ds_;
+    p.vp_w = vt->w, p.vp_h = vt->h, p.vp_gh = vt->gh;
+    p.stage0 = stage0_;
+    p.draw = true;
+    // visibility tested draws (queries write the list) and captures are recorded here, once record has drained
+    p.spp = SamplesPerPixel();
+    if (record_thread_ && !cap_) return;  // handed over at the end of decide
+    if (record_thread_) DrainRecord(4);
+    deciding_ = false;  // decided: record writes rec_ itself
+    Record(p, perf_post);
+    p.draw = false;
+}
+
+// the next draw's record half on the record thread, with its state as it was for that draw
+void D3D12Backend::RecordNext(const State& s) {
+    DrawPacket& p = *packets_[packets_done_.load(std::memory_order_relaxed) % kPackets];
+    if (p.draw) {
+        p.s = &s;
+        PerfClock::time_point post{};
+        Record(p, post);
+    } else {
+        rec_.Append(p.pre);
+    }
+    // record writes its commands into the list itself (the render thread writes it only once record has drained),
+    // a run at a time
+    if (rec_.Draws() >= 64) FlushRec();
+    packets_done_.fetch_add(1, std::memory_order_release);
+}
+
+// decide's packet to record (one for each top level draw, a left out one too: record takes them in order with the
+// title's draws), and the next free packet
+void D3D12Backend::HandOver() {
+    packets_made_++;
+    DrawPacket* next = packets_[packets_made_ % kPackets].get();
+    // a full ring: record has kPackets to do. Drain hands record the draws decided so far (a batch's are handed only
+    // at its end or a fence) and waits; spinning here would wait for draws record has not been given
+    if (packets_made_ - packets_done_.load(std::memory_order_acquire) >= kPackets) DrainRecord(3);
+    packet_ = next;
+}
+
+// the end of a top level draw's decide: inline, a draw left out leaves its commands to rec_ (record took them
+// already otherwise)
+void D3D12Backend::EndDecide() {
+    deciding_ = false;
+    if (record_thread_) return HandOver();
+    rec_.Append(packet_->pre);
+}
+
+// A draw's record half, from what its decide half (Draw) settled. Today on the same thread, at once. It reads the
+// state and the draw's packet; what it still reads of decide's members (the bound targets in PointScale and
+// SetViewportScissor, stage0_ for the note, the upload ring and descriptor slots shared with binding) moves into the
+// packet or is split before record runs on a thread of its own
+void D3D12Backend::Record(DrawPacket& p, PerfClock::time_point& perf_post) {
+    const State& s = *p.s;
+    const Assembled& a = *p.a;
+    const uint32_t prim = p.prim, count = p.count;
+    const DrawShaders& sh = p.sh;
+    const PsoKey& k = p.k;
+    DrawTextures& stages = p.stages;
+    const GuestExtent size = p.size;
+    DrawConstants& c = p.c;
+    const PixelKey& pk = p.pk;
+    (void)prim;
+    rec_.Append(p.pre);  // decide's commands first
+    if (ds_cache_.pso != p.pso) rec_.Pso(ds_cache_.pso = p.pso);
+    rec_point_scale_ = p.point_scale;
+    rec_spp_ = p.spp;
+    rec_vp_w_ = p.vp_w, rec_vp_h_ = p.vp_h, rec_vp_gh_ = p.vp_gh;
+    auto perf_consts = PerfNow();
     UploadConstants(s, sh, k, stages, size, c);
     g_perf.consts += PerfMs(perf_consts);
 
@@ -2664,10 +3633,115 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 
     // geometry, counted while the title runs a visibility test
     perf_step = PerfNow();
+    // XBE_SKIP_STRIDES=28,32 (experiment): draws whose first vertex buffer has one of these strides are left out
+    static const std::vector<uint32_t> skip_strides = [] {
+        std::vector<uint32_t> v;
+        const char* e = std::getenv("XBE_SKIP_STRIDES");
+        if (e && std::strncmp(e, "all", 3) == 0) {
+            LOGR("d3d12: XBE_SKIP_STRIDES=all leaves out every draw");
+            return std::vector<uint32_t>{~0u};
+        }
+        if (e)
+            for (const char* p = e; *p;) {
+                char* end;
+                unsigned long n = std::strtoul(p, &end, 10);
+                if (end == p) break;
+                v.push_back(uint32_t(n));
+                p = *end ? end + 1 : end;
+            }
+        if (!v.empty()) LOGR("d3d12: XBE_SKIP_STRIDES leaves out draws of %zu vertex strides", v.size());
+        return v;
+    }();
+    // XBE_SKIP_AFTER=seconds: the strides are left out only from that long after the start (the menus drawn whole);
+    // XBE_SKIP_AFTER=f8 from the first press of F8
+    static const bool skip_on_f8 = [] {
+        const char* e = std::getenv("XBE_SKIP_AFTER");
+        return e && (e[0] == 'f' || e[0] == 'F') && e[1] == '8';
+    }();
+    static const auto skip_time = [] {
+        const char* e = std::getenv("XBE_SKIP_AFTER");
+        return std::chrono::steady_clock::now() + std::chrono::seconds(e ? std::atoi(e) : 0);
+    }();
+    const bool skipping = skip_on_f8 ? diag::g_f8_pressed.load(std::memory_order_relaxed)
+                                     : std::chrono::steady_clock::now() >= skip_time;
+    if (!skip_strides.empty() && skipping &&
+        (skip_strides[0] == ~0u || (a.buffer_count && std::find(skip_strides.begin(), skip_strides.end(),
+                                                                a.buffers[0].stride) != skip_strides.end())))
+        return;
+    // XBE_DRAW_RANGE=a-b (experiment, with XBE_SKIP_AFTER): only each list's draws a to b-1 (counted before any left
+    // out) are drawn
+    static const std::pair<uint32_t, uint32_t> range = [] {
+        uint32_t lo = 0, hi = ~0u;
+        if (const char* e = std::getenv("XBE_DRAW_RANGE")) {
+            char* end;
+            lo = uint32_t(std::strtoul(e, &end, 10));
+            if (*end == '-') hi = uint32_t(std::strtoul(end + 1, nullptr, 10));
+            LOGR("d3d12: XBE_DRAW_RANGE: only draws %u to %u of each list", lo, hi);
+        }
+        return std::make_pair(lo, hi);
+    }();
+    uint32_t seen = list_seen_++;
+    if ((seen < range.first || seen >= range.second) && skipping) return;
+    // XBE_SKIP_PS=handle,handle (hex, experiment): draws with those pixel shaders left out
+    static const std::vector<uint64_t> skip_ps = [] {
+        std::vector<uint64_t> v;
+        if (const char* e = std::getenv("XBE_SKIP_PS"))
+            for (const char* p = e; *p;) {
+                char* end;
+                uint64_t h = std::strtoull(p, &end, 16);
+                if (end == p) break;
+                v.push_back(h);
+                p = *end ? end + 1 : end;
+            }
+        if (!v.empty()) LOGR("d3d12: XBE_SKIP_PS: %zu pixel shaders left out", v.size());
+        return v;
+    }();
+    if (!skip_ps.empty() && s.ps && std::find(skip_ps.begin(), skip_ps.end(), s.ps->handle) != skip_ps.end()) return;
+    if (nvmark::set) rec_.Mark((lists_ << 20) | (list_draws_ & 0xFFFFF));
     uint32_t query = BeginCountedDraw(s);
+    DrawNote& note = draw_notes_[draw_note_++ % draw_notes_.size()];
+    note = {lists_, list_draws_++, uint32_t(PrimitiveTopology(a)), a.index_count ? a.index_count : a.draw_count,
+            a.index_count != 0, uint32_t(a.base_vertex), mem::VirtualFromPhysical(s.rt.data), s.textures[0],
+            s.textures[1], s.vs ? s.vs->handle : 0, s.ps ? s.ps->handle : 0};
+    note.tw = p.stage0.tw, note.th = p.stage0.th, note.tl = p.stage0.tl, note.tf = p.stage0.tf, note.tu = p.stage0.tu;
+    note.tmade = p.stage0.tmade, note.sd = rec_sd_;
+    note.counted = s.simple[kMCountEnable >> 2] != 0;
+    note.buffers = a.buffer_count;
+    if (a.buffer_count) {
+        note.bytes = a.buffers[0].bytes;
+        note.stride = a.buffers[0].stride;
+        if (a.buffers[0].src && a.buffers[0].bytes >= 16) std::memcpy(note.v0, a.buffers[0].src, 16);
+    }
+    // the index range Assemble found (the title's own indices), else a rebuilt list's: its vertices from 0
+    if (a.index_count && a.index_src) {
+        bool own = a.index16;
+        note.lo = own ? a.index_first + uint32_t(a.base_vertex) : 0;
+        note.hi = own ? a.index_last + uint32_t(a.base_vertex) : a.vertex_count - 1;
+    }
+    list_notes_.push_back(note);
+    // kept in release builds: the first two draws of each vertex shader, their geometry and input layout
+    {
+        static std::unordered_map<uint64_t, int> told;
+        if (told[sh.vh]++ < 2) {
+            std::string el, bufs;
+            for (uint32_t r = 0; r < 16; r++)
+                if ((k.regs >> r) & 1)
+                    el += " " + std::to_string(r) + ":" + std::to_string(k.elements[r] & 0xFF) + "/" +
+                          std::to_string((k.elements[r] >> 8) & 0xFF) + "+" + std::to_string(k.elements[r] >> 16);
+            for (uint32_t b = 0; b < a.buffer_count; b++)
+                bufs += " " + std::to_string(a.buffers[b].bytes) + "B/" + std::to_string(a.buffers[b].stride);
+            LOGR("d3d12: vertex shader %016llX draw at present %llu: topology %u, %u %s from %d, indices %u..%u, "
+                 "%u vertices assembled, buffers%s; inputs (register:DXGI/buffer+offset)%s", (unsigned long long)sh.vh,
+                 (unsigned long long)presents_, note.topo, note.count, note.indexed ? "indices" : "vertices",
+                 int(note.base), note.lo, note.hi, a.vertex_count, bufs.c_str(), el.c_str());
+        }
+    }
+    g_perf.notes += PerfMs(perf_step);  // the skip checks, the draw's note, the shader log
+    perf_step = PerfNow();
     DrawGeometry(a);
     EndCountedDraw(query);
     g_perf.geometry += PerfMs(perf_step);
+    perf_post = PerfNow();
     // XBE_CAPTURE_DRAWS: the target after each draw in the range (cap_i_ moved on past this draw's number)
     if (cap_ && draw_rt_) {
         diag::DrawRange r = diag::CaptureDraws();
@@ -2722,7 +3796,7 @@ float4 ps(float4 p : SV_Position) : SV_Target { return colour; }
     std::memcpy(cb.cpu, col, 4 * sizeof(float));
     for (const D3D12_RECT& r : rs) {
         if (r.right <= r.left || r.bottom <= r.top) continue;
-        cl_->RSSetScissorRects(1, &r);
+        CLAt(__func__)->RSSetScissorRects(1, &r);
         DrawFullScreen(pso.Get(), cb.gpu, slot);
     }
 }
@@ -2743,12 +3817,13 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CLEAR_FLAGS cf = D3D12_CLEAR_FLAGS(((c.flags & kClearZ) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                                                  ((c.flags & kClearStencil) ? D3D12_CLEAR_FLAG_STENCIL : 0));
-        cl_->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f),
-                                   UINT8(c.stencil), UINT(rs.size()), rs.data());
+        // recorded (with the pipeline, record writes them after the draws before)
+        DRec().ClearDsv(Cpu(dsv_heap_.Get(), t.view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f), UINT8(c.stencil),
+                        UINT(rs.size()), rs.data());
         if (t.ms) {
             Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            cl_->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f),
-                                       UINT8(c.stencil), UINT(rs.size()), rs.data());
+            DRec().ClearDsv(Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_), cf, std::clamp(c.z, 0.0f, 1.0f),
+                            UINT8(c.stencil), UINT(rs.size()), rs.data());
         }
     } else {
         // pixels the CPU wrote before this clear go in first, a later upload would paint over the clear
@@ -2760,10 +3835,10 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         if ((c.flags & kClearTarget) != kClearTarget) {
             ClearChannels(t, rs, c.flags, col);
         } else {
-            cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
+            DRec().ClearRtv(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
             if (t.ms) {
                 Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
+                DRec().ClearRtv(Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_), col, UINT(rs.size()), rs.data());
             }
         }
     }
@@ -2773,6 +3848,23 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
 
 void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    // decided like a draw: its barriers and clears go into a packet record writes in order (one packet for each top
+    // level clear; a clear in a draw's place, State::blank_format, goes with that draw's)
+    struct DecideScope {
+        D3D12Backend& b;
+        bool top;
+        explicit DecideScope(D3D12Backend& be) : b(be), top(be.draw_depth_++ == 0) {
+            if (top) b.deciding_ = true, b.packet_->draw = false;
+        }
+        ~DecideScope() {
+            b.draw_depth_--;
+            if (top) b.EndDecide();
+        }
+    } decide_scope{*this};
+    if (FaceResting(s.rt.data)) {  // a cube face keeping its last picture this frame
+        g_perf.face_skips++;
+        return;
+    }
     PerfScope perf_clear{g_perf.clear};
     if (cap_) {
         CapStep(s.rt, s.zs);
@@ -2799,7 +3891,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
     Transition(src_res, src_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     Transition(dst_t.res.Get(), dst_t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), dst_t.view, rtv_inc_);
-    cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     float src_scale = float(src_t.w) / src_t.gw;
     float dst_scale = float(dst_t.w) / dst_t.gw;
     float dst_scale_y = float(dst_t.h) / dst_t.gh;
@@ -2818,8 +3910,8 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         D3D12_RECT scissor{LONG(vp.TopLeftX), LONG(vp.TopLeftY), right, bottom};
         if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) continue;
         ForgetDrawState();
-        cl_->RSSetViewports(1, &vp);
-        cl_->RSSetScissorRects(1, &scissor);
+        CLAt(__func__)->RSSetViewports(1, &vp);
+        CLAt(__func__)->RSSetScissorRects(1, &scissor);
         float uv[4] = {r.x0 / src_t.gw, r.y0 / src_t.gh, (r.x1 - r.x0) / src_t.gw, (r.y1 - r.y0) / src_t.gh};
         uint32_t taps = uint32_t(std::ceil(std::max(src_scale / dst_scale, 1.0f) - kTapsSlack));
         float mul = 1 / dst_t.range;
@@ -2864,7 +3956,7 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
         if (b.right <= b.left || b.bottom <= b.top || dx >= dst_t.w || dy >= dst_t.h) continue;
         b.right = std::min<UINT>(b.right, b.left + dst_t.w - dx);
         b.bottom = std::min<UINT>(b.bottom, b.top + dst_t.h - dy);
-        cl_->CopyTextureRegion(&dl, dx, dy, 0, &sl, &b);
+        CopyRegion(&dl, dx, dy, &sl, &b);
     }
     dst_t.drawn = true;
     bound_rt_ = bound_ds_ = nullptr;
@@ -2985,12 +4077,16 @@ void D3D12Backend::UploadGammaRamp() {
         identity &= ramp_[kRampRed + i] == i && ramp_[kRampGreen + i] == i && ramp_[kRampBlue + i] == i;
     }
     gamma_ = !identity;
+    static int told = 0;
+    if (told++ < 200)
+        LOGR("d3d12: gamma ramp at present %llu: %s, red %u %u %u", (unsigned long long)presents_,
+             identity ? "identity" : "changed", ramp_[kRampRed + 0], ramp_[kRampRed + 128], ramp_[kRampRed + 255]);
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION dl{lut_.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     sl.PlacedFootprint.Offset = a.off;
     sl.PlacedFootprint.Footprint = {DXGI_FORMAT_B8G8R8A8_UNORM, 256, 1, 1, kRampBytes};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
 }
 
 // a lookup texture of SMAA's, copied in on this frame's list
@@ -3006,7 +4102,7 @@ ComPtr<ID3D12Resource> D3D12Backend::SmaaLookup(DXGI_FORMAT fmt, uint32_t w, uin
     D3D12_TEXTURE_COPY_LOCATION sl{a.res, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     sl.PlacedFootprint.Offset = a.off;
     sl.PlacedFootprint.Footprint = {fmt, w, h, 1, pitch};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CLAt(__func__)->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
     D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
     Transition(tex.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return tex;
@@ -3102,9 +4198,59 @@ void D3D12Backend::BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt) {
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
     D3D12_RECT scissor{0, 0, LONG(bb_w_), LONG(bb_h_)};
     ForgetDrawState();
-    cl_->RSSetViewports(1, &vp);
-    cl_->RSSetScissorRects(1, &scissor);
+    CLAt(__func__)->RSSetViewports(1, &vp);
+    CLAt(__func__)->RSSetScissorRects(1, &scissor);
+    // a title blending its frames (HoldFrame): the last two images mixed, gamma after; every other frame the final pass
+    if (hold_live_ && hold_w_ < 1) {
+        Blit(hold_[hold_last_].Get(), fmt, uv, {.gamma = gamma_, .mul = hold_w_, .mix = hold_[!hold_last_].Get()});
+        return;
+    }
     Blit(frame, fmt, uv, {.gamma = gamma_, .final = true});
+}
+
+// a title blending its frames: the last two images kept, the newest copied when it changes
+void D3D12Backend::HoldFrame(Target& t, const Surface& front) {
+    hold_w_ = front.blend;
+    if (front.blend >= 1) {
+        hold_live_ = false;
+        return;
+    }
+    D3D12_RESOURCE_DESC td = t.res->GetDesc();
+    td.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (!hold_[0] || hold_[0]->GetDesc().Width != td.Width || hold_[0]->GetDesc().Height != td.Height ||
+        hold_[0]->GetDesc().Format != td.Format) {
+        hold_live_ = false;
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        for (int i = 0; i < 2; i++) {
+            if (hold_[i]) Release(std::move(hold_[i]));
+            hold_[i].Reset();
+            hold_state_[i] = D3D12_RESOURCE_STATE_COPY_DEST;
+            if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, hold_state_[i], nullptr,
+                                                     IID_PPV_ARGS(&hold_[i])))) {
+                hold_[0].Reset();
+                hold_w_ = 1;
+                return;
+            }
+            Name(hold_[i].Get(), "blended frame %d (present %llu)", i, (unsigned long long)presents_);
+        }
+    }
+    auto copy = [&](int i) {
+        Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(hold_[i].Get(), hold_state_[i], D3D12_RESOURCE_STATE_COPY_DEST);
+        CLAt(__func__)->CopyResource(hold_[i].Get(), t.res.Get());
+        Transition(hold_[i].Get(), hold_state_[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    };
+    if (!hold_live_) {
+        copy(0);
+        copy(1);
+        hold_live_ = true;
+        static bool told = false;
+        if (!told) LOGR("d3d12: frames blended, %llux%u format %u, weight %.2f", (unsigned long long)td.Width, td.Height, unsigned(td.Format), hold_w_);
+        told = true;
+    } else if (front.blend_new) {
+        hold_last_ = !hold_last_;
+        copy(hold_last_);
+    }
 }
 
 void D3D12Backend::RenderUi() {
@@ -3118,8 +4264,8 @@ void D3D12Backend::RenderUi() {
     if (app::kGame.ui) app::kGame.ui(fps_);
     ImGui::Render();
     ID3D12DescriptorHeap* uh[] = {ui_heap_.Get()};
-    cl_->SetDescriptorHeaps(1, uh);
-    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cl_.Get());
+    CLAt(__func__)->SetDescriptorHeaps(1, uh);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), CLAt(__func__));
 }
 
 void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
@@ -3135,8 +4281,8 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), kRtvCount + bi, rtv_inc_);
     float black[4] = {0, 0, 0, 1};
-    cl_->ClearRenderTargetView(rh, black, 0, nullptr);
-    cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    CLAt(__func__)->ClearRenderTargetView(rh, black, 0, nullptr);
+    CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
     if (frame) BlitFrame(frame, frame_fmt);
     // F12: the frame as shown, before the interface; the read submits, so the target is set again
@@ -3145,7 +4291,7 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
         std::vector<uint8_t> px;
         if (ReadBack(bb_[bi].Get(), bb_w_, bb_h_, px)) app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
         Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+        CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     }
     RenderUi();
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_PRESENT);
@@ -3175,7 +4321,7 @@ void D3D12Backend::ResetFrame() {
         g_perf.wait += PerfMs(perf_wait);
     }
     f.alloc->Reset();
-    f.garbage.clear();
+    DropGarbage(f);
     f.used = 0;
     f.srv = 0;
     ring_gen_++;
@@ -3199,11 +4345,44 @@ void LogPerf() {
     static PerfClock::time_point perf_start = PerfClock::now();
     static uint64_t perf_frames = 0;
     perf_frames++;
+    // each frame's time, for the busy summary's lows: this second's, then kept when the second was busy
+    static PerfClock::time_point frame_was = PerfClock::now();
+    static std::vector<float> second_frames, busy_frames_ms;
+    const double frame_ms = PerfMs(frame_was);
+    second_frames.push_back(float(frame_ms));
+    frame_was = PerfClock::now();
+    // a slow frame in a busy scene (25 ms or more, 300 draws or more): what it did, against the frame before
+    static Perf was{};
+    static uint64_t title_rec_was = 0, title_wait_was = 0;
+    static int slow_told = 0;
+    const uint64_t title_rec = g_perf_capture_ns.load(), title_wait = g_perf_wait_ns.load();
+    {
+        const Perf& p = g_perf;
+        uint64_t draws = p.draws - was.draws;
+        if (frame_ms >= 25 && draws >= 300 && slow_told < 200) {
+            slow_told++;
+            LOGR("perf: slow frame %.1f ms, %llu draws: draw %.2f (bind %.2f, compile %.2f), %llu new textures, %llu new "
+                 "targets, %llu texture uploads (%.2f ms), %llu shaders, %llu pipelines (%.2f ms), %llu GPU waits (%.2f "
+                 "ms), clear %.2f, copy %.2f, sync %.2f, present %.2f (swap %.2f, frame wait %.2f) | title: recording "
+                 "%.2f ms, waiting %.2f ms", frame_ms, (unsigned long long)draws, p.draw - was.draw, p.bind - was.bind,
+                 p.compile - was.compile, (unsigned long long)(p.newtex - was.newtex),
+                 (unsigned long long)(p.targets - was.targets), (unsigned long long)(p.texups - was.texups),
+                 p.texup - was.texup, (unsigned long long)(p.shaders - was.shaders),
+                 (unsigned long long)(p.psos - was.psos), p.pso - was.pso, (unsigned long long)(p.flushes - was.flushes),
+                 p.flush_wait - was.flush_wait, p.clear - was.clear, p.copy - was.copy, p.sync - was.sync,
+                 p.present - was.present, p.swap - was.swap, p.wait - was.wait,
+                 title_rec >= title_rec_was ? (title_rec - title_rec_was) / 1e6 : 0.0,
+                 title_wait >= title_wait_was ? (title_wait - title_wait_was) / 1e6 : 0.0);
+        }
+        was = p;
+        title_rec_was = title_rec;
+        title_wait_was = title_wait;
+    }
     double el = PerfMs(perf_start);
     if (el >= 1000.0) {
         Perf& p = g_perf;
         double n = double(perf_frames);
-        double host = p.draw + p.clear + p.copy + p.present + p.sync;
+        double host = p.draw + p.clear + p.copy + p.present + p.sync + p.settle;
         LOGR("perf: %.1f fps %.2f ms/frame | host %.2f (draw %.2f: assemble %.2f bind %.2f [check %.2f, upload %.2f] "
              "shaders %.2f pso %.2f consts %.2f tables %.2f setup %.2f geometry %.2f "
              "compile %.2f; clear %.2f copy %.2f sync %.2f present %.2f [swap %.2f wait %.2f]) other %.2f",
@@ -3230,14 +4409,340 @@ void LogPerf() {
              (unsigned long long)p.shaders, (unsigned long long)p.psos, (unsigned long long)p.psos_kept, p.reused_vsc / n, p.reused_dc / n, p.reused_tables / n,
              p.stage_last / n, p.stage_memo / n, p.stage_target / n, p.stage_full / n, p.same_samplers / n,
              p.same_views / n, p.t_targets / n);
+        LOGR("perf: stage binds per frame by how found, ms: last %.2f, memo %.2f, target %.2f, full %.2f, empty %.2f",
+             p.t_last / n, p.t_memo / n, p.t_target / n, p.t_full / n, p.t_empty / n);
+        LOGR("perf: full binds per frame, ms: describe and look up %.2f, replacement %.2f, sharpen %.2f, palette %.2f, "
+             "texture entry and check %.2f, stage 0 desc %.2f, view %.2f", p.f_pre / n, p.f_replace / n, p.f_sharpen / n,
+             p.f_palette / n, p.e_find / n + p.e_create / n + p.e_check / n + p.e_cube / n, p.f_desc / n, p.f_view / n);
+        LOGR("perf: texture entry per frame, ms: find %.2f, make %.2f (%.2f made), check and upload %.2f, cube copies %.2f (%.1f)",
+             p.e_find / n, p.e_create / n, p.newtex / n, p.e_check / n, p.e_cube / n, p.e_cubes / n);
+        LOGR("perf: put off vertex copies per frame: %.2f ms between lists, %.1f MB in %.1f runs", p.settle / n,
+             p.deferred / n / 1048576.0, p.settles / n);
+        LOGR("perf: recorded commands per frame: replayed in %.2f ms, %.1f runs of %.1f draws", p.replay / n, p.runs / n,
+             p.runs ? double(p.run_draws) / double(p.runs) : 0.0);
+        LOGR("perf: draw's other steps per frame, ms: before assembly %.2f, targets %.2f, checks and note %.2f, after "
+             "geometry %.2f | consts: vertex constants %.2f, filled %.2f, uploaded %.2f | render thread: state %.2f, "
+             "batches %.2f, waiting for record %.2f (%.1f times; the backend's: %.1f list writes, %.1f submits, %.1f "
+             "state resets, %.1f full rings; the commands': %.1f copies, %.1f presents, %.1f read-backs, %.1f late "
+             "read-backs, %.1f flushes, %.1f others) | record thread: %.2f | resting cube faces: %.0f draws and clears "
+             "left out",
+             p.pre / n,
+             p.bind_targets / n, p.notes / n, p.post / n, p.k_vsc / n, p.k_fill / n, p.k_dc / n,
+             g_perf_state_ns.exchange(0) / n / 1e6, g_perf_batch_ns.exchange(0) / n / 1e6,
+             g_perf_drain_ns.exchange(0) / n / 1e6, g_perf_drains.exchange(0) / n, p.drain_why[0] / n,
+             p.drain_why[1] / n, p.drain_why[2] / n, p.drain_why[3] / n, g_perf_fence_ops[0].exchange(0) / n,
+             g_perf_fence_ops[1].exchange(0) / n, g_perf_fence_ops[2].exchange(0) / n, g_perf_fence_ops[3].exchange(0) / n,
+             g_perf_fence_ops[4].exchange(0) / n, g_perf_fence_ops[5].exchange(0) / n, g_perf_record_ns.exchange(0) / n / 1e6,
+             p.face_skips / n);
+        {
+            const double k = double(g_perf_delays.exchange(0));
+            const double d = g_perf_delay_ns.exchange(0) / 1e6, j = g_perf_delay_jitter_ns.exchange(0) / 1e6;
+            LOGR("perf: title to present: %.2f ms on average, changing %.2f ms from frame to frame", k ? d / k : 0.0,
+                 k > 1 ? j / (k - 1) : 0.0);
+        }
+        LOGR("perf: cube copies per frame, ms: faces found %.2f, resolved %.2f, shrunk %.2f (new shrink textures, all uses: %.2f), copied %.2f",
+             p.c_find / n, p.c_resolve / n, p.c_shrink / n, p.s_make / n, p.c_copy / n);
+        // seconds of a busy scene (500 draws a frame or more: a race, not a menu) summed for comparing runs, every 30
+        static double busy_s = 0, busy_frames = 0, busy_host = 0, busy_draw = 0, busy_draws = 0, busy_min_fps = 1e9;
+        static double pace_jitter = 0, pace_uneven = 0, pace_n = 0;
+        if (p.draws / n >= 500) {
+            busy_s += 1;
+            busy_frames += n;
+            busy_host += host;
+            busy_draw += p.draw;
+            busy_draws += p.draws;
+            busy_min_fps = std::min(busy_min_fps, n * 1000.0 / el);
+            busy_frames_ms.insert(busy_frames_ms.end(), second_frames.begin(), second_frames.end());
+            // pacing, in frame order: how much each frame differs from the one before, and frames well over both
+            // neighbours (a long frame among short ones: felt as a stutter at any average)
+            for (size_t i = 1; i < second_frames.size(); i++) {
+                pace_jitter += std::fabs(second_frames[i] - second_frames[i - 1]);
+                pace_n++;
+                if (i + 1 < second_frames.size() &&
+                    second_frames[i] >= 1.5f * std::max(second_frames[i - 1], second_frames[i + 1]))
+                    pace_uneven++;
+            }
+            if (busy_s >= 30) {
+                // the lows: the frame rate of the slowest 1% and 0.1% of frames (their average frame time)
+                std::vector<float>& f = busy_frames_ms;
+                std::sort(f.begin(), f.end(), std::greater<float>());
+                auto low = [&](double share) {
+                    size_t k = std::max<size_t>(1, size_t(f.size() * share));
+                    double sum = 0;
+                    for (size_t i = 0; i < k && i < f.size(); i++) sum += f[i];
+                    return sum > 0 ? 1000.0 * double(k) / sum : 0.0;
+                };
+                LOGR("perf: busy summary over %.0f s: %.1f fps (lowest second %.1f, 1%% low %.1f, 0.1%% low %.1f, slowest "
+                     "frame %.1f ms), host %.2f ms/frame, %.0f draws/frame, %.2f us/draw | pacing: frame to frame %.2f ms "
+                     "on average, %.1f%% of frames 1.5 times their neighbours' or more", busy_s, busy_frames / busy_s,
+                     busy_min_fps, low(0.01), low(0.001), f.empty() ? 0.0 : double(f[0]), busy_host / busy_frames,
+                     busy_draws / busy_frames, busy_draws ? busy_draw * 1000.0 / busy_draws : 0.0,
+                     pace_n ? pace_jitter / pace_n : 0.0, pace_n ? 100.0 * pace_uneven / pace_n : 0.0);
+                pace_jitter = pace_uneven = pace_n = 0;
+                busy_s = busy_frames = busy_host = busy_draw = busy_draws = 0;
+                busy_min_fps = 1e9;
+                f.clear();
+            }
+        }
+        second_frames.clear();
         g_perf = Perf{};
+        was = Perf{};
+        title_rec_was = title_wait_was = 0;  // exchanged to 0 above
         perf_start = PerfClock::now();
         perf_frames = 0;
     }
 }
 
+// CopyTextureRegion, noted for a lost device's report: the resources by their names, the source's footprint or
+// subresource, the box
+void D3D12Backend::CopyRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, const D3D12_TEXTURE_COPY_LOCATION* src,
+                              const D3D12_BOX* box) {
+    auto where = [](const D3D12_TEXTURE_COPY_LOCATION* l) {
+        char b[160];
+        if (l->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
+            const auto& f = l->PlacedFootprint;
+            snprintf(b, sizeof(b), "%s at %llu, %ux%u format %u pitch %u", NameOf(l->pResource).c_str(),
+                     (unsigned long long)f.Offset, f.Footprint.Width, f.Footprint.Height, unsigned(f.Footprint.Format),
+                     f.Footprint.RowPitch);
+        } else {
+            snprintf(b, sizeof(b), "%s subresource %u", NameOf(l->pResource).c_str(), l->SubresourceIndex);
+        }
+        return std::string(b);
+    };
+    char bx[64] = "";
+    if (box) snprintf(bx, sizeof(bx), ", box %u,%u-%u,%u", box->left, box->top, box->right, box->bottom);
+    list_copies_.push_back({list_draws_, "copy to " + where(dst) + " at " + std::to_string(x) + "," + std::to_string(y) +
+                                             " from " + where(src) + bx});
+    CLAt(__func__)->CopyTextureRegion(dst, x, y, 0, src, box);
+}
+
+// DRED's output, declared here with the Windows SDK's layout (the MinGW headers the Linux check uses lack it):
+// ID3D12DeviceRemovedExtendedData, D3D12_AUTO_BREADCRUMB_NODE, D3D12_DRED_ALLOCATION_NODE, D3D12_DRED_PAGE_FAULT_OUTPUT
+namespace dred {
+constexpr GUID kIid = {0x98931D33, 0x5AE8, 0x4791, {0xAA, 0x3C, 0x1A, 0x73, 0xA2, 0x93, 0x4E, 0x71}};
+constexpr int kDrawInstanced = 3, kDrawIndexedInstanced = 4;  // D3D12_AUTO_BREADCRUMB_OP
+struct Node {
+    const char* list_a;
+    const wchar_t* list_w;
+    const char* queue_a;
+    const wchar_t* queue_w;
+    void* list;
+    void* queue;
+    UINT32 count;
+    const UINT32* last;
+    const int* history;
+    const Node* next;
+};
+struct Breadcrumbs {
+    const Node* head;
+};
+struct Allocation {
+    const char* name_a;
+    const wchar_t* name_w;
+    int type;
+    const Allocation* next;
+};
+struct PageFault {
+    UINT64 va;
+    const Allocation* existing;
+    const Allocation* freed;
+};
+struct Data : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetAutoBreadcrumbsOutput(Breadcrumbs* out) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPageFaultAllocationOutput(PageFault* out) = 0;
+};
+}  // namespace dred
+
+// the device lost (removed or reset): once, its reason, DRED's unfinished command lists (operations and draws
+// done) and page fault, and the last draws recorded, the one the GPU stopped at among them
+void D3D12Backend::ReportRemoved(const char* where) {
+    static bool reported = false;
+    if (reported || !dev_) return;
+    HRESULT reason = dev_->GetDeviceRemovedReason();
+    if (reason == S_OK) return;
+    reported = true;
+    LogDebugMessages();
+    uint64_t marker = nvmark::Report();
+    LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one, "
+         "present %llu", where, unsigned(reason), (unsigned long long)lists_, list_draws_, (unsigned long long)presents_);
+    ComPtr<dred::Data> data;
+    if (FAILED(dev_->QueryInterface(dred::kIid, reinterpret_cast<void**>(data.GetAddressOf())))) {
+        LOGR("d3d12:   no DRED");
+    } else {
+        dred::Breadcrumbs bc{};
+        if (SUCCEEDED(data->GetAutoBreadcrumbsOutput(&bc))) {
+            int nodes = 0;
+            for (const dred::Node* n = bc.head; n && nodes < 6; n = n->next) {
+                uint32_t count = n->count, done = n->last ? *n->last : 0;
+                if (done >= count) continue;
+                nodes++;
+                uint32_t draws = 0;
+                for (uint32_t i = 0; i < done && i < count; i++)
+                    draws += n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
+                std::string ops;
+                for (uint32_t i = done >= 3 ? done - 3 : 0; i < count && i < done + 4; i++)
+                    ops += (i == done ? " [" : " ") + std::to_string(n->history[i]) + (i == done ? "]" : "");
+                uint32_t all = 0;
+                for (uint32_t i = 0; i < count; i++)
+                    all += n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
+                LOGR("d3d12:   unfinished command list: %u of %u operations done, %u of %u draws done; operations:%s",
+                     done, count, draws, all, ops.c_str());
+                // the operations around Aftermath's marker draw (barriers 15, copies 8, clears 14), when there is one
+                if (marker != ~0ull && (marker & 0xFFFFF) < all) {
+                    uint32_t want = uint32_t(marker & 0xFFFFF), seen = 0, i = 0;
+                    for (; i < count; i++) {
+                        bool draw = n->history[i] == dred::kDrawInstanced || n->history[i] == dred::kDrawIndexedInstanced;
+                        if (draw && seen++ == want) break;
+                    }
+                    std::string around;
+                    for (uint32_t j = i >= 12 ? i - 12 : 0; j < count && j <= i + 6; j++)
+                        around += (j == i ? " [" : " ") + std::to_string(n->history[j]) + (j == i ? "]" : "");
+                    LOGR("d3d12:   operations around the marker's draw %u (operation %u):%s", want, i, around.c_str());
+                }
+                // the draws recorded into it (found by its number of draws) around the one it stopped at
+                bool found = false;
+                // DRED counts the settings window's draws too, after the frame's: a list kept with as many or a
+                // few less
+                for (auto v = sent_notes_.rbegin(); all && !found && v != sent_notes_.rend(); ++v) {
+                    if (v->size() > all || all - v->size() > 400 || draws >= v->size()) continue;
+                    found = true;
+                    for (uint32_t i = draws >= 4 ? draws - 4 : 0; i < v->size() && i <= draws + 4; i++)
+                        LogDrawNote((*v)[i], i == draws ? "  <- stopped here" : "");
+                    // the copies recorded just before the stop (the GPU's copies come before the draw they precede)
+                    const auto& copies = sent_copies_[size_t(sent_notes_.rend() - v - 1)];
+                    int shown_copies = 0;
+                    for (const CopyNote& c : copies)
+                        if (c.before + 2 >= draws && c.before <= draws + 1 && shown_copies++ < 12)
+                            LOGR("d3d12:   before draw %u: %s", c.before, c.text.c_str());
+                    // the GPU works on many draws at once: the stopped one may wait on a later one. Those after it
+                    // that stand out (another target, big, another primitive), and the targets they draw to
+                    std::unordered_map<uint32_t, uint32_t> per_target;
+                    int shown = 0;
+                    const DrawNote& at = (*v)[draws];
+                    for (uint32_t i = draws + 5; i < v->size() && i < draws + 1500; i++) {
+                        const DrawNote& d = (*v)[i];
+                        per_target[d.rt]++;
+                        bool odd = d.rt != at.rt || d.count >= 300 || (d.topo != 4 && d.topo != 5) ||
+                                   (d.indexed && d.hi - d.lo >= 0x10000);
+                        if (odd && shown++ < 30) LogDrawNote(d, "  (after)");
+                    }
+                    // visibility tests: how many in the list, the nearest to the stop
+                    uint32_t counted = 0, before = ~0u, after = ~0u;
+                    for (uint32_t i = 0; i < v->size(); i++) {
+                        if (!(*v)[i].counted) continue;
+                        counted++;
+                        if (i < draws) before = i;
+                        else if (after == ~0u) after = i;
+                    }
+                    LOGR("d3d12:   visibility-tested draws in the list: %u; the last before the stop %d, the first from it %d",
+                         counted, before == ~0u ? -1 : int(before), after == ~0u ? -1 : int(after));
+                    std::string tg;
+                    for (auto& [rt, n] : per_target) tg += " " + std::to_string(n) + "x" + std::to_string(rt);
+                    LOGR("d3d12:   the 1500 draws after it by target (data, decimal):%s", tg.c_str());
+                }
+                if (all && !found) {
+                    std::string sizes;
+                    for (const auto& v : sent_notes_) sizes += " " + std::to_string(v.size());
+                    LOGR("d3d12:   (no list of about %u draws kept; kept:%s)", all, sizes.c_str());
+                }
+            }
+            if (!nodes) LOGR("d3d12:   DRED: every command list finished");
+        }
+        dred::PageFault pf{};
+        if (SUCCEEDED(data->GetPageFaultAllocationOutput(&pf)) && pf.va) {
+            LOGR("d3d12:   page fault at %016llX", (unsigned long long)pf.va);
+            int k = 0;
+            for (const dred::Allocation* a = pf.existing; a && k < 6; a = a->next, k++)
+                LOGR("d3d12:     there: %s (type %d)", a->name_a ? a->name_a : "unnamed", a->type);
+            k = 0;
+            for (const dred::Allocation* a = pf.freed; a && k < 6; a = a->next, k++)
+                LOGR("d3d12:     freed just before: %s (type %d)", a->name_a ? a->name_a : "unnamed", a->type);
+        }
+    }
+    // the draws around the one Aftermath's marker says the GPU's front end had reached, and the copies before them
+    if (marker != ~0ull && (marker & 0xFFFFF) != 0xFFFFF) {
+        uint64_t list = marker >> 20;
+        uint32_t at = uint32_t(marker & 0xFFFFF);
+        bool found = false;
+        for (size_t k = 0; k < sent_notes_.size() && !found; k++) {
+            const auto& v = sent_notes_[k];
+            if (v.empty() || v[0].list != list) continue;
+            found = true;
+            LOGR("d3d12:   the draws around Aftermath's marker (list %llu draw %u):", (unsigned long long)list, at);
+            for (uint32_t i = at >= 10 ? at - 10 : 0; i < v.size() && i <= at + 10; i++)
+                LogDrawNote(v[i], i == at ? "  <- the marker" : "");
+            for (const CopyNote& c : sent_copies_[k])
+                if (c.before + 10 >= at && c.before <= at + 1) LOGR("d3d12:   before draw %u: %s", c.before, c.text.c_str());
+        }
+        if (!found) LOGR("d3d12:   (list %llu of the marker not kept)", (unsigned long long)list);
+    }
+    uint32_t total = std::min<uint32_t>(draw_note_, uint32_t(draw_notes_.size()));
+    LOGR("d3d12:   the last draws recorded:");
+    for (uint32_t i = total > 12 ? total - 12 : 0; i < total; i++)
+        LogDrawNote(draw_notes_[(draw_note_ - total + i) % draw_notes_.size()], "");
+}
+
+void D3D12Backend::LogDrawNote(const DrawNote& d, const char* mark) {
+    // a texture's format and size words, from its guest header
+    auto tex = [](uint32_t t) {
+        char b[48];
+        if (!t) return std::string("none");
+        snprintf(b, sizeof(b), "%08X (format %08X size %08X)", t, kernel::R32(t + 12), kernel::R32(t + 16));
+        return std::string(b);
+    };
+    LOGR("d3d12:   draw %llu.%u: topology %u, %u %s from %d, target %08X, textures %s %s, vs %08llX ps %08llX, "
+         "%u buffers, the first %u bytes stride %u starting %g %g %g %g, indices %u..%u%s%s",
+         (unsigned long long)d.list, d.n, d.topo, d.count, d.indexed ? "indices" : "vertices", int(d.base), d.rt,
+         tex(d.t0).c_str(), tex(d.t1).c_str(), (unsigned long long)d.vs, (unsigned long long)d.ps, d.buffers, d.bytes,
+         d.stride, d.v0[0], d.v0[1], d.v0[2], d.v0[3], d.lo, d.hi, d.counted ? ", visibility-tested" : "", mark);
+    const D3D12_SAMPLER_DESC& sd = d.sd;
+    LOGR("d3d12:     stage 0: %ux%u, %u levels, DXGI format %u, made at present %llu, %u uploads; sampler filter %X "
+         "anisotropy %u address %u %u %u, bias %g, LOD %g..%g, compare %u", d.tw, d.th, d.tl, d.tf,
+         (unsigned long long)d.tmade, d.tu, unsigned(sd.Filter), sd.MaxAnisotropy, unsigned(sd.AddressU),
+         unsigned(sd.AddressV), unsigned(sd.AddressW), sd.MipLODBias, sd.MinLOD, sd.MaxLOD, unsigned(sd.ComparisonFunc));
+}
+
+// the debug layer's messages since the last call: each kind three times, 400 in all
+void D3D12Backend::LogDebugMessages() {
+    if (!info_) return;
+    static std::unordered_map<int, int> seen;
+    static int total = 0;
+    static const char* const kSeverity[] = {"corruption", "error", "warning", "info", "message"};
+    UINT64 n = info_->GetNumStoredMessages();
+    for (UINT64 i = 0; i < n && total < 400; i++) {
+        SIZE_T size = 0;
+        if (FAILED(info_->GetMessage(i, nullptr, &size)) || !size) continue;
+        std::vector<uint8_t> buf(size);
+        auto* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (FAILED(info_->GetMessage(i, m, &size))) continue;
+        if (m->Severity >= D3D12_MESSAGE_SEVERITY_INFO || seen[int(m->ID)]++ >= 3) continue;
+        total++;
+        LOGR("d3d12 debug: %s %d (present %llu): %.*s", kSeverity[std::min<int>(int(m->Severity), 4)], int(m->ID),
+             (unsigned long long)presents_, int(m->DescriptionByteLength), m->pDescription);
+    }
+    info_->ClearStoredMessages();
+}
+
+void D3D12Backend::NoteDrain(const char* fn) { drain_fns_[fn]++; }
+
 void D3D12Backend::Present(const Surface& front) {
+    LogDebugMessages();
+    // XBE_PERF with the record thread: which functions wrote the list directly (each drained record), every 600 frames
+    if (drain_ && diag::Perf() && presents_ % 600 == 599 && !drain_fns_.empty()) {
+        std::vector<std::pair<uint64_t, const char*>> v;
+        for (auto& [f, c] : drain_fns_) v.push_back({c, f});
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        std::string line;
+        for (size_t i = 0; i < v.size() && i < 8; i++) {
+            char b[96];
+            snprintf(b, sizeof b, " %s %.1f", v[i].second, v[i].first / 600.0);
+            line += b;
+        }
+        LOGR("perf: list writes that drained record, a frame, by function:%s", line.c_str());
+        drain_fns_.clear();
+    }
     PerfScope perf_present{g_perf.present};
+    PlanCubeFaces();
     // a file named capture beside the exe asks for a capture as F3 does, checked every 30 frames
     if (presents_ % 30 == 0 && !diag::CaptureDir().empty()) {
         std::error_code ec;
@@ -3256,9 +4761,29 @@ void D3D12Backend::Present(const Surface& front) {
         StartCapture();
     }
     ResizeSwap();
+    // a front buffer nothing drew into shows what guest memory holds: logged with the targets made at its data (a
+    // title describing its frame buffers twice, at other sizes, would show its picture stand still)
+    if (front.header && !FindTarget(front, false)) {
+        static std::unordered_set<uint64_t> told;
+        uint32_t fw = 0, fh = 0, data = mem::VirtualFromPhysical(front.data);
+        SurfaceSize(front, fw, fh);
+        if (told.size() < 16 && told.insert(uint64_t(front.header) << 32 | data).second) {
+            std::string at;
+            for (auto& [key, tg] : targets_)
+                if (tg.data == data) at += " " + std::to_string(tg.gw) + "x" + std::to_string(tg.gh) + (tg.depth ? " depth" : "");
+            LOGR("d3d12: presenting %08X (data %08X, %ux%u) at present %llu, no target drew it; targets at its data:%s",
+                 front.header, data, fw, fh, (unsigned long long)presents_, at.empty() ? " none" : at.c_str());
+        }
+    }
     Target* t = EnsureTarget(front, false);
-    if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
+    if (t && LatchCpuWrite(*t)) {
+        if (++reloads_[t->data | 1] <= 3)  // counted apart from the reloads before a draw
+            LOGR("d3d12: presented %08X %ux%u reloaded from guest memory (present %llu)", t->data, t->gw, t->gh,
+                 (unsigned long long)presents_);
+        UploadTarget(*t, front);
+    }
     if (t) Resolve(*t);
+    if (t) HoldFrame(*t, front);
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
@@ -3269,11 +4794,29 @@ void D3D12Backend::Present(const Surface& front) {
     bool vsync = app::Get().vsync;
     auto perf_swap = PerfNow();
     if (vsync && tearing_ && PresentUnsynced()) vsync = false;
-    swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (FAILED(swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)))
+        ReportRemoved("presenting");
     g_perf.swap += PerfMs(perf_swap);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
 
     presents_++;
+    // every 5 seconds, kept in release builds: video memory and what the renderer holds (a build-up before a hang)
+    static auto next_mem = std::chrono::steady_clock::now();
+    if (auto now = std::chrono::steady_clock::now(); now >= next_mem) {
+        next_mem = now + std::chrono::seconds(5);
+        DXGI_QUERY_VIDEO_MEMORY_INFO vm{}, sys{};
+        if (adapter3_) {
+            adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm);
+            adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &sys);
+        }
+        size_t garbage = 0;
+        for (const Frame& f : frames_) garbage += f.garbage.size();
+        LOGR("d3d12: memory at present %llu: video %llu of %llu MB, shared %llu MB; %zu textures, %zu targets, %zu "
+             "pipelines, %zu waiting release, %llu released in all, %llu lists", (unsigned long long)presents_,
+             (unsigned long long)(vm.CurrentUsage >> 20), (unsigned long long)(vm.Budget >> 20),
+             (unsigned long long)(sys.CurrentUsage >> 20), textures_.size(), targets_.size(), psos_.size(), garbage,
+             (unsigned long long)released_, (unsigned long long)lists_);
+    }
     presents_seen_.store(presents_);
     frame_++;
     ReleaseOldTextures();
@@ -3365,6 +4908,10 @@ void D3D12Backend::RescaleTargets() {
             ReleaseTarget(it++);
             continue;
         }
+        {
+            Name(t.res.Get(), "colour target %08X %ux%u, rescaled (present %llu)", t.data, t.gw, t.gh,
+                 (unsigned long long)presents_);
+        }
         t.view = old.view;  // the same descriptor slot, now viewing the new resource
         D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), t.view, rtv_inc_);
         dev_->CreateRenderTargetView(t.res.Get(), nullptr, rh);
@@ -3424,7 +4971,9 @@ bool D3D12Backend::EnsureMs(Target& t) {
         td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         t.ms_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
-    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.ms_state, &cv, IID_PPV_ARGS(&t.ms)))) {
+    if (SUCCEEDED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.ms_state, &cv, IID_PPV_ARGS(&t.ms))))
+        Name(t.ms.Get(), "MSAA twin of %08X %ux%u (present %llu)", t.data, t.gw, t.gh, (unsigned long long)presents_);
+    if (!t.ms) {
         LOG_FIRST(4, "d3d12: MSAA twin of %08X %ux%u could not be made", t.data, t.w, t.h);
         return false;
     }
@@ -3479,12 +5028,12 @@ void D3D12Backend::Settle(Target& t) {
     if (!t.depth) {
         Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RESOLVE_DEST);
-        cl_->ResolveSubresource(t.res.Get(), 0, t.ms.Get(), 0, t.fmt);
+        CLAt(__func__)->ResolveSubresource(t.res.Get(), 0, t.ms.Get(), 0, t.fmt);
     } else if (ID3D12PipelineState* pso = EnsureDepthResolvePipeline()) {
         Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CPU_DESCRIPTOR_HANDLE dh = Cpu(dsv_heap_.Get(), t.view, dsv_inc_);
-        cl_->OMSetRenderTargets(0, nullptr, FALSE, &dh);
+        CLAt(__func__)->OMSetRenderTargets(0, nullptr, FALSE, &dh);
         SetFullViewport(t.w, t.h);
         uint32_t slot = AllocSrvSlots(1);
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -3511,7 +5060,7 @@ void D3D12Backend::Refresh(Target& t) {
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         Transition(t.ms.Get(), t.ms_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CPU_DESCRIPTOR_HANDLE dh = Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_);
-        cl_->OMSetRenderTargets(0, nullptr, FALSE, &dh);
+        CLAt(__func__)->OMSetRenderTargets(0, nullptr, FALSE, &dh);
         SetFullViewport(t.w, t.h);
         uint32_t slot = AllocSrvSlots(1);
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -3558,8 +5107,15 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
-    auto it = targets_.find(TargetMapKey(data, false));
-    if (it == targets_.end() || !it->second.drawn || TargetStale(data)) return;
+    auto it = ColourTargetAt(data);
+    if (it == targets_.end() || !it->second.drawn) return;
+    // long unused: read back only if its memory is as the target last left it (not reused). PGR2 saves its speed camera
+    // photo, a 160x120 target, seconds after drawing it, and it came out grey
+    if (TargetStale(data)) {
+        if (it->second.bytes > kStaleReadMax || MemSig(it->second.data, it->second.bytes) != it->second.sig) return;
+        LOG_FIRST(8, "d3d12: read-back of %08X (%ux%u), unused for a while but its memory unchanged", data, it->second.gw,
+                  it->second.gh);
+    }
     // pixels written back are 32 bit, in rows or Morton order: over a narrower surface they would run past it
     if (!it->second.linear32 && !it->second.swizzled32) {
         LOG_FIRST(8, "d3d12: read-back of %08X skipped, not a 32 bit surface", data);
@@ -3572,6 +5128,8 @@ void D3D12Backend::Sync(uint32_t data, uint32_t) {
                   it->second.w, it->second.h);
     }
     Target& t = it->second;
+    LOG_FIRST(16, "d3d12: read-back of %08X %ux%u into guest memory (present %llu)", data, t.gw, t.gh,
+              (unsigned long long)presents_);
     // src.down, when there is one, stays alive until ReadBack is done
     CopySource src = PrepareCopySource(t, {});
     if (!src.res) return;
@@ -3675,11 +5233,13 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
                                                  nullptr, IID_PPV_ARGS(&l.rb[slot])))) {
             return;
         }
+        Name(l.rb[slot].Get(), "late read-back %u, %llu bytes (present %llu)", slot, (unsigned long long)bytes,
+             (unsigned long long)presents_);
     }
     D3D12_TEXTURE_COPY_LOCATION dl{l.rb[slot].Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     dl.PlacedFootprint = fp;
     D3D12_TEXTURE_COPY_LOCATION sl{src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
     l.row_pitch = fp.Footprint.RowPitch;
     l.fence[slot] = fence_value_ + 1;  // the next Submit carries it
     l.frame[slot] = presents_;
@@ -3687,7 +5247,7 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
 }
 
 void D3D12Backend::RecordLate(uint32_t data) {
-    auto it = targets_.find(TargetMapKey(data, false));
+    auto it = ColourTargetAt(data);
     if (it == targets_.end() || TargetStale(data) || !it->second.linear32) return;
     Target& t = it->second;
     PerfScope perf_sync{g_perf.sync};
@@ -3721,11 +5281,22 @@ ComPtr<ID3D12Resource> D3D12Backend::Shrink(ID3D12Resource* src, D3D12_RESOURCE_
     D3D12_RESOURCE_STATES down_state = o.into ? o.into_state : D3D12_RESOURCE_STATE_RENDER_TARGET;
     g_perf.shrinks++;
     if (free_rtv_.empty()) return nullptr;
+    if (!down) {
+        auto pool = shrink_pool_.find(uint64_t(w) << 32 | h);
+        if (pool != shrink_pool_.end() && !pool->second.empty()) {
+            down = std::move(pool->second.back());
+            pool->second.pop_back();
+            down_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+    }
     if (down) {
         Transition(down.Get(), down_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    } else if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
-                                                    D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&down)))) {
-        return nullptr;
+    } else {
+        PerfScope perf_make{g_perf.s_make};
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+                                                 IID_PPV_ARGS(&down))))
+            return nullptr;
+        Name(down.Get(), "shrunk copy %ux%u (present %llu)", w, h, (unsigned long long)presents_);
     }
     // borrows the next free view without taking it, only for this recording
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), free_rtv_.back(), rtv_inc_);
@@ -3752,11 +5323,13 @@ bool D3D12Backend::ReadBack(ID3D12Resource* res, uint32_t w, uint32_t h, std::ve
     if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                              IID_PPV_ARGS(&rb)))) {
         return false;
+    } else {
+        Name(rb.Get(), "read-back, %llu bytes (present %llu)", (unsigned long long)bytes, (unsigned long long)presents_);
     }
     D3D12_TEXTURE_COPY_LOCATION dl{rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     dl.PlacedFootprint = fp;
     D3D12_TEXTURE_COPY_LOCATION sl{res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-    cl_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
     Flush();
     uint8_t* p = nullptr;
     rb->Map(0, nullptr, reinterpret_cast<void**>(&p));

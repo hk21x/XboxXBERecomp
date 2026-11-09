@@ -205,6 +205,13 @@ float4 psmain(O i) : SV_Target {
     if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
     return float4(c.rgb, opts.y > 0 ? c.a : 1);
 }
+// two finished frames mixed: this one (img) at the weight opts.w over the last (t2), gamma after, as one frame's would be
+Texture2D last : register(t2);
+float4 psmix(O i) : SV_Target {
+    float4 c = lerp(last.SampleLevel(ls, i.uv, 0), img.SampleLevel(ls, i.uv, 0), opts.w);
+    if (opts.x > 0) c.rgb = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
+    return float4(c.rgb, 1);
+}
 // the finished frame, the settings' passes in one (the plain blit without them): opts.y bit 0 for FXAA, bit 1 for the
 // sharp scaling filter, opts.z the sharpening 0 to 1. The filter: Catmull-Rom over source pixels going up; going down, the
 // output pixel's area (four taps, even at a ratio that is not whole) less a little of its neighbours. FXAA: where the luma of a pixel and its four neighbours differs enough to be an edge, the colour is
@@ -405,6 +412,27 @@ uint8_t ShadowDepthKind(uint32_t format) { return format == kFmtD16 || format ==
 // bytes per row of a 32 bit surface in guest memory, rounded to 64
 uint32_t GuestPitch(uint32_t width) { return (width * 4 + 63) & ~63u; }
 
+// a surface signature's hash: Hash in four independent lanes of 16 bytes over each 64, about three times as fast on
+// the surfaces checked every frame (its values are its own: signatures are only compared with earlier ones)
+uint64_t SigHash(const uint8_t* b, size_t n, uint64_t h) {
+    if (n < 256) return Hash(b, n, h);
+    constexpr uint64_t k0 = 0x9E3779B97F4A7C15ull, k1 = 0xE7037ED1A0B428DBull;
+    auto mix = [](uint64_t a, uint64_t c) {
+        unsigned __int128 r = static_cast<unsigned __int128>(a) * c;
+        return uint64_t(r) ^ uint64_t(r >> 64);
+    };
+    uint64_t s[4] = {h ^ k0, h ^ k1, (h + k0) ^ k1, (h + k1) ^ k0};
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64)
+        for (int l = 0; l < 4; l++) {
+            uint64_t x, y;
+            std::memcpy(&x, b + i + l * 16, 8);
+            std::memcpy(&y, b + i + l * 16 + 8, 8);
+            s[l] = mix(x ^ k1, y ^ s[l]);
+        }
+    return Hash(b + i, n - i, Hash(s, sizeof(s), uint64_t(n)));
+}
+
 // a surface's bytes hashed: up to kSigWholeMax whole, a bigger one as evenly spaced samples
 uint64_t SurfaceSig(uint32_t data, uint32_t total) {
     // a size that runs past committed memory (a texture's computed size over a buffer near the end of the host's own
@@ -418,7 +446,7 @@ uint64_t SurfaceSig(uint32_t data, uint32_t total) {
     }
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(data));
     uint64_t sig = Hash(&total, sizeof(total));
-    if (total <= kSigWholeMax) return Hash(p, total, sig);
+    if (total <= kSigWholeMax) return SigHash(p, total, sig);
     for (uint32_t i = 0; i < kSigSamples; i++) {
         const uint8_t* sample = p + uint64_t(total - kSigSampleBytes) * i / (kSigSamples - 1);
         sig = Hash(sample, kSigSampleBytes, sig);
@@ -971,24 +999,25 @@ bool ScreenDraw(const State& s) {
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
 }
 
-Span DrawSpan(const State& s, const Assembled& a, float width) {
-    constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
+// the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
+// cannot be read
+bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
     const VertexBuffer& b = a.buffers[e.buffer];
     const bool converted = !a.vertices.empty();
     uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
-    if (!(a.regs & 1) || !count) return kSpanFrame;
+    if (!(a.regs & 1) || !count) return false;
     if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
                                   e.format != DXGI_FORMAT_R32G32_FLOAT)))
-        return kSpanFrame;
+        return false;
     // the screen x: pretransformed and pass-through programs give it, a matrix program's 2D matrix (OrthoConstants) gives
     // clip x, over the viewport
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
-    if (program && s.vs->screen != 1 && k < 0) return kSpanFrame;
-    float lo = 1e30f, hi = -1e30f, top = 1e30f, bottom = -1e30f;  // top and bottom: screen y, without a matrix
+    if (program && s.vs->screen != 1 && k < 0) return false;
+    lo = 1e30f, hi = -1e30f, top = 1e30f, bottom = -1e30f;
     count = std::min<uint32_t>(count, 4096);
     for (uint32_t i = 0; i < count; i++) {
         float p[4] = {0, 0, 0, 1};
@@ -1009,6 +1038,15 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
         top = std::min(top, p[1]);
         bottom = std::max(bottom, p[1]);
     }
+    return true;
+}
+
+Span DrawSpan(const State& s, const Assembled& a, float width) {
+    constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
+    float lo, hi, top, bottom;
+    if (!ScreenExtent(s, a, lo, hi, top, bottom)) return kSpanFrame;
+    const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+    const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
     if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
@@ -1030,6 +1068,15 @@ void SqueezeBeyond(const State& s, float hud[4]) {
     // x' = c + (x + shift - c) k is a squeeze about c + shift k / (1 - k)
     hud[1] += s.squeeze_shift * k / (1 - k);
     hud[0] = -k;
+}
+
+void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4]) {
+    if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1 || aspect <= s.pillar_aspect + 1e-3f) return;
+    if (s.pillar_format && (!s.textures[0] || (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) != s.pillar_format)) return;
+    // only a picture spanning the frame, into a centred box: a panel narrowed in place showed hard edges inside the
+    // vignette drawn over it at its old size (PGR2's title movie)
+    if (DrawSpan(s, a, hud[1] * 2) != kSpanFrame) return;
+    hud[0] = -(s.pillar_aspect / aspect);
 }
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {

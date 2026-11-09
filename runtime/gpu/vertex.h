@@ -49,6 +49,7 @@ struct Assembled {
     uint32_t index_count = 0;         // 0: an unindexed draw of draw_count vertices
     uint32_t draw_count = 0;
     int32_t base_vertex = 0;
+    uint32_t index_first = 0, index_last = 0;  // the title's lowest and highest index (indexed draws)
     std::array<std::vector<uint8_t>, 16> gathered;  // raw vertices copied in draw order when the indices are sparse
 };
 

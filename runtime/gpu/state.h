@@ -161,6 +161,10 @@ struct Viewport {
 struct Surface {
     uint32_t header = 0;  // guest D3DSurface
     uint32_t data = 0, format = 0, size = 0;
+    // a front buffer only: a title showing its frames blended (SetFrameBlend; Direct3D 12): how much of this image
+    // over the last one, and whether the image is a new one
+    float blend = 1;
+    bool blend_new = false;
 };
 
 // a v register's value before a title sets one: colours 1, the rest 0 0 0 1
@@ -200,6 +204,9 @@ struct State {
     std::shared_ptr<VertexShader> vs;
     std::shared_ptr<PixelShader> ps;
     std::array<std::array<float, 4>, 192> vsc{};  // hardware order: D3D register + 96
+    // the render thread's count of vsc's changes, 0 when not counted (no render thread): a backend compares vsc then.
+    // The render thread sets it after applying each state change (the title's own copy stays 0)
+    uint64_t vsc_gen = 0;
     std::array<std::array<float, 4>, 16> psc{};
     Viewport viewport;
     Surface rt, zs;
@@ -225,6 +232,11 @@ struct State {
     // ultrawide it showed at the sides, or a stale picture did without it (the title clears nothing)
     uint32_t blank_format = 0;
     float squeeze_shift = 0;
+    // a game hook draws full screen 2D of this shape (a 4:3 movie: 4/3; 0 none): screen space draws spanning the frame, and
+    // with pillar_format set only those whose stage 0 texture has that format (the header's format byte), are squeezed
+    // whole to it about the centre, pillarboxed instead of stretched across a wider frame
+    float pillar_aspect = 0;
+    uint32_t pillar_format = 0;
     // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
     // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
     int squeeze_margin = 0;

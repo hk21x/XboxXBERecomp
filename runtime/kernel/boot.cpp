@@ -199,7 +199,14 @@ void Relaunch(const char* exe) {
         AllowSetForegroundWindow(pi.dwProcessId);
         g_relaunching = true;
         HANDLE wait[] = {ready, pi.hProcess};
-        if (ready) WaitForMultipleObjects(2, wait, FALSE, 15000);
+        DWORD got = ready ? WaitForMultipleObjects(2, wait, FALSE, 15000) : WAIT_FAILED;
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        // in the log both instances share: whether the new one took over, or ended first (and how)
+        LOGR("relaunch: %s.exe %s (exit code %08lX)", exe,
+             got == WAIT_OBJECT_0 ? "took over" : got == WAIT_OBJECT_0 + 1 ? "ended before taking over" : "did not answer",
+             (unsigned long)code);
+        logx::Flush();
         if (ready) ::CloseHandle(ready);
         ::CloseHandle(pi.hThread);
         ::CloseHandle(pi.hProcess);

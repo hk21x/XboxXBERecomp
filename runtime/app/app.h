@@ -159,6 +159,7 @@ struct Option {  // a setting in the settings file, flag or value
     uint32_t* value;
     const char* label = nullptr;  // the settings window's name for it, else the key
     const char* help = nullptr;   // a line under it in the settings window
+    const char* const* choices = nullptr;  // a value's names, ended by nullptr: a dropdown in the settings window
 };
 struct GameInfo {
     const wchar_t* title;        // window and splash
@@ -248,6 +249,10 @@ struct GameInfo {
     // the title's 3D views follow FrameAspect when it changes (PGR2 reshapes its cameras): in a widescreen boot, a choice
     // between 16:9 and filling the screen applies at once; 4:3 against widescreen still waits for the next start
     bool fill_follows_live = false;
+    // while frames run late (slower than 120 a second), each face of a cube map the GPU draws (a car's reflections) is
+    // drawn at most this often a second and keeps its last picture in between; frames on time draw every face. 0 draws
+    // them every frame always. XBE_CUBE_FACE_HZ overrides it
+    float cube_face_hz = 0;
     // a title's music decoded to PCM streams against its other sounds, read on the audio thread at each mix (effects the
     // DSP image would have balanced drown it out): the level of PCM streams and of every other voice; none is full level
     float (*pcm_stream_level)() = nullptr;
