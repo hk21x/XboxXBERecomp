@@ -1340,6 +1340,20 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         bool spans = !s.squeeze_beyond && !pillared && ((lo <= gpu::kEdgeNear && hi >= w - gpu::kEdgeNear) ||
                                            // an untextured fill ending on one edge (the renderers' DrawSpan)
                                            (app::kGame.edge_fills && !s.textures[0] && lo >= -2.0f && hi <= w + 2.0f && (lo <= 0.5f || hi >= w - 0.5f)));
+        // GameInfo::edge_fills off: pieces drawn together span the frame only where one triangle reaches both edges (the
+        // renderers' DrawSpan)
+        if (spans && !app::kGame.edge_fills && lo <= gpu::kEdgeNear && hi >= w - gpu::kEdgeNear && !as.strip &&
+            as.topology == Topology::Triangles && as.indices.size() >= 6) {
+            spans = false;
+            for (size_t t = 0; t + 2 < as.indices.size() && !spans; t += 3) {
+                float tlo = 1e30f, thi = -1e30f;
+                for (size_t j = 0; j < 3; j++) {
+                    const float x = verts[as.indices[t + j]].pos[0] / ax;
+                    tlo = std::min(tlo, x), thi = std::max(thi, x);
+                }
+                spans = tlo <= gpu::kEdgeNear && thi >= w - gpu::kEdgeNear;
+            }
+        }
         const float shift = s.squeeze_beyond ? s.squeeze_shift : 0.0f;
         // a pass filling a viewport narrower than the frame (EoN's Thermovision into a 320x240 corner): not squeezed
         const float left = s.viewport.x, right = s.viewport.x + s.viewport.w;

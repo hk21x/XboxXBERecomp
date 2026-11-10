@@ -969,8 +969,9 @@ bool ScreenDraw(const State& s) {
 }
 
 // the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
-// cannot be read
-bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom) {
+// cannot be read. xs: each vertex's screen x too (the first 4096)
+bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom,
+                  std::vector<float>* xs = nullptr) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
@@ -1002,6 +1003,7 @@ bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, floa
             float clip = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
             x = s.viewport.x + (clip + 1) * 0.5f * s.viewport.w;
         }
+        if (xs) xs->push_back(x);
         lo = std::min(lo, x);
         hi = std::max(hi, x);
         top = std::min(top, p[1]);
@@ -1013,12 +1015,31 @@ bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, floa
 Span DrawSpan(const State& s, const Assembled& a, float width) {
     constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
     float lo, hi, top, bottom;
-    if (!ScreenExtent(s, a, lo, hi, top, bottom)) return kSpanFrame;
+    thread_local std::vector<float> xs;
+    xs.clear();
+    if (!ScreenExtent(s, a, lo, hi, top, bottom, app::kGame.edge_fills ? nullptr : &xs)) return kSpanFrame;
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
     // within a pixel and a half of both edges (PGR2's result screen draws its blurred frame from x -1 to 639; the
     // shaders keep a corner that near an edge on it)
-    if (lo <= kEdgeNear && hi >= width - kEdgeNear) return kSpanFrame;
+    if (lo <= kEdgeNear && hi >= width - kEdgeNear) {
+        // GameInfo::edge_fills off: pieces drawn together (PGR2's HUD backdrops, five boxes in one quad list, some on
+        // the left edge and some on the right) span the frame only where one triangle reaches both edges, as each of a
+        // full screen quad's does
+        if (app::kGame.edge_fills || a.topology != Topology::Triangles || a.strip || a.indices.size() < 6)
+            return kSpanFrame;
+        for (size_t t = 0; t + 2 < a.indices.size(); t += 3) {
+            float tlo = 1e30f, thi = -1e30f;
+            for (size_t j = 0; j < 3; j++) {
+                const uint32_t v = a.indices[t + j];
+                if (v >= xs.size()) return kSpanFrame;
+                tlo = std::min(tlo, xs[v]);
+                thi = std::max(thi, xs[v]);
+            }
+            if (tlo <= kEdgeNear && thi >= width - kEdgeNear) return kSpanFrame;
+        }
+        return kSpanNone;
+    }
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
     // radar's tiles) do not (GameInfo::edge_fills)
