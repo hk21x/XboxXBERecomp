@@ -742,7 +742,6 @@ void Interpolating::Present(const Surface& front) {
         // time, each a step it did not hold back, and patience doubled each time, it took minutes to reach 2 at 144 a second and
         // then stayed at 1 for half a minute at a time (Harry, 2026-11-09: 115 then 60 frames a second)
         const int wanted = std::clamp(int(usual / slot + 0.5), 1, kMostFrames);
-        if (limit_ > wanted) limit_ = wanted;
         const bool late = step > usual * kLate;
         if (late) (overran_ ? late_ours_ : late_title_)++;
         late_ += late && overran_ ? kLateWeight : 0;
@@ -750,10 +749,11 @@ void Interpolating::Present(const Surface& front) {
         if (late_ >= kLateLimit && limit_ > 1) {
             if (raised_) patience_ = std::min(patience_ * 2, kMostPatience);
             raised_ = false;
-            limit_--;
+            // from the frames a step gets, not from a limit above them (kept there, a short step after a late one held it at 1)
+            limit_ = std::max(1, std::min(limit_, wanted) - 1);
             calm_ = 0;
             late_ = 0;
-        } else if (++calm_ >= patience_ && limit_ < wanted) {
+        } else if (++calm_ >= patience_ && limit_ < kMostFrames) {
             limit_++;
             raised_ = true;
             calm_ = 0;
@@ -792,8 +792,11 @@ void Interpolating::Present(const Surface& front) {
                 inner_->Present(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() - frame_seconds_) * 0.1;
                 if (i) shown_++;
-                // not past the time the title needs for its next step
-                const double until = std::min(at + spacing, std::max(span, at));
+                // not past the time the title needs for its next step, and the next frame begun early enough to be done by it: the
+                // second of two at 144 a second missed by a fraction of a millisecond and was dropped, the step shown alone (Harry's
+                // run of a96ead6: 640 to 780 frames for 600 steps)
+                const double fits = span + replay_seconds_ - frame_seconds_ - kOverrun;
+                const double until = std::max(at, std::min({at + spacing, std::max(span, at), fits}));
                 std::this_thread::sleep_until(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
             }
             overran_ = std::chrono::duration<double>(Clock::now() - t).count() > span + replay_seconds_ + kOverrun;
