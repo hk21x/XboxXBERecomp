@@ -83,7 +83,9 @@ uint64_t KeyOf(const Rec& r) {
     // environment maps at 811C0000 and 813C0000 through one header), and a draw matched to the other picture's of the step
     // before blended two views into one. Unmatched, they are drawn at the step's place, and what samples them with them
     // (GameInfo::interp_sampled_targets_at_step)
-    mix(s.rt.data);
+    // diagnosis: XBE_INTERP_KEY_HEADER=1 keys by the header alone, as before (an A/B of the frame rate)
+    static const bool header_only = std::getenv("XBE_INTERP_KEY_HEADER") != nullptr;
+    if (!header_only) mix(s.rt.data);
     // stage 0's texture only: the other stages can hold a binding the program does not read that changes from one step to the
     // next (EoN's driving: stage 2 bound one step and not the next), and lost the match of a whole floor's scenery and its decals
     mix(s.textures[0]);
