@@ -325,7 +325,9 @@ bool Describe(uint32_t header, TextureDesc& d) {
 // a step's draws after it ended. A surface made elsewhere without the copy is read from its header
 bool DescribeSurface(const Surface& s, TextureDesc& d) {
     if (!s.header) return false;
-    if (!s.format && !s.size) return Describe(s.header, d);
+    // diagnosis: XBE_SURFACE_AS_NOW=1 reads the header as it is now, as before (an A/B of the frame rate)
+    static const bool as_now = std::getenv("XBE_SURFACE_AS_NOW") != nullptr;
+    if (as_now || (!s.format && !s.size)) return Describe(s.header, d);
     DescribeFields(s.data, s.format, s.size, d);
     return true;
 }
