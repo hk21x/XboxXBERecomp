@@ -31,6 +31,9 @@ public:
     virtual void Sync(uint32_t data_va, uint32_t size) = 0;
     // a lock that does not wait for the GPU (NOOVERWRITE): a result a frame or two old is what the console gives too
     virtual void SyncLate(uint32_t data_va) = 0;
+    // vertices read from memory the GPU may have drawn (xdk/d3d8.cpp SyncDeferred): read back at once, unless the render thread
+    // hands over a finished copy (GameInfo::vertex_read_back_late)
+    virtual void SyncVertices(uint32_t data_va) { Sync(data_va, 0); }
     // SyncLate in two for the render thread: DeliverLate (any thread) writes the newest finished copy to guest memory,
     // false when there is none recent; RecordLate (in order with the draws) starts a copy for a later lock
     virtual bool DeliverLate(uint32_t) { return false; }

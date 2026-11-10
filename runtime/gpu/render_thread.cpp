@@ -202,6 +202,30 @@ public:
 
     void Sync(uint32_t data, uint32_t) override { ReadBack(data, false); }
 
+    void SyncVertices(uint32_t data) override {
+        if (!app::kGame.vertex_read_back_late) {
+            ReadBack(data, false);
+            return;
+        }
+        // only memory a target was drawn into since (written_), or one handed over before (its copy is recorded each time)
+        const bool drawn = written_.count(data) != 0;
+        if (!drawn && !late_vertices_.count(data)) return;
+        if (drawn && !inner_->DeliverLate(data)) {
+            static int told = 0;
+            if (told++ < 4) LOGR("render thread: vertices over %08X: no finished copy yet, read back now", data);
+            ReadBack(data, true);
+        } else if (drawn) {
+            written_.erase(data);
+            static int told = 0;
+            if (told++ < 4) LOGR("render thread: vertices over %08X take its newest finished copy (vertex_read_back_late)", data);
+        }
+        if (!drawn) return;
+        late_vertices_.insert(data);
+        Cmd c{Op::RecordLate};
+        c.a = data;
+        cur_->cmds.push_back(c);
+    }
+
     void SyncLate(uint32_t data) override {
         if (!inner_->DeliverLate(data)) {
             if (diag::Perf()) LOG_FIRST(16, "render thread: no finished copy of %08X for a NOOVERWRITE lock, reading it back now", data);
@@ -414,6 +438,7 @@ private:
         if (r.key != header) r = {header, &last_use_[header]};
         *r.value = cur_->id;
     }
+    std::unordered_set<uint32_t> late_vertices_;  // targets vertices were read from late (SyncVertices)
     void Written(const Surface& s) {
         if (s.header) written_.insert(mem::VirtualFromPhysical(s.data));
     }

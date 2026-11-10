@@ -296,7 +296,7 @@ void SyncDeferred() {
     // (NightFire's scope colours 16384 points from a 128x128 swizzled target a pass before drew)
     if (g_backend)
         for (const auto& st : g_state.streams)
-            if (st.vb) g_backend->Sync(mem::VirtualFromPhysical(R32(st.vb + 4)), 0);
+            if (st.vb) g_backend->SyncVertices(mem::VirtualFromPhysical(R32(st.vb + 4)));
 }
 
 float ZScale(const gpu::Surface& zs) {

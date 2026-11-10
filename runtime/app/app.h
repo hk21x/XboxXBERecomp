@@ -242,6 +242,10 @@ struct GameInfo {
     // (a reflection pass drawn from a mirrored view each step: blended, what samples it slid against it, back and forth every
     // other step: EoN's driving floor); off, every matched draw is blended
     bool interp_sampled_targets_at_step = false;
+    // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
+    // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
+    // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
+    bool vertex_read_back_late = false;
     // while true, those frames carry on past the step instead of leading up to it: no delay, for what the player aims
     bool (*step_ahead)() = nullptr;
     // the title draws its world a few vertices at a time with nothing changed between (Agent Under Fire: thousands of draws a
