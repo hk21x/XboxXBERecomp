@@ -5086,6 +5086,17 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
     auto it = ColourTargetAt(data);
+    // XBE_PERF: what each read-back found, in a release build too (a title reading back each frame waits for the GPU)
+    static std::unordered_map<uint32_t, uint32_t> locks_seen;
+    if (diag::Perf() && (locks_seen[data]++ % 600) < 3) {
+        const auto sized = small_colour_.find(data);
+        LOGR("perf: lock of %08X at present %llu: %s%s, guest %ux%u host %ux%u, drawn %d, last drawn size key %s",
+                   data, (unsigned long long)presents_, it == targets_.end() ? "no target" : "target",
+                   it != targets_.end() && it->first == TargetMapKey(data, false) ? " (the frame sized one)" : "",
+                   it == targets_.end() ? 0u : it->second.gw, it == targets_.end() ? 0u : it->second.gh,
+                   it == targets_.end() ? 0u : it->second.w, it == targets_.end() ? 0u : it->second.h,
+                   it == targets_.end() ? 0 : int(it->second.drawn), sized == small_colour_.end() ? "none" : "kept");
+    }
     if (it == targets_.end() || !it->second.drawn) return;
     // long unused: read back only if its memory is as the target last left it (not reused). PGR2 saves its speed camera
     // photo, a 160x120 target, seconds after drawing it, and it came out grey
