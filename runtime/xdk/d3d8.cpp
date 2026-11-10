@@ -2322,6 +2322,7 @@ void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
         s.squeeze_shift = g_state.squeeze_shift;
         s.pillar_aspect = g_state.pillar_aspect;
         s.pillar_format = g_state.pillar_format;
+        s.pillar_fill = g_state.pillar_fill;
         s.blank_format = g_state.blank_format;
         if (!g_backend) continue;
         if (!d->up.empty()) {

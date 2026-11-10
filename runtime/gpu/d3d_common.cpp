@@ -990,8 +990,9 @@ bool ScreenDraw(const State& s) {
 }
 
 // the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
-// cannot be read
-bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom) {
+// cannot be read. xs: each vertex's screen x too (the first 4096)
+bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom,
+                  std::vector<float>* xs = nullptr) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
@@ -1023,6 +1024,7 @@ bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, floa
             float clip = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
             x = s.viewport.x + (clip + 1) * 0.5f * s.viewport.w;
         }
+        if (xs) xs->push_back(x);
         lo = std::min(lo, x);
         hi = std::max(hi, x);
         top = std::min(top, p[1]);
@@ -1034,14 +1036,35 @@ bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, floa
 Span DrawSpan(const State& s, const Assembled& a, float width) {
     constexpr float kEdgeSlack = 2.0f;  // guest pixels a fill may reach past an edge and still count as ending there
     float lo, hi, top, bottom;
-    if (!ScreenExtent(s, a, lo, hi, top, bottom)) return kSpanFrame;
+    thread_local std::vector<float> xs;
+    xs.clear();
+    if (!ScreenExtent(s, a, lo, hi, top, bottom, app::kGame.edge_fills ? nullptr : &xs)) return kSpanFrame;
     const bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
     const int k = program && s.vs->screen != 1 ? s.vs->matrix : -1;
-    if (lo <= 0.5f && hi >= width - 0.5f) return kSpanFrame;
+    // within a pixel and a half of both edges (PGR2's result screen draws its blurred frame from x -1 to 639; the
+    // shaders keep a corner that near an edge on it)
+    if (lo <= kEdgeNear && hi >= width - kEdgeNear) {
+        // GameInfo::edge_fills off: pieces drawn together (PGR2's HUD backdrops, five boxes in one quad list, some on
+        // the left edge and some on the right) span the frame only where one triangle reaches both edges, as each of a
+        // full screen quad's does
+        if (app::kGame.edge_fills || a.topology != Topology::Triangles || a.strip || a.indices.size() < 6)
+            return kSpanFrame;
+        for (size_t t = 0; t + 2 < a.indices.size(); t += 3) {
+            float tlo = 1e30f, thi = -1e30f;
+            for (size_t j = 0; j < 3; j++) {
+                const uint32_t v = a.indices[t + j];
+                if (v >= xs.size()) return kSpanFrame;
+                tlo = std::min(tlo, xs[v]);
+                thi = std::max(thi, xs[v]);
+            }
+            if (tlo <= kEdgeNear && thi >= width - kEdgeNear) return kSpanFrame;
+        }
+        return kSpanNone;
+    }
     // an untextured fill ending on one edge and not past it by more than a pixel or two (EoN's sniper scope: black bars
     // from x 0 to 176 and from 464 to 641 around the sight) keeps that edge too; textured pieces well past an edge (the
-    // radar's tiles) do not
-    if (!s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
+    // radar's tiles) do not (GameInfo::edge_fills)
+    if (app::kGame.edge_fills && !s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
         return kSpanFrame;
     // a textured bar the viewport's full height so (GameInfo::edge_bars)
     if (app::kGame.edge_bars && s.textures[0] && k < 0 && lo >= -kEdgeSlack && hi <= width + kEdgeSlack &&
@@ -1060,12 +1083,19 @@ void SqueezeBeyond(const State& s, float hud[4]) {
     hud[0] = -k;
 }
 
-void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4]) {
+void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4], float zoom[2], float gh) {
     if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1 || aspect <= s.pillar_aspect + 1e-3f) return;
     if (s.pillar_format && (!s.textures[0] || (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) != s.pillar_format)) return;
     // only a picture spanning the frame, into a centred box: a panel narrowed in place showed hard edges inside the
     // vignette drawn over it at its old size (PGR2's title movie)
     if (DrawSpan(s, a, hud[1] * 2) != kSpanFrame) return;
+    if (s.pillar_fill && gh > 0) {
+        // the frame's width kept, the picture's height enlarged to its shape about the centre (top and bottom cropped)
+        hud[0] = 1;
+        zoom[0] = aspect / s.pillar_aspect;
+        zoom[1] = gh * 0.5f;
+        return;
+    }
     hud[0] = -(s.pillar_aspect / aspect);
 }
 
