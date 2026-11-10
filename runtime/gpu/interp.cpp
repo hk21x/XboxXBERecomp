@@ -130,6 +130,7 @@ public:
     }
     void Present(const Surface& front) override;
     void Sync(uint32_t va, uint32_t size) override { inner_->Sync(va, size); }
+    void SyncVertices(uint32_t va) override { inner_->SyncVertices(va); }
     void SyncLate(uint32_t va) override { inner_->SyncLate(va); }
     bool DeliverLate(uint32_t va) override { return inner_->DeliverLate(va); }
     void RecordLate(uint32_t va) override { inner_->RecordLate(va); }
@@ -171,9 +172,6 @@ private:
     }
     // a replay draws into the targets the step drew into: their format and size as then, whatever the headers say by now
     static void UseAsDrawn(const Rec& r, State& d) {
-        // diagnosis: XBE_REPLAY_AS_NOW=1 replays with the headers as they are by now, as before be8ef60 (the read-back A/B)
-        static const bool as_now = std::getenv("XBE_REPLAY_AS_NOW") != nullptr;
-        if (as_now) return;
         d.rt.format = r.rt_format, d.rt.size = r.rt_size, d.rt.as_drawn = d.rt.header != 0;
         d.zs.format = r.zs_format, d.zs.size = r.zs_size, d.zs.as_drawn = d.zs.header != 0;
     }
