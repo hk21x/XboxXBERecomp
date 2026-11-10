@@ -36,6 +36,7 @@ constexpr int kFreshShare = 4;                                // matched draws o
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
+constexpr double kOverrun = 0.001;                            // seconds past their time a step's frames may run
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
@@ -221,6 +222,8 @@ private:
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
     int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience, late_ = 0;
     bool raised_ = false;
+    bool overran_ = false;  // the last step's frames went on past the time they had
+    uint32_t late_ours_ = 0, late_title_ = 0;
     Clock::time_point rest_until_{};
     bool logged_ = false;
     Clock::time_point reported_{};
@@ -713,6 +716,7 @@ void Interpolating::Present(const Surface& front) {
         Replay(1);
         inner_->Present(front);
     } else if (!blend || step > kLongestStep || step < kShortestStep) {
+        overran_ = false;
         inner_->Present(front);
     } else {
         if (!logged_) LOGR("gpu: in-between frames, a step of %.1f ms at up to %u a second", step * 1000, Rate());
@@ -731,7 +735,15 @@ void Interpolating::Present(const Surface& front) {
         const int fit = replay_seconds_ > 0 ? int(std::max(span, 0.0) / replay_seconds_) + 1 : 2;
         // steps coming late again and again are the proof, whatever the cause (a full queue behind vertical sync comes in bursts); one
         // now and then is only the title's own work, an explosion say. Fewer frames, and more after a calm, longer if the last try failed
-        late_ += step > usual * kLate ? kLateWeight : 0;
+        // only a step our frames made late counts: one the title was late with on its own (loading, an explosion) says nothing
+        // about them. And the limit is kept to the frames a step would get: brought down from kMostFrames by late steps one at a
+        // time, each a step it did not hold back, and patience doubled each time, it took minutes to reach 2 at 144 a second and
+        // then stayed at 1 for half a minute at a time (Harry, 2026-11-09: 115 then 60 frames a second)
+        const int wanted = std::clamp(int(usual / slot + 0.5), 1, kMostFrames);
+        if (limit_ > wanted) limit_ = wanted;
+        const bool late = step > usual * kLate;
+        if (late) (overran_ ? late_ours_ : late_title_)++;
+        late_ += late && overran_ ? kLateWeight : 0;
         if (late_ > 0) late_--;
         if (late_ >= kLateLimit && limit_ > 1) {
             if (raised_) patience_ = std::min(patience_ * 2, kMostPatience);
@@ -739,7 +751,7 @@ void Interpolating::Present(const Surface& front) {
             limit_--;
             calm_ = 0;
             late_ = 0;
-        } else if (++calm_ >= patience_ && limit_ < kMostFrames) {
+        } else if (++calm_ >= patience_ && limit_ < wanted) {
             limit_++;
             raised_ = true;
             calm_ = 0;
@@ -749,11 +761,13 @@ void Interpolating::Present(const Surface& front) {
         sum_drawing_ += drawing, sum_planned_ += frames, sum_limit_ += limit_;
         const double spacing = std::min(slot, usual / frames);
         if (t < rest_until_) {
+            overran_ = false;
             inner_->Present(front);
         } else if (replay_seconds_ > usual * kTooLong) {
             rest_until_ = t + std::chrono::seconds(2);
             replay_seconds_ = 0;
             LOGR("gpu: in-between frames: a replay takes too long, none for 2 s");
+            overran_ = false;
             inner_->Present(front);
         } else {
             // the title's choice for what the player aims: the step shown at once and carried on from there, up to a step too far when
@@ -766,6 +780,7 @@ void Interpolating::Present(const Surface& front) {
                 inner_->Present(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() + replay_seconds_ - frame_seconds_) * 0.1;
             }
+            overran_ = false;
             for (int i = ahead ? 1 : 0; i < frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
@@ -779,6 +794,7 @@ void Interpolating::Present(const Surface& front) {
                 const double until = std::min(at + spacing, std::max(span, at));
                 std::this_thread::sleep_until(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
             }
+            overran_ = std::chrono::duration<double>(Clock::now() - t).count() > span + replay_seconds_ + kOverrun;
         }
     }
     shown_++;
@@ -793,11 +809,14 @@ void Interpolating::Present(const Surface& front) {
                  "%.2f, limit %.2f",
                  sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
                  replays_, sum_planned_ / b, sum_limit_ / b);
+            LOGR("gpu: in-between frames: late steps: %u after our frames ran over, %u the title's own", late_ours_, late_title_);
             LOGR("gpu: in-between frames: %llu of %llu replayed draws found their target's header describing another size than set (the size set is used)",
                  (unsigned long long)size_mismatch_, (unsigned long long)size_checked_);
         }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
+        late_ours_ = late_title_ = 0;
+        size_mismatch_ = size_checked_ = 0;
         sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
         replays_ = 0;
     }
