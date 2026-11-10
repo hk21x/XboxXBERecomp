@@ -784,6 +784,7 @@ private:
         uint32_t gh = 0;
         uint32_t row_pitch = 0;
         uint32_t next = 0;
+        bool swizzled = false;  // guest memory holds it in Morton order (a swizzled 32 bit target), as Sync writes it
     };
     std::unordered_map<uint32_t, Late> late_;
     std::mutex late_lock_;                      // DeliverLate runs on the title's thread
@@ -4488,7 +4489,13 @@ bool D3D12Backend::DeliverLate(uint32_t data) {
         if (FAILED(l.rb[best]->Map(0, &rr, reinterpret_cast<void**>(&p)))) return false;
         uint32_t pitch = GuestPitch(l.gw);
         uint8_t* dst = static_cast<uint8_t*>(kernel::HostPtr(data));
-        for (uint32_t y = 0; y < l.gh; y++) std::memcpy(dst + size_t(y) * pitch, p + size_t(y) * l.row_pitch, l.gw * 4);
+        if (l.swizzled) {
+            for (uint32_t y = 0; y < l.gh; y++)
+                for (uint32_t x = 0; x < l.gw; x++)
+                    std::memcpy(dst + size_t(SwizzledOffset(x, y, l.gw, l.gh)) * 4, p + size_t(y) * l.row_pitch + size_t(x) * 4, 4);
+        } else {
+            for (uint32_t y = 0; y < l.gh; y++) std::memcpy(dst + size_t(y) * pitch, p + size_t(y) * l.row_pitch, l.gw * 4);
+        }
         D3D12_RANGE none{0, 0};
         l.rb[best]->Unmap(0, &none);
         l.delivered = l.fence[best];
@@ -4549,7 +4556,8 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
 
 void D3D12Backend::RecordLate(uint32_t data) {
     auto it = ColourTargetAt(data);
-    if (it == targets_.end() || TargetStale(data) || !it->second.linear32) return;
+    // a swizzled 32 bit one too (EoN's driving water draws vertices from one: GameInfo::vertex_read_back_late)
+    if (it == targets_.end() || TargetStale(data) || !(it->second.linear32 || it->second.swizzled32)) return;
     Target& t = it->second;
     PerfScope perf_sync{g_perf.sync};
     g_perf.lates++;
@@ -4558,9 +4566,10 @@ void D3D12Backend::RecordLate(uint32_t data) {
     t.read.clear();
     std::lock_guard lock(late_lock_);
     Late& l = late_[data];
-    if (l.gw != t.gw || l.gh != t.gh) {
+    if (l.gw != t.gw || l.gh != t.gh || l.swizzled != t.swizzled32) {
         if (diag::Perf()) LOG_FIRST(16, "perf: late %08X ring reset, %ux%u -> %ux%u", data, l.gw, l.gh, t.gw, t.gh);
         ResetLate(l, t);
+        l.swizzled = t.swizzled32;
     }
     // a copy for a later lock, unless the GPU is a whole ring behind
     uint32_t slot = l.next;
