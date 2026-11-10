@@ -1362,13 +1362,20 @@ Target* D3D12Backend::DepthTarget(const State& s) {
     return EnsureTarget(s.zs, true);
 }
 
+// a surface's format (12) or size (16) word as DescribeSurface reads it
+static uint32_t SurfaceWord(const Surface& s, uint32_t at) {
+    if (!s.header) return 0;
+    if (s.as_drawn) return at == 12 ? s.format : s.size;
+    return kernel::R32(s.header + at);
+}
+
 bool D3D12Backend::BindTargets(const State& s) {
     // the same surfaces as the last lookup this frame, no target made or dropped since: the same targets
     bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
     bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
     bool colour = SimpleState(s, kMColorWriteEnable) != 0;
     uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
-                         s.rt.format, s.rt.size, s.zs.format, s.zs.size};  // as set (DescribeSurface)
+                         SurfaceWord(s.rt, 12), SurfaceWord(s.rt, 16), SurfaceWord(s.zs, 12), SurfaceWord(s.zs, 16)};
     uint64_t key = Hash(words, sizeof(words));
     uint64_t valid = presents_ << 24 ^ targets_gen_;
     Target* rt;

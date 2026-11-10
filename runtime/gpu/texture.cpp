@@ -320,14 +320,13 @@ bool Describe(uint32_t header, TextureDesc& d) {
     return true;
 }
 
-// a target as it was when set (SurfaceOf), not as its header is now: a title may describe another size in the same header
-// later (EoN's driving: its 512x512 environment maps' surface says 640x480 by the step's end), and in-between frames replay
-// a step's draws after it ended. A surface made elsewhere without the copy is read from its header
+// a target by its header, or for an in-between frame's replay as it was when the step drew (Surface::as_drawn): EoN's driving
+// draws its 512x512 environment maps through a header that says 640x480 by the step's end, and the replays drew into another
+// target than the step's (the floor's flicker). Only the replays: the title's own draws taking SurfaceOf's copy found its small
+// glow targets at another size than it reads them at, and waited on a read-back each frame (Harry's A/B, 2026-11-10)
 bool DescribeSurface(const Surface& s, TextureDesc& d) {
     if (!s.header) return false;
-    // diagnosis: XBE_SURFACE_AS_NOW=1 reads the header as it is now, as before (an A/B of the frame rate)
-    static const bool as_now = std::getenv("XBE_SURFACE_AS_NOW") != nullptr;
-    if (as_now || (!s.format && !s.size)) return Describe(s.header, d);
+    if (!s.as_drawn) return Describe(s.header, d);
     DescribeFields(s.data, s.format, s.size, d);
     return true;
 }

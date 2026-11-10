@@ -66,7 +66,8 @@ struct Rec {
     };
     std::vector<Kept> kept;
     Surface s1, s2;
-    uint32_t rt_w = 0, rt_h = 0;  // diagnosis: the target size set when drawn
+    // the targets' format and size words as the step drew into them, for the replays (Surface::as_drawn)
+    uint32_t rt_format = 0, rt_size = 0, zs_format = 0, zs_size = 0;
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
@@ -83,9 +84,7 @@ uint64_t KeyOf(const Rec& r) {
     // environment maps at 811C0000 and 813C0000 through one header), and a draw matched to the other picture's of the step
     // before blended two views into one. Unmatched, they are drawn at the step's place, and what samples them with them
     // (GameInfo::interp_sampled_targets_at_step)
-    // diagnosis: XBE_INTERP_KEY_HEADER=1 keys by the header alone, as before (an A/B of the frame rate)
-    static const bool header_only = std::getenv("XBE_INTERP_KEY_HEADER") != nullptr;
-    if (!header_only) mix(s.rt.data);
+    mix(s.rt.data);
     // stage 0's texture only: the other stages can hold a binding the program does not read that changes from one step to the
     // next (EoN's driving: stage 2 bound one step and not the next), and lost the match of a whole floor's scenery and its decals
     mix(s.textures[0]);
@@ -104,6 +103,7 @@ public:
         Rec& r = Next(Rec::Clear);
         Keep(r, s);
         r.a = count, r.b = flags, r.c = color, r.d = stencil, r.z = z;
+        AsDrawn(r, s);
         r.has_bytes = rects != nullptr;
         if (rects) r.bytes.assign(rects, rects + size_t(count) * 16);
     }
@@ -113,7 +113,7 @@ public:
         Rec& r = Next(Rec::Draw);
         Keep(r, s);
         r.a = prim, r.b = start, r.c = count;
-        SurfaceSize(s.rt, r.rt_w, r.rt_h);
+        AsDrawn(r, s);
         r.headers.clear();
         for (const auto& stream : s.streams) AddHeader(r, stream.vb);
         for (uint32_t t : s.textures) AddHeader(r, t);
@@ -162,6 +162,17 @@ private:
     static uint32_t HeaderSize(uint32_t va) {
         const uint32_t type = kernel::R32(va) & 0x70000;
         return type < 0x20000 || type == 0x30000 ? 12 : kHeaderBytes;
+    }
+    static void AsDrawn(Rec& r, const State& s) {
+        r.rt_format = s.rt.header ? kernel::R32(s.rt.header + 12) : 0;
+        r.rt_size = s.rt.header ? kernel::R32(s.rt.header + 16) : 0;
+        r.zs_format = s.zs.header ? kernel::R32(s.zs.header + 12) : 0;
+        r.zs_size = s.zs.header ? kernel::R32(s.zs.header + 16) : 0;
+    }
+    // a replay draws into the targets the step drew into: their format and size as then, whatever the headers say by now
+    static void UseAsDrawn(const Rec& r, State& d) {
+        d.rt.format = r.rt_format, d.rt.size = r.rt_size, d.rt.as_drawn = d.rt.header != 0;
+        d.zs.format = r.zs_format, d.zs.size = r.zs_size, d.zs.as_drawn = d.zs.header != 0;
     }
     static void AddHeader(Rec& r, uint32_t va) {
         if (!va) return;
@@ -218,7 +229,6 @@ private:
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
-    uint64_t size_mismatch_ = 0, size_checked_ = 0;
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
@@ -609,6 +619,7 @@ void Interpolating::Replay(float alpha) {
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
             case Rec::Clear:
+                UseAsDrawn(r, *r.s);
                 inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
                 break;
             case Rec::Copy:
@@ -668,19 +679,7 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t e = 0; e < 16; e++) m[e] = p.transforms[kFixed[i]][e] + (m[e] - p.transforms[kFixed[i]][e]) * alpha;
                     }
                 }
-                {
-                    // diagnosis: a target's header describing another size now than when the step set it (the title reusing it):
-                    // the renderers take the size set (DescribeSurface), as the GPU renderers keep a small target per size
-                    TextureDesc now;
-                    if (d.rt.header && Describe(d.rt.header, now) && (now.width != r.rt_w || now.height != r.rt_h)) {
-                        size_mismatch_++;
-                        static int told = 0;
-                        if (told++ < 8)
-                            LOGR("gpu: in-between frames: rec %zu drew into %08X at %ux%u, its header says %ux%u by now (the size set is used)",
-                                 i, d.rt.data, r.rt_w, r.rt_h, now.width, now.height);
-                    }
-                    size_checked_++;
-                }
+                UseAsDrawn(r, d);
                 inner_->Draw(d, r.a, r.b, r.c, indices);
                 if (fixed)
                     for (size_t i = 0; i < std::size(kFixed); i++) d.transforms[kFixed[i]] = fixed_was[i];
@@ -812,13 +811,10 @@ void Interpolating::Present(const Surface& front) {
                  sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
                  replays_, sum_planned_ / b, sum_limit_ / b);
             LOGR("gpu: in-between frames: late steps: %u after our frames ran over, %u the title's own", late_ours_, late_title_);
-            LOGR("gpu: in-between frames: %llu of %llu replayed draws found their target's header describing another size than set (the size set is used)",
-                 (unsigned long long)size_mismatch_, (unsigned long long)size_checked_);
         }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
         late_ours_ = late_title_ = 0;
-        size_mismatch_ = size_checked_ = 0;
         sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
         replays_ = 0;
     }
