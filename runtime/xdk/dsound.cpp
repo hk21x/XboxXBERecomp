@@ -448,7 +448,15 @@ void Render(float* out, uint32_t frames) {
             // a channel's left/right gains; a stereo voice's second channel too (its first is mostly left only)
             float sum = 0;
             for (uint32_t c = 0; c < std::min<uint32_t>(v.channels, 2); c++) sum = std::max(sum, g[c][0] + g[c][1]);
-            if (sum > 0.25f && top.size() < 900) {
+            // a stream with nothing queued (True Crime keeps ten idle at full volume) or a buffer whose data is all zero
+            // is no sound to report: the list is kept for what can be heard
+            bool silent = v.stream && v.packets.empty();
+            if (!v.stream && v.tag == 1 && v.bits == 16 && v.data && v.bytes) {
+                const auto* smp = static_cast<const int16_t*>(kernel::HostPtr(v.data));
+                silent = true;
+                for (uint32_t i = 0, n = std::min<uint32_t>(v.bytes / 2, 1u << 20); i < n && silent; i++) silent = smp[i] == 0;
+            }
+            if (sum > 0.05f && !silent && top.size() < 2400) {
                 char b[200];
                 int k = std::snprintf(b, sizeof b, " [%08X tag %X %uch %uHz freq %u vol %.2f head %.2f gain %.2f/%.2f", obj, v.tag,
                                       v.channels, v.rate, v.freq, v.volume, v.headroom, g[0][0], g[0][1]);
