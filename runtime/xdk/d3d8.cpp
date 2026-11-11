@@ -1911,7 +1911,6 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     if (KeepDraw(a[0], a[1], a[2], 0)) return 0;
     FrameLogDraw(a[0], a[1], a[2], nullptr);
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
-    gpu::KeepLastVertex(g_state, a[1], a[2], nullptr);
     return 0;
 }
 
@@ -1923,7 +1922,6 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     FrameLogDraw(a[0], 0, a[1], indices);
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
-    gpu::KeepLastVertex(g_state, 0, a[1], indices);
     return 0;
 }
 
@@ -1965,7 +1963,6 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
     g_state.input_active = false;
     g_backend->Draw(g_state, prim, 0, count, nullptr);
-    gpu::KeepLastVertex(g_state, 0, count, nullptr);
     g_state.streams[0] = stream;
     g_state.input_active = input;
 }
@@ -1999,7 +1996,6 @@ void FlushPushedTriangles() {
         uint32_t count = uint32_t(g_im_batch.size());
         FrameLogDraw(5, 0, count, idx);
         g_backend->Draw(g_state, 5, 0, count, idx);
-        gpu::KeepLastVertex(g_state, 0, count, idx);
     }
     g_im_batch.clear();
 }
@@ -2187,7 +2183,6 @@ void Walk(uint32_t end) {
                     SyncDeferred();
                     FrameLogDraw(g_im_prim, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
                     g_backend->Draw(g_state, g_im_prim, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
-                    gpu::KeepLastVertex(g_state, v & 0xFFFFFF, (v >> 24) + 1, nullptr);
                 }
                 continue;
             }
@@ -2213,7 +2208,6 @@ void Walk(uint32_t end) {
                             uint32_t count = uint32_t(g_im_indices.size());
                             FrameLogDraw(prim, 0, count, idx);
                             g_backend->Draw(g_state, prim, 0, count, idx);
-                            gpu::KeepLastVertex(g_state, 0, count, idx);
                         }
                     }
                     g_im_indices.clear();
