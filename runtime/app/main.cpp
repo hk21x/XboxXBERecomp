@@ -251,6 +251,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::lock_guard lock(UiLock());
         if (OverlayKey(vk)) return 0;
     }
+    // Alt+Enter: a window against the full screen mode last used (borderless when the game started in a window), saved
+    // as F1's display mode is, and applied now; DXGI's own Alt+Enter is off (MakeWindowAssociation)
+    if (msg == WM_SYSKEYDOWN && wp == VK_RETURN && (lp & (1 << 29))) {
+        if (!(lp & (1 << 30))) {
+            static DisplayMode full = DisplayMode::Borderless;
+            {
+                std::lock_guard lock(UiLock());
+                Settings& s = Get();
+                if (s.display_mode != DisplayMode::Windowed) full = s.display_mode;
+                s.display_mode = s.display_mode == DisplayMode::Windowed ? full : DisplayMode::Windowed;
+                Save();
+            }
+            LOGR("Alt+Enter: %s", Get().display_mode == DisplayMode::Windowed  ? "window"
+                                  : Get().display_mode == DisplayMode::Borderless ? "borderless window"
+                                                                                  : "full screen");
+            ApplyNow();
+        }
+        return 0;
+    }
+    if (msg == WM_SYSCHAR && wp == '\r') return 0;  // no beep for Alt+Enter
     // the settings window: F1 opens and closes it, and a key binding it waits for takes the next key
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
         std::lock_guard lock(UiLock());
