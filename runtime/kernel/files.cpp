@@ -631,6 +631,21 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
         size_t done = f->entry ? MountedDisc()->Read(*f->entry, pos + n, HostPtr(at), chunk)
                       : write  ? std::fwrite(HostPtr(at), 1, chunk, f->fp)
                                : std::fread(HostPtr(at), 1, chunk, f->fp);
+        // a host read error is not the file's end (a network share's moment): asked again a few times, then logged;
+        // the title took a short read as data (Agent Under Fire's first map load ran from a share: a null map pointer)
+        for (int retry = 0; !write && f->fp && done < chunk && std::ferror(f->fp) && retry < 5; retry++) {
+            std::clearerr(f->fp);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            Seek(f->fp, pos + n + done);
+            done += std::fread(HostPtr(at + uint32_t(done)), 1, chunk - done, f->fp);
+            LOGR("files: %s: a read at %llu failed on the host, asked again (%zu of %u bytes now)", f->xbox.c_str(),
+                 (unsigned long long)(pos + n), done, chunk);
+        }
+        if (!write && f->fp && done < chunk && std::ferror(f->fp)) {
+            LOGE("files: %s: a read at %llu still fails on the host: the title gets %zu of %u bytes", f->xbox.c_str(),
+                 (unsigned long long)(pos + n), done, chunk);
+            std::clearerr(f->fp);
+        }
         n += uint32_t(done);
         if (done < chunk) break;
     }

@@ -1,6 +1,12 @@
 #include "kernel/disc.h"
 
+#include "core/log.h"
+
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <thread>
 #include <cctype>
 #include <cstring>
 
@@ -59,21 +65,44 @@ Disc::~Disc() {
 }
 
 // each read carries its own position, so threads reading at once do not queue on one handle
+// callers ask only within the image (a file's bytes, a sector): less than asked is a host error, not the end. An image
+// on a network share had a read fail now and then, and the title got a short read it took as data (Agent Under Fire's
+// first map load: its map chunk missing, a null map pointer, a crash). Asked again a few times, then logged
 uint32_t Disc::ReadAt(uint64_t at, void* out, uint32_t len) const {
+    uint32_t done = 0;
+    for (int attempt = 0; done < len; attempt++) {
 #ifdef _WIN32
-    thread_local HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    OVERLAPPED o{};
-    o.Offset = DWORD(at);
-    o.OffsetHigh = DWORD(at >> 32);
-    o.hEvent = event;
-    DWORD got = 0;
-    if (!ReadFile(HANDLE(file_), out, len, nullptr, &o) && GetLastError() != ERROR_IO_PENDING) return 0;
-    if (!GetOverlappedResult(HANDLE(file_), &o, &got, TRUE)) return 0;
-    return got;
+        thread_local HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        OVERLAPPED o{};
+        uint64_t from = at + done;
+        o.Offset = DWORD(from);
+        o.OffsetHigh = DWORD(from >> 32);
+        o.hEvent = event;
+        DWORD got = 0;
+        bool ok = (ReadFile(HANDLE(file_), static_cast<uint8_t*>(out) + done, len - done, nullptr, &o) ||
+                   GetLastError() == ERROR_IO_PENDING) &&
+                  GetOverlappedResult(HANDLE(file_), &o, &got, TRUE);
+        unsigned long error = ok ? 0 : GetLastError();
 #else
-    ssize_t got = pread(int(file_), out, len, off_t(at));
-    return got > 0 ? uint32_t(got) : 0;
+        ssize_t r = pread(int(file_), static_cast<uint8_t*>(out) + done, len - done, off_t(at + done));
+        uint32_t got = r > 0 ? uint32_t(r) : 0;
+        unsigned long error = r < 0 ? unsigned(errno) : 0;
 #endif
+        done += uint32_t(got);
+        if (done >= len || (!got && !error)) break;  // all of it, or the image's end (Open probes past it): no retry
+        if (attempt == 5) {
+            LOGE("disc: %u of %u bytes read at %llu after 5 retries (host error %lu): the title gets a short read", done,
+                 len, (unsigned long long)at, error);
+            break;
+        }
+        if (!got) {
+            static std::atomic<int> said{0};
+            if (said.fetch_add(1) < 20)
+                LOGR("disc: a read at %llu failed (host error %lu), asked again", (unsigned long long)(at + done), error);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    return done;
 }
 
 bool Disc::Open(const std::filesystem::path& path, std::string& error) {
