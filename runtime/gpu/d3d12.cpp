@@ -5376,6 +5376,9 @@ void D3D12Backend::CapSave(const CapImage& img, const char* name) {
 }
 
 void D3D12Backend::CapSave(Target& t, const char* name) {
+    // with MSAA the draws are in the twin: its pixels into res first (Harry's 4x captures held the clear colour only)
+    CLAt("CapSave");
+    Settle(t);
     DXGI_FORMAT fmt = t.depth ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : t.fmt;
     float mul = t.depth ? 1 : t.range;
     // XBE_CAPTURE_FULL=1: small colour targets (shadow maps, reflections) at their host size, every host row and
@@ -5410,6 +5413,8 @@ void D3D12Backend::CapStep(const Surface& rt, const Surface& zs) {
 
 void D3D12Backend::Capture(Target& t, const char* tag, float mul) {
     if (!cap_) return;
+    CLAt("Capture");
+    Settle(t);
     char name[32];
     snprintf(name, sizeof(name), "%04u_%s_%08X", cap_i_, tag, t.data);
     CapSave({.res = t.res.Get(), .state = &t.state, .fmt = t.fmt, .w = t.gw, .h = t.gh, .mul = mul}, name);
