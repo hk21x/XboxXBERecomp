@@ -936,6 +936,7 @@ private:
         uint32_t gh = 0;
         uint32_t row_pitch = 0;
         uint32_t next = 0;
+        bool swizzled = false;  // guest memory holds it in Morton order (a swizzled 32 bit target), as Sync writes it
     };
     std::unordered_map<uint32_t, Late> late_;
     std::mutex late_lock_;                      // DeliverLate runs on the title's thread
@@ -1533,8 +1534,8 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (!CreateTargetView(t)) return nullptr;
     t.data = slot.data;
     TextureDesc d;
-    t.linear32 = depth || (Describe(s.header, d) && d.linear && Format(d.format).bits == 32);
-    t.swizzled32 = !depth && !t.linear32 && Describe(s.header, d) && Format(d.format).swizzled &&
+    t.linear32 = depth || (DescribeSurface(s, d) && d.linear && Format(d.format).bits == 32);
+    t.swizzled32 = !depth && !t.linear32 && DescribeSurface(s, d) && Format(d.format).swizzled &&
                    !Format(d.format).compressed && Format(d.format).bits == 32;
     t.bytes = GuestPitch(slot.gw) * slot.gh;
     if (depth) t.bytes = slot.gw * slot.gh * 4;
@@ -1560,14 +1561,20 @@ Target* D3D12Backend::DepthTarget(const State& s) {
     return EnsureTarget(s.zs, true);
 }
 
+// a surface's format (12) or size (16) word as DescribeSurface reads it
+static uint32_t SurfaceWord(const Surface& s, uint32_t at) {
+    if (!s.header) return 0;
+    if (s.as_drawn) return at == 12 ? s.format : s.size;
+    return kernel::R32(s.header + at);
+}
+
 bool D3D12Backend::BindTargets(const State& s) {
     // the same surfaces as the last lookup this frame, no target made or dropped since: the same targets
     bool depth = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && !DepthOnlySampled(s);
     bool shared = s.rt.header && s.zs.header && s.rt.data == s.zs.data;
     bool colour = SimpleState(s, kMColorWriteEnable) != 0;
     uint32_t words[9] = {s.rt.header, s.rt.data, s.zs.header, s.zs.data, uint32_t(depth) | uint32_t(shared && colour) << 1,
-                         s.rt.header ? kernel::R32(s.rt.header + 12) : 0, s.rt.header ? kernel::R32(s.rt.header + 16) : 0,
-                         s.zs.header ? kernel::R32(s.zs.header + 12) : 0, s.zs.header ? kernel::R32(s.zs.header + 16) : 0};
+                         SurfaceWord(s.rt, 12), SurfaceWord(s.rt, 16), SurfaceWord(s.zs, 12), SurfaceWord(s.zs, 16)};
     uint64_t key = Hash(words, sizeof(words));
     uint64_t valid = presents_ << 24 ^ targets_gen_;
     Target* rt;
@@ -1737,7 +1744,7 @@ ComPtr<ID3D12Resource> D3D12Backend::CreatePixelTexture(const std::vector<uint8_
 void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
     g_perf.rtups++;
     TextureDesc d;
-    if (!Describe(s.header, d) || Format(d.format).depth) return;
+    if (!DescribeSurface(s, d) || Format(d.format).depth) return;
     std::vector<uint8_t> px;
     uint32_t pitch;
     // after a Sync only the pixels the CPU changed go over the picture, which stays at render scale
@@ -5081,6 +5088,17 @@ bool D3D12Backend::TargetStale(uint32_t data) const {
 // the CPU reads a surface the GPU drew: bring the pixels back
 void D3D12Backend::Sync(uint32_t data, uint32_t) {
     auto it = ColourTargetAt(data);
+    // XBE_PERF: what each read-back found, in a release build too (a title reading back each frame waits for the GPU)
+    static std::unordered_map<uint32_t, uint32_t> locks_seen;
+    if (diag::Perf() && (locks_seen[data]++ % 600) < 3) {
+        const auto sized = small_colour_.find(data);
+        LOGR("perf: lock of %08X at present %llu: %s%s, guest %ux%u host %ux%u, drawn %d, last drawn size key %s",
+                   data, (unsigned long long)presents_, it == targets_.end() ? "no target" : "target",
+                   it != targets_.end() && it->first == TargetMapKey(data, false) ? " (the frame sized one)" : "",
+                   it == targets_.end() ? 0u : it->second.gw, it == targets_.end() ? 0u : it->second.gh,
+                   it == targets_.end() ? 0u : it->second.w, it == targets_.end() ? 0u : it->second.h,
+                   it == targets_.end() ? 0 : int(it->second.drawn), sized == small_colour_.end() ? "none" : "kept");
+    }
     if (it == targets_.end() || !it->second.drawn) return;
     // long unused: read back only if its memory is as the target last left it (not reused). PGR2 saves its speed camera
     // photo, a 160x120 target, seconds after drawing it, and it came out grey
@@ -5160,7 +5178,13 @@ bool D3D12Backend::DeliverLate(uint32_t data) {
         if (FAILED(l.rb[best]->Map(0, &rr, reinterpret_cast<void**>(&p)))) return false;
         uint32_t pitch = GuestPitch(l.gw);
         uint8_t* dst = static_cast<uint8_t*>(kernel::HostPtr(data));
-        for (uint32_t y = 0; y < l.gh; y++) std::memcpy(dst + size_t(y) * pitch, p + size_t(y) * l.row_pitch, l.gw * 4);
+        if (l.swizzled) {
+            for (uint32_t y = 0; y < l.gh; y++)
+                for (uint32_t x = 0; x < l.gw; x++)
+                    std::memcpy(dst + size_t(SwizzledOffset(x, y, l.gw, l.gh)) * 4, p + size_t(y) * l.row_pitch + size_t(x) * 4, 4);
+        } else {
+            for (uint32_t y = 0; y < l.gh; y++) std::memcpy(dst + size_t(y) * pitch, p + size_t(y) * l.row_pitch, l.gw * 4);
+        }
         D3D12_RANGE none{0, 0};
         l.rb[best]->Unmap(0, &none);
         l.delivered = l.fence[best];
@@ -5221,7 +5245,8 @@ void D3D12Backend::RecordLateCopy(Late& l, uint32_t slot, ID3D12Resource* src) {
 
 void D3D12Backend::RecordLate(uint32_t data) {
     auto it = ColourTargetAt(data);
-    if (it == targets_.end() || TargetStale(data) || !it->second.linear32) return;
+    // a swizzled 32 bit one too (EoN's driving water draws vertices from one: GameInfo::vertex_read_back_late)
+    if (it == targets_.end() || TargetStale(data) || !(it->second.linear32 || it->second.swizzled32)) return;
     Target& t = it->second;
     PerfScope perf_sync{g_perf.sync};
     g_perf.lates++;
@@ -5230,9 +5255,10 @@ void D3D12Backend::RecordLate(uint32_t data) {
     t.read.clear();
     std::lock_guard lock(late_lock_);
     Late& l = late_[data];
-    if (l.gw != t.gw || l.gh != t.gh) {
+    if (l.gw != t.gw || l.gh != t.gh || l.swizzled != t.swizzled32) {
         if (diag::Perf()) LOG_FIRST(16, "perf: late %08X ring reset, %ux%u -> %ux%u", data, l.gw, l.gh, t.gw, t.gh);
         ResetLate(l, t);
+        l.swizzled = t.swizzled32;
     }
     // a copy for a later lock, unless the GPU is a whole ring behind
     uint32_t slot = l.next;

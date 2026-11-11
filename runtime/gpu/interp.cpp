@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -17,6 +18,7 @@
 #include "app/app.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/texture.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 
@@ -34,6 +36,7 @@ constexpr int kFreshShare = 4;                                // matched draws o
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
+constexpr double kOverrun = 0.001;                            // seconds past their time a step's frames may run
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
@@ -63,6 +66,8 @@ struct Rec {
     };
     std::vector<Kept> kept;
     Surface s1, s2;
+    // the targets' format and size words as the step drew into them, for the replays (Surface::as_drawn)
+    uint32_t rt_format = 0, rt_size = 0, zs_format = 0, zs_size = 0;
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
@@ -75,7 +80,14 @@ uint64_t KeyOf(const Rec& r) {
     uint64_t h = 0xCBF29CE484222325ull;
     auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
     mix(r.a), mix(r.b), mix(r.c), mix(s.vs_handle), mix(s.rt.header);
-    for (uint32_t t : s.textures) mix(t);
+    // and the target's memory: a title draws one surface header into two pictures on alternate steps (EoN's driving: its
+    // environment maps at 811C0000 and 813C0000 through one header), and a draw matched to the other picture's of the step
+    // before blended two views into one. Unmatched, they are drawn at the step's place, and what samples them with them
+    // (GameInfo::interp_sampled_targets_at_step)
+    mix(s.rt.data);
+    // stage 0's texture only: the other stages can hold a binding the program does not read that changes from one step to the
+    // next (EoN's driving: stage 2 bound one step and not the next), and lost the match of a whole floor's scenery and its decals
+    mix(s.textures[0]);
     // not the buffers: a title hands a mesh another vertex buffer from one step to the next (what it draws is the same); the matrix tells alike apart
     mix(s.viewport.x), mix(s.viewport.y), mix(s.viewport.w), mix(s.viewport.h), mix(s.squeeze_beyond);
     return h;
@@ -91,6 +103,7 @@ public:
         Rec& r = Next(Rec::Clear);
         Keep(r, s);
         r.a = count, r.b = flags, r.c = color, r.d = stencil, r.z = z;
+        AsDrawn(r, s);
         r.has_bytes = rects != nullptr;
         if (rects) r.bytes.assign(rects, rects + size_t(count) * 16);
     }
@@ -100,17 +113,12 @@ public:
         Rec& r = Next(Rec::Draw);
         Keep(r, s);
         r.a = prim, r.b = start, r.c = count;
+        AsDrawn(r, s);
         r.headers.clear();
-        const auto add = [&](uint32_t va) {
-            if (!va) return;
-            Rec::Header h{va, {}};
-            std::memcpy(h.bytes, kernel::HostPtr(va), HeaderSize(va));
-            r.headers.push_back(h);
-        };
-        for (const auto& stream : s.streams) add(stream.vb);
-        for (uint32_t t : s.textures) add(t);
+        for (const auto& stream : s.streams) AddHeader(r, stream.vb);
+        for (uint32_t t : s.textures) AddHeader(r, t);
         KeepVertices(r, s, start, count, indices);
-        for (uint32_t p : s.palettes) add(p);
+        for (uint32_t p : s.palettes) AddHeader(r, p);
         r.has_bytes = indices != nullptr;
         if (indices) r.bytes.assign(indices, indices + size_t(count) * 2);
     }
@@ -122,6 +130,7 @@ public:
     }
     void Present(const Surface& front) override;
     void Sync(uint32_t va, uint32_t size) override { inner_->Sync(va, size); }
+    void SyncVertices(uint32_t va) override { inner_->SyncVertices(va); }
     void SyncLate(uint32_t va) override { inner_->SyncLate(va); }
     bool DeliverLate(uint32_t va) override { return inner_->DeliverLate(va); }
     void RecordLate(uint32_t va) override { inner_->RecordLate(va); }
@@ -154,6 +163,25 @@ private:
     static uint32_t HeaderSize(uint32_t va) {
         const uint32_t type = kernel::R32(va) & 0x70000;
         return type < 0x20000 || type == 0x30000 ? 12 : kHeaderBytes;
+    }
+    static void AsDrawn(Rec& r, const State& s) {
+        r.rt_format = s.rt.header ? kernel::R32(s.rt.header + 12) : 0;
+        r.rt_size = s.rt.header ? kernel::R32(s.rt.header + 16) : 0;
+        r.zs_format = s.zs.header ? kernel::R32(s.zs.header + 12) : 0;
+        r.zs_size = s.zs.header ? kernel::R32(s.zs.header + 16) : 0;
+    }
+    // a replay draws into the targets the step drew into: their format and size as then, whatever the headers say by now
+    static void UseAsDrawn(const Rec& r, State& d) {
+        d.rt.format = r.rt_format, d.rt.size = r.rt_size, d.rt.as_drawn = d.rt.header != 0;
+        d.zs.format = r.zs_format, d.zs.size = r.zs_size, d.zs.as_drawn = d.zs.header != 0;
+    }
+    static void AddHeader(Rec& r, uint32_t va) {
+        if (!va) return;
+        for (const Rec::Header& h : r.headers)
+            if (h.va == va) return;
+        Rec::Header h{va, {}};
+        std::memcpy(h.bytes, kernel::HostPtr(va), HeaderSize(va));
+        r.headers.push_back(h);
     }
     void KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices);
     bool UploadKept();
@@ -207,10 +235,16 @@ private:
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
     int limit_ = kMostFrames, calm_ = 0, patience_ = kFirstPatience, late_ = 0;
     bool raised_ = false;
+    bool overran_ = false;  // the last step's frames went on past the time they had
+    uint32_t late_ours_ = 0, late_title_ = 0;
     Clock::time_point rest_until_{};
     bool logged_ = false;
     Clock::time_point reported_{};
     uint32_t shown_ = 0, steps_ = 0, blended_steps_ = 0;
+    // what holds the frame rate, summed over the 10 s summary: the title's own time a step (its records to its present), the match
+    // and upload before the replays, the replays, the frames planned and the limit the late steps leave
+    double sum_drawing_ = 0, sum_prepare_ = 0, sum_replay_ = 0, sum_planned_ = 0, sum_limit_ = 0;
+    uint32_t replays_ = 0;
 };
 
 void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
@@ -525,6 +559,50 @@ bool Interpolating::Match() {
 
 void Interpolating::Replay(float alpha) {
     const auto began = Clock::now();
+    // diagnosis: a file named interp_table in the working folder (the run folder headless) logs the next 8 replays' draws and how
+    // each was blended, to pair with the reference renderer's probes (PROBES, which name each writing draw's program, count and
+    // textures) on a pixel that flickers
+    static int diag_left = 0, diag_replay = 0;
+    diag_replay++;
+    if (!diag_left) {
+        if (std::FILE* f = std::fopen("interp_table", "rb")) {
+            std::fclose(f);
+            std::remove("interp_table");
+            diag_left = 8;
+        }
+    }
+    const bool diag_table = diag_left > 0;
+    if (diag_table) diag_left--;
+    if (diag_table) LOGR("gpu: in-between table: replay %d alpha %.2f records %zu", diag_replay, alpha, count_);
+    // GameInfo::interp_sampled_targets_at_step: the memory of targets drawn this step by draws that are not blended (no match,
+    // or a leap); a draw sampling one of them is drawn at the step's place, as what it samples is
+    std::vector<uint32_t> unblended_targets;
+    if (alpha != 1 && app::kGame.interp_sampled_targets_at_step)
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev >= 0 || r.derived || r.peer >= 0 || !r.s->rt.data) continue;
+            const uint32_t d = r.s->rt.data & 0x0FFFFFFF;
+            if (std::find(unblended_targets.begin(), unblended_targets.end(), d) == unblended_targets.end()) unblended_targets.push_back(d);
+        }
+    const auto samples_unblended = [&](const State& st) {
+        for (uint32_t t : st.textures)
+            if (t && std::find(unblended_targets.begin(), unblended_targets.end(), kernel::R32(t + 4) & 0x0FFFFFFF) != unblended_targets.end())
+                return true;
+        return false;
+    };
+    // and every pass of the same thing with it: draws of one matrix are one mesh drawn again (a light or shadow modulated over it),
+    // and one at the step's place with another blended put the second pass beside the first, darkening the wrong pixels in every
+    // in-between frame (measured with the reference renderer's probes at Train Chase's barrier)
+    const auto matrix_of = [](const Rec& r) {
+        uint64_t h = 0xCBF29CE484222325ull;
+        const auto* b = reinterpret_cast<const uint8_t*>(r.vsc.data());
+        for (size_t k = 0; k < kMatrixRegisters * sizeof(r.vsc[0]); k++) h = (h ^ b[k]) * 0x100000001B3ull;
+        return h;
+    };
+    std::unordered_map<uint64_t, bool> at_step_matrix;
+    if (!unblended_targets.empty())
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && samples_unblended(*now_[i].s)) at_step_matrix[matrix_of(now_[i])] = true;
     // as the title left them, afterwards
     std::vector<Rec::Header> left;
     std::unordered_map<uint32_t, bool> seen;
@@ -542,6 +620,7 @@ void Interpolating::Replay(float alpha) {
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
             case Rec::Clear:
+                UseAsDrawn(r, *r.s);
                 inner_->Clear(*r.s, r.a, r.has_bytes ? r.bytes.data() : nullptr, r.b, r.c, r.z, r.d);
                 break;
             case Rec::Copy:
@@ -558,7 +637,12 @@ void Interpolating::Replay(float alpha) {
                     kernel::W32(h + 8, 0);
                     d.streams[kept.stream].vb = h;
                 }
-                const bool blend = r.prev >= 0 && alpha != 1;
+                const bool at_step = !at_step_matrix.empty() && at_step_matrix.count(matrix_of(r));
+                if (diag_table)
+                    LOGR("gpu: in-between table: %d rec %zu %s vs %08X count %u tex %08X %08X %08X %08X rt %08X", diag_replay, i,
+                         alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? "derived" : r.peer >= 0 ? "peer" : "none",
+                         r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header);
+                const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
                 if (blend) {
                     const Rec& p = before_[size_t(r.prev)];
                     if (r.turning) {
@@ -568,11 +652,11 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
                     }
-                } else if (r.derived && alpha != 1) {
+                } else if (r.derived && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
                         for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
-                } else if (r.peer >= 0 && alpha != 1) {
+                } else if (r.peer >= 0 && alpha != 1 && !at_step) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
                     for (uint32_t k = 0; k < kRegisters; k++) {
@@ -583,7 +667,23 @@ void Interpolating::Replay(float alpha) {
                 } else {
                     d.vsc = r.vsc;
                 }
+                // a draw without a program takes the fixed function matrices: blended too, or what it draws (a car's light and
+                // shadow cast on the road, EoN) stays at the step's place while what is round it is blended, jumping back and forth
+                constexpr uint32_t kFixed[] = {2, 3, 16, 17, 18, 19, 256, 257, 258, 259};  // view, projection, texture 0-3, world 0-3
+                std::array<std::array<float, 16>, std::size(kFixed)> fixed_was;
+                const bool fixed = blend && !(d.vs_handle & 1) && before_[size_t(r.prev)].s;
+                if (fixed) {
+                    const State& p = *before_[size_t(r.prev)].s;
+                    for (size_t i = 0; i < std::size(kFixed); i++) {
+                        auto& m = d.transforms[kFixed[i]];
+                        fixed_was[i] = m;
+                        for (uint32_t e = 0; e < 16; e++) m[e] = p.transforms[kFixed[i]][e] + (m[e] - p.transforms[kFixed[i]][e]) * alpha;
+                    }
+                }
+                UseAsDrawn(r, d);
                 inner_->Draw(d, r.a, r.b, r.c, indices);
+                if (fixed)
+                    for (size_t i = 0; i < std::size(kFixed); i++) d.transforms[kFixed[i]] = fixed_was[i];
                 d.streams = streams;
                 break;
             }
@@ -592,6 +692,7 @@ void Interpolating::Replay(float alpha) {
     for (const Rec::Header& l : left) std::memcpy(kernel::HostPtr(l.va), l.bytes, HeaderSize(l.va));
     region_fence_[region_] = inner_->Fence();
     replay_seconds_ = std::chrono::duration<double>(Clock::now() - began).count();
+    sum_replay_ += replay_seconds_, replays_++;
 }
 
 void Interpolating::Present(const Surface& front) {
@@ -599,8 +700,17 @@ void Interpolating::Present(const Surface& front) {
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
+    const auto prepare_began = Clock::now();
     const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
-    if (Test() && blend) {
+    sum_prepare_ += std::chrono::duration<double>(Clock::now() - prepare_began).count();
+    static const bool test_paced = std::getenv("XBE_INTERP_TEST_PACED") != nullptr;
+    if (Test() && blend && test_paced) {
+        // as the paced frames go (below): from the step before towards this one, never this step's own picture last
+        for (int i = 0; i < Test(); i++) {
+            Replay(float(i) / float(Test()));
+            inner_->Present(front);
+        }
+    } else if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
             inner_->Present(front);
@@ -608,6 +718,7 @@ void Interpolating::Present(const Surface& front) {
         Replay(1);
         inner_->Present(front);
     } else if (!blend || step > kLongestStep || step < kShortestStep) {
+        overran_ = false;
         inner_->Present(front);
     } else {
         if (!logged_) LOGR("gpu: in-between frames, a step of %.1f ms at up to %u a second", step * 1000, Rate());
@@ -626,12 +737,20 @@ void Interpolating::Present(const Surface& front) {
         const int fit = replay_seconds_ > 0 ? int(std::max(span, 0.0) / replay_seconds_) + 1 : 2;
         // steps coming late again and again are the proof, whatever the cause (a full queue behind vertical sync comes in bursts); one
         // now and then is only the title's own work, an explosion say. Fewer frames, and more after a calm, longer if the last try failed
-        late_ += step > usual * kLate ? kLateWeight : 0;
+        // only a step our frames made late counts: one the title was late with on its own (loading, an explosion) says nothing
+        // about them. And the limit is kept to the frames a step would get: brought down from kMostFrames by late steps one at a
+        // time, each a step it did not hold back, and patience doubled each time, it took minutes to reach 2 at 144 a second and
+        // then stayed at 1 for half a minute at a time (Harry, 2026-11-09: 115 then 60 frames a second)
+        const int wanted = std::clamp(int(usual / slot + 0.5), 1, kMostFrames);
+        const bool late = step > usual * kLate;
+        if (late) (overran_ ? late_ours_ : late_title_)++;
+        late_ += late && overran_ ? kLateWeight : 0;
         if (late_ > 0) late_--;
         if (late_ >= kLateLimit && limit_ > 1) {
             if (raised_) patience_ = std::min(patience_ * 2, kMostPatience);
             raised_ = false;
-            limit_--;
+            // from the frames a step gets, not from a limit above them (kept there, a short step after a late one held it at 1)
+            limit_ = std::max(1, std::min(limit_, wanted) - 1);
             calm_ = 0;
             late_ = 0;
         } else if (++calm_ >= patience_ && limit_ < kMostFrames) {
@@ -641,13 +760,16 @@ void Interpolating::Present(const Surface& front) {
             if (patience_ > kFirstPatience) patience_ = std::max(patience_ * 3 / 4, kFirstPatience);
         }
         const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
+        sum_drawing_ += drawing, sum_planned_ += frames, sum_limit_ += limit_;
         const double spacing = std::min(slot, usual / frames);
         if (t < rest_until_) {
+            overran_ = false;
             inner_->Present(front);
         } else if (replay_seconds_ > usual * kTooLong) {
             rest_until_ = t + std::chrono::seconds(2);
             replay_seconds_ = 0;
             LOGR("gpu: in-between frames: a replay takes too long, none for 2 s");
+            overran_ = false;
             inner_->Present(front);
         } else {
             // the title's choice for what the player aims: the step shown at once and carried on from there, up to a step too far when
@@ -660,6 +782,7 @@ void Interpolating::Present(const Surface& front) {
                 inner_->Present(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() + replay_seconds_ - frame_seconds_) * 0.1;
             }
+            overran_ = false;
             for (int i = ahead ? 1 : 0; i < frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
@@ -669,19 +792,35 @@ void Interpolating::Present(const Surface& front) {
                 inner_->Present(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() - frame_seconds_) * 0.1;
                 if (i) shown_++;
-                // not past the time the title needs for its next step
-                const double until = std::min(at + spacing, std::max(span, at));
+                // not past the time the title needs for its next step, and the next frame begun early enough to be done by it: the
+                // second of two at 144 a second missed by a fraction of a millisecond and was dropped, the step shown alone (Harry's
+                // run of a96ead6: 640 to 780 frames for 600 steps)
+                const double fits = span + replay_seconds_ - frame_seconds_ - kOverrun;
+                const double until = std::max(at, std::min({at + spacing, std::max(span, at), fits}));
                 std::this_thread::sleep_until(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
             }
+            overran_ = std::chrono::duration<double>(Clock::now() - t).count() > span + replay_seconds_ + kOverrun;
         }
     }
     shown_++;
     steps_++;
     if (t - reported_ > std::chrono::seconds(10)) {
         if (reported_ != Clock::time_point{} && blended_steps_)
-            LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s", shown_, steps_, blended_steps_);
+        {
+            LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s%s", shown_, steps_, blended_steps_,
+                 app::kGame.interp_sampled_targets_at_step ? " (what samples an unblended target at its step's place)" : "");
+            const double b = std::max(1u, blended_steps_);
+            LOGR("gpu: in-between frames, a step: the title %.2f ms, matching and upload %.2f ms, a replay %.2f ms (%u), frames planned "
+                 "%.2f, limit %.2f",
+                 sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
+                 replays_, sum_planned_ / b, sum_limit_ / b);
+            LOGR("gpu: in-between frames: late steps: %u after our frames ran over, %u the title's own", late_ours_, late_title_);
+        }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
+        late_ours_ = late_title_ = 0;
+        sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
+        replays_ = 0;
     }
     now_.swap(before_);
     before_count_ = count_;

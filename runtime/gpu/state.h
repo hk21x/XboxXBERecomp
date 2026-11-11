@@ -165,6 +165,9 @@ struct Viewport {
 struct Surface {
     uint32_t header = 0;  // guest D3DSurface
     uint32_t data = 0, format = 0, size = 0;
+    // format and size describe it rather than its header: an in-between frame's replay of a draw, with the size its target had
+    // when drawn (a title may describe another size in the same header later in the step)
+    bool as_drawn = false;
     // a front buffer only: a title showing its frames blended (SetFrameBlend; Direct3D 12): how much of this image
     // over the last one, and whether the image is a new one
     float blend = 1;

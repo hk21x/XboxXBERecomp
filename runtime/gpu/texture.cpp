@@ -283,15 +283,10 @@ const FormatInfo& Format(uint32_t f) {
     return kUnknown;
 }
 
-bool Describe(uint32_t header, TextureDesc& d) {
-    using namespace kernel;
-    if (!header) return false;
-    uint32_t common = R32(header);
-    uint32_t type = common & 0x70000;  // 0x40000 texture, 0x50000 surface
-    if (type != 0x40000 && type != 0x50000) return false;
-    // D3DPixelContainer: Common, Data, Lock, Format, Size
-    uint32_t fmt = R32(header + 12), size = R32(header + 16);
-    d.data = mem::VirtualFromPhysical(R32(header + 4));
+namespace {
+// D3DPixelContainer's Data, Format and Size
+void DescribeFields(uint32_t data, uint32_t fmt, uint32_t size, TextureDesc& d) {
+    d.data = mem::VirtualFromPhysical(data);
     // Format: cube bit 2, dimensions bits 4 to 7, format 8 to 15, levels 16 to 19, log2 sizes from bit 20
     d.format = (fmt >> 8) & 0xFF;
     d.cube = fmt & 4;
@@ -311,12 +306,29 @@ bool Describe(uint32_t header, TextureDesc& d) {
         d.linear = !Format(d.format).swizzled && !Format(d.format).compressed;
         d.pitch = d.width * Format(d.format).bits / 8;
     }
+}
+}  // namespace
+
+bool Describe(uint32_t header, TextureDesc& d) {
+    using namespace kernel;
+    if (!header) return false;
+    uint32_t common = R32(header);
+    uint32_t type = common & 0x70000;  // 0x40000 texture, 0x50000 surface
+    if (type != 0x40000 && type != 0x50000) return false;
+    // D3DPixelContainer: Common, Data, Lock, Format, Size
+    DescribeFields(R32(header + 4), R32(header + 12), R32(header + 16), d);
     return true;
 }
 
+// a target by its header, or for an in-between frame's replay as it was when the step drew (Surface::as_drawn): EoN's driving
+// draws its 512x512 environment maps through a header that says 640x480 by the step's end, and the replays drew into another
+// target than the step's (the floor's flicker). Only the replays: the title's own draws taking SurfaceOf's copy found its small
+// glow targets at another size than it reads them at, and waited on a read-back each frame (Harry's A/B, 2026-11-10)
 bool DescribeSurface(const Surface& s, TextureDesc& d) {
     if (!s.header) return false;
-    return Describe(s.header, d);
+    if (!s.as_drawn) return Describe(s.header, d);
+    DescribeFields(s.data, s.format, s.size, d);
+    return true;
 }
 
 uint32_t LevelSize(const TextureDesc& d, uint32_t level) {
@@ -433,7 +445,7 @@ uint32_t LinearDepthFormat(uint32_t f) {
 
 void SurfaceSize(const Surface& s, uint32_t& w, uint32_t& h) {
     TextureDesc d;
-    if (Describe(s.header, d)) {
+    if (DescribeSurface(s, d)) {
         w = d.width;
         h = d.height;
     } else {

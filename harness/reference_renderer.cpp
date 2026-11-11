@@ -1680,7 +1680,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                                 LOGI("  v%u pos %.2f %.2f %.1f w %.3f in %.3f %.3f %.3f %.3f", vi, pos[0], pos[1], pos[2], pos[3], v0 ? v0[0] : 0,
                                      v0 ? v0[1] : 0, v0 ? v0[2] : 0, v0 ? v0[3] : 0);
                             }
-                            LOGI("probe %d,%d draw %u src %.3f %.3f %.3f %.3f -> %.3f %.3f %.3f %.3f blend %u %X %X mask %X", x, y, draw, shaded[0],
+                            LOGI("probe %d,%d draw %u vs %08X count %u tex %08X %08X src %.3f %.3f %.3f %.3f -> %.3f %.3f %.3f %.3f blend %u %X %X mask %X", x, y, draw,
+                                 s.vs_handle, count, s.textures[0], s.textures[1], shaded[0],
                                  shaded[1], shaded[2], shaded[3], col[0], col[1], col[2], col[3], unsigned(blend), src_factor, dst_factor, cmask);
                         }
                     rt.Store(uint32_t(x), uint32_t(y), col, cmask);
