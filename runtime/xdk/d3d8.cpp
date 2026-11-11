@@ -1367,6 +1367,10 @@ HLE_STDCALL(D3DDevice_CreateVertexShader, 4) {
     }
     gpu::ParseDeclaration(*vs);
     uint32_t rec = mem::AllocSystem(16, 16);
+    // the XDK's object keeps the instruction count at +8 (5849 CreateVertexShader 0x2509F6 in 50 Cent: Bulletproof),
+    // and its GetVertexShaderSize reads it there (0x250E10): that title lays its programs out in program memory by
+    // it, so a zero loaded every program at slot 0 over the last one and its full screen copy drew another program
+    W32(rec + 8, uint32_t(vs->program.size() / 4));
     vs->handle = rec | 1;
     g_vs[vs->handle] = vs;
     W32(out, vs->handle);
