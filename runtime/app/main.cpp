@@ -43,9 +43,36 @@ bool g_mode_changed = false;
 bool g_apply_posted = false;  // a display apply is waiting in the queue or running
 std::atomic<bool> g_active{true};  // the game window is in front (WM_ACTIVATE)
 
-// crash dump in CrashDumps beside the exe
+// the guest's committed memory added to a crash dump at its host address (guest address + kernel::g_base), one run of
+// committed pages (at most 16 MB) for each MemoryCallback, up to 512 MB in all: a dump shows the title's own state
+struct DumpGuestRuns {
+    uint64_t va = 0x1000;
+    uint64_t total = 0;
+};
+BOOL CALLBACK DumpCallback(PVOID param, const PMINIDUMP_CALLBACK_INPUT in, PMINIDUMP_CALLBACK_OUTPUT out) {
+    if (!in || !out || in->CallbackType != MemoryCallback) return TRUE;
+    auto& r = *static_cast<DumpGuestRuns*>(param);
+    out->MemoryBase = 0;
+    out->MemorySize = 0;
+    while (r.va < 0x100000000ull && r.total < (512ull << 20)) {
+        if (!mem::IsCommitted(uint32_t(r.va))) {
+            r.va += 0x1000;
+            continue;
+        }
+        uint64_t end = r.va;
+        while (end < 0x100000000ull && end - r.va < 0x1000000 && mem::IsCommitted(uint32_t(end))) end += 0x1000;
+        out->MemoryBase = reinterpret_cast<ULONG64>(kernel::HostPtr(uint32_t(r.va)));
+        out->MemorySize = ULONG(end - r.va);
+        r.total += end - r.va;
+        r.va = end;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// crash dump in CrashDumps beside the exe, with the guest's memory (DumpCallback); the guest registers and return
+// addresses go to the log
 LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
-    // the dump holds no guest memory: the guest registers and return addresses go to the log
     if (kernel::Thread* t = kernel::Current(); e && t && t->ctx) {
         auto* r = e->ExceptionRecord;
         LOGE("exception %08lX at %p on guest thread %X", r->ExceptionCode, r->ExceptionAddress, t->id);
@@ -66,11 +93,15 @@ LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
     HANDLE f = CreateFileW((dir / name).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return EXCEPTION_CONTINUE_SEARCH;
     MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), e, FALSE};
+    DumpGuestRuns runs;
+    MINIDUMP_CALLBACK_INFORMATION callback{DumpCallback, &runs};
     MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f,
                       MINIDUMP_TYPE(MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo |
                                     MiniDumpWithUnloadedModules | MiniDumpWithIndirectlyReferencedMemory),
-                      e ? &info : nullptr, nullptr, nullptr);
+                      e ? &info : nullptr, nullptr, &callback);
     CloseHandle(f);
+    LOGE("crash dump %ls written, with %llu MB of guest memory (guest address + %p)", name,
+         (unsigned long long)(runs.total >> 20), static_cast<void*>(kernel::g_base));
     logx::Flush();
     return EXCEPTION_CONTINUE_SEARCH;
 }

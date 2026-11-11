@@ -960,6 +960,17 @@ uint32_t PresentVblanks() {
 namespace {
 uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
     constexpr uint32_t kCopy = 1, kBypassCopy = 2, kFinish = 4;
+    // XBE_TEST_CRASH=N: a read of unmapped guest memory on the title's thread at its Nth swap, to try the crash
+    // handler and its dump (app/main.cpp WriteCrashDump)
+    static const uint32_t test_crash = [] {
+        const char* e = std::getenv("XBE_TEST_CRASH");
+        return e ? uint32_t(std::strtoul(e, nullptr, 10)) : 0u;
+    }();
+    static uint32_t swaps = 0;
+    if (test_crash && ++swaps == test_crash) {
+        LOGE("XBE_TEST_CRASH: reading guest 4823D028 at swap %u", swaps);
+        (void)*reinterpret_cast<volatile uint32_t*>(kernel::g_base + 0x4823D028u);
+    }
     uint32_t flags = swap_flags ? swap_flags : kCopy | kFinish;
     if (!(flags & kFinish)) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
