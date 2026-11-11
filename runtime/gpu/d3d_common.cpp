@@ -920,7 +920,8 @@ DrawnRect ReadDrawnRect(uint32_t src_rects, uint32_t dst_points, uint32_t i) {
 // a guest coordinate read as unsigned, times the host scale
 UINT ScaleUnsigned(int32_t v, float sc) { return UINT(uint32_t(v) * sc); }
 
-// Ultrawide: a title lays out its 2D (HUD, menus) for 16:9 (GameInfo::hud_aspect, 4:3 for a title without widescreen);
+// Ultrawide: a title lays out its 2D (HUD, menus) for 16:9 (app::HudAspect: GameInfo::hud_aspect, 4:3 for a title without
+// widescreen or in its 4:3 mode, widened to a 16:10 screen);
 // shown wider it would stretch. Pretransformed draws without a depth test on a stretched screen target are squeezed
 // into the centred part of that shape, each corner on its own: one on
 // the frame's left or right edge stays there (the vertex shader), so HUD bars from the edge still reach it and full
@@ -976,7 +977,7 @@ void DepthRead(uint32_t format, TexInfo& info) {
 
 void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, uint32_t gh, uint32_t w, float aspect,
                  float stretch, float squeeze) {
-    if (!(a.pretransformed || ScreenDraw(s)) || aspect <= app::kGame.hud_aspect + 1e-3f) return;
+    if (!(a.pretransformed || ScreenDraw(s)) || aspect <= app::HudAspect() + 1e-3f) return;
     static std::mutex lock;
     static std::unordered_set<uint64_t> seen;  // each target with each outcome, once
     static int said = 0;
@@ -1080,7 +1081,7 @@ void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, 
 }
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
-    const float wide = app::kGame.hud_aspect;
+    const float wide = app::HudAspect();
     if (!(a.pretransformed || ScreenDraw(s)) || aspect <= wide + 1e-3f || stretch <= 1) return 1;
     return wide / aspect;
 }

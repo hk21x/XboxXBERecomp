@@ -420,39 +420,69 @@ Mode Output() {
 }
 
 namespace {
+// the output's shape, asked per frame and per HUD quad: the desktop mode lookup only runs when the resolution setting
+// changes
+float ScreenAspect() {
+    static std::atomic<uint64_t> key{~0ull};
+    static std::atomic<float> aspect{16.0f / 9.0f};
+    const Settings& s = Get();
+    uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;
+    if (key.exchange(k) != k) {
+        Mode m = Output();
+        aspect = m.height ? float(m.width) / float(m.height) : 16.0f / 9.0f;
+    }
+    return aspect;
+}
+
 // the aspect setting as the title booted with it: it reads its TV setting once, so a choice changed in play applies at the
 // next start, as the settings window says (changing it at once reshaped the frame around cameras set up for the old one:
-// PGR2 issue 33, ultrawide stretched until a restart); the screen's size stays live. First asked after Load (main.cpp).
+// PGR2 issue 33, ultrawide stretched until a restart); the screen's size stays live
 uint32_t AspectChoice() {
     static const uint32_t choice = Get().aspect % 4;
     return choice;
 }
+
+// "from the screen's shape" or "fill the screen", on a screen wider than 4:3 and narrower than 16:9, for a title that
+// widens its 4:3 views (GameInfo::fills_narrow_screens)
+bool FillsNarrow() {
+    const uint32_t a = AspectChoice();
+    if (!kGame.fills_narrow_screens || (a != 0 && a != 3)) return false;
+    const float r = ScreenAspect();
+    return r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
+}
+
+// the aspect choice a fills an ultrawide screen
+bool FillsWide(uint32_t a) { return a == 3 || (a == 0 && kGame.auto_fills_screen); }
 }  // namespace
 
+// kept from the first ask: the title reads its TV setting once, as it boots, so a resolution changed in play (16:10 to
+// 16:9 from the Display page) must not tell the renderers another mode than the title is in
 bool Widescreen() {
-    // asked per frame and per HUD quad: the desktop mode lookup only runs when the resolution setting changes
-    static std::atomic<uint64_t> key{~0ull};
-    static std::atomic<bool> wide{true};
-    const Settings& s = Get();
-    const uint32_t a = AspectChoice();
-    if (a == 1) return false;
-    if (a >= 2) return true;
-    uint64_t k = (uint64_t(s.width) << 32 | s.height) ^ uint64_t(s.monitor) << 60;
-    if (key.exchange(k) != k) {
-        Mode m = Output();
-        wide = m.width * 2 >= m.height * 3;  // 3:2 or wider
-    }
+    static const bool wide = [] {
+        const uint32_t a = AspectChoice();
+        if (a == 1 || FillsNarrow()) return false;
+        if (a >= 2) return true;
+        return ScreenAspect() >= 1.5f - 1e-3f;  // 3:2 or wider
+    }();
     return wide;
 }
 
 float FrameAspect() {
-    if (!Widescreen()) return 4.0f / 3.0f;
-    // the booted choice, or the current one for a title whose views follow (GameInfo::fill_follows_live)
-    const uint32_t a = kGame.fill_follows_live ? Get().aspect % 4 : AspectChoice();
-    if (a != 3 && !(a == 0 && kGame.auto_fills_screen)) return 16.0f / 9.0f;
-    Mode m = Output();
-    return m.height ? std::max(16.0f / 9.0f, float(m.width) / float(m.height)) : 16.0f / 9.0f;
+    const uint32_t a = AspectChoice();
+    if (!Widescreen()) {
+        // a title widening its 4:3 views fills the screen it is shown on now, as far as the setting reaches (16:10 at
+        // boot and 16:9 since: 16:9; an ultrawide only with FillsWide)
+        if (!kGame.fills_narrow_screens || (a != 0 && a != 3)) return 4.0f / 3.0f;
+        const float r = std::max(4.0f / 3.0f, ScreenAspect());
+        return FillsWide(a) ? r : std::min(r, 16.0f / 9.0f);
+    }
+    // the booted choice, or the current one for a title whose views follow (GameInfo::fill_follows_live): 16:9 against
+    // filling the screen at once; 4:3 stays for the next start (16:9 meanwhile)
+    if (!FillsWide(kGame.fill_follows_live ? Get().aspect % 4 : a)) return 16.0f / 9.0f;
+    return std::max(16.0f / 9.0f, ScreenAspect());
 }
+
+float HudAspect() { return Widescreen() ? kGame.hud_aspect : std::min(kGame.hud_aspect, 4.0f / 3.0f); }
 
 float RenderScale(uint32_t guest_height) {
     float h = Output().height * (Get().render_percent / 100.0f);

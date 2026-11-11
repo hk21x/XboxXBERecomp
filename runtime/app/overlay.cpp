@@ -366,13 +366,29 @@ void Display(Settings& s) {
     static uint32_t list_monitor = ~0u;
     static std::vector<Mode> list;
     if (list_monitor != s.monitor) list = Modes(), list_monitor = s.monitor;
+    // a window may be any size: common 16:10 and 16:9 ones that fit the monitor join its own modes (a 16:10 window on a
+    // 16:9 or ultrawide monitor, to try a Steam Deck's shape)
+    std::vector<Mode> shown = list;
+    if (s.display_mode == DisplayMode::Windowed && !list.empty()) {
+        uint32_t most_w = 0, most_h = 0;
+        for (const Mode& m : list) most_w = std::max(most_w, m.width), most_h = std::max(most_h, m.height);
+        static const Mode kWindowSizes[] = {{2560, 1600}, {2560, 1440}, {1920, 1200}, {1920, 1080}, {1680, 1050},
+                                            {1600, 900},  {1440, 900},  {1280, 800},  {1280, 720}};
+        for (const Mode& m : kWindowSizes)
+            if (m.width <= most_w && m.height <= most_h &&
+                std::none_of(shown.begin(), shown.end(), [&](const Mode& o) { return o.width == m.width && o.height == m.height; }))
+                shown.push_back(m);
+        std::sort(shown.begin(), shown.end(), [](const Mode& a, const Mode& b) {
+            return a.width != b.width ? a.width > b.width : a.height > b.height;
+        });
+    }
     std::string current = s.width && s.height ? std::to_string(s.width) + " x " + std::to_string(s.height) : "Desktop";
     if (RowListBegin("Resolution", current.c_str())) {
         if (ListItem("Desktop", !s.width)) {
             s.width = s.height = 0;
             changed = true;
         }
-        for (const Mode& m : list) {
+        for (const Mode& m : shown) {
             std::string name = std::to_string(m.width) + " x " + std::to_string(m.height);
             if (ListItem(name.c_str(), s.width == m.width && s.height == m.height)) {
                 s.width = m.width;
@@ -388,7 +404,7 @@ void Display(Settings& s) {
         ApplyDisplay();
     }
     int aspect = int(s.aspect % 4);
-    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide)"};
+    const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide, 16:10)"};
     const char* aspect_help = kGame.fill_follows_live
                                   ? "16:9 and the two that fill an ultrawide screen apply at once; to or from 4:3 at the next start (the game reads its TV setting when it boots)."
                                   : "Applies at the next start (the game reads its TV setting when it boots).";
