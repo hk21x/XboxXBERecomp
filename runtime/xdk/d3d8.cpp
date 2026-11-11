@@ -1091,7 +1091,11 @@ HLE_STDCALL(D3DDevice_SetViewport, 1) {
     WalkBeforeState();
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t v = a[0];
-    g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
+    // NULL keeps the viewport and only clears the scissors (5849: Juiced 0x2AD340 jumps to 0x2AD512, which calls
+    // SetScissors(0, 0, 0) and the transform update). The library passes it itself: Juiced's render state setter
+    // 0x2A9900 clears its argument at 0x2A991D and goes on to it (logged from the setter's caller 0x140ED4)
+    if (!v) LOG_FIRST(4, "d3d: SetViewport(NULL) from %08X", R32(ctx.esp));
+    if (v) g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
     g_state.scissor_count = 0;
     UpdateViewportConstants();
     return 0;
