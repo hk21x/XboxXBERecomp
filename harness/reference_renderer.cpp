@@ -1511,6 +1511,14 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             tri[i].h[3] = v.pos[3];
             std::copy(v.attr, v.attr + kAttrs, tri[i].attr);
         }
+        // the program's x and y are screen positions already and w only steers perspective correct interpolation, so a
+        // triangle whose corners share one w is the same at w = 1. That keeps the ones whose w was 0, clamped below
+        // near_w: the GPU renderers draw them (their clip is w > 0), Juiced's Bink quads pass the vertex's w of 0 through
+        if (tri[0].h[3] == tri[1].h[3] && tri[1].h[3] == tri[2].h[3] && tri[0].h[3] > 0 && tri[0].h[3] <= near_w)
+            for (auto& c : tri) {
+                for (int j = 0; j < 3; j++) c.h[j] /= c.h[3];
+                c.h[3] = 1;
+            }
         // flat shading takes the first vertex's colours
         const Vec* provoking = tri[0].attr;
         Vec flat_colour[4] = {provoking[kD0], provoking[kD1], provoking[kB0], provoking[kB1]};
