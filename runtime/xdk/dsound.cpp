@@ -78,6 +78,10 @@ X86Func* Find(uint32_t guest);
 #define SYM_IDirectSoundBuffer_SetDopplerFactor FFFFFF46
 #define HAS_IDirectSoundBuffer_SetDopplerFactor 0
 #endif
+#ifndef SYM_IDirectSoundBuffer_SetRolloffFactor
+#define SYM_IDirectSoundBuffer_SetRolloffFactor FFFFFF72
+#define HAS_IDirectSoundBuffer_SetRolloffFactor 0
+#endif
 #ifndef SYM_IDirectSoundBuffer_SetEG
 #define SYM_IDirectSoundBuffer_SetEG FFFFFF47
 #define HAS_IDirectSoundBuffer_SetEG 0
@@ -748,7 +752,7 @@ static void AuditExports() {
         SYM(CDirectSoundStream_SetI3DL2Source), SYM(CDirectSoundStream_SetDopplerFactor), SYM(IDirectSoundStream_SetEG),
         SYM(DirectSoundGetSampleTime), SYM(IDirectSound_CreateSoundStream), SYM(IDirectSoundBuffer_GetVoiceProperties),
         SYM(IDirectSoundBuffer_SetConeAngles), SYM(IDirectSoundBuffer_SetConeOutsideVolume),
-        SYM(IDirectSoundBuffer_SetDopplerFactor), SYM(IDirectSoundBuffer_SetEG), SYM(IDirectSoundBuffer_SetLFO),
+        SYM(IDirectSoundBuffer_SetDopplerFactor), SYM(IDirectSoundBuffer_SetRolloffFactor), SYM(IDirectSoundBuffer_SetEG), SYM(IDirectSoundBuffer_SetLFO),
         SYM(IDirectSoundBuffer_SetPitch), SYM(IDirectSoundStream_GetVoiceProperties),
         SYM(IDirectSoundStream_SetLFO), SYM(IDirectSoundStream_SetOutputBuffer), SYM(IDirectSoundStream_SetPitch),
         SYM(XAudioSetEffectData),
@@ -1044,6 +1048,9 @@ BUFFER(SetLFO, 2) { return 0; }
 BUFFER(SetConeAngles, 4) { return 0; }
 BUFFER(SetConeOutsideVolume, 3) { return 0; }
 BUFFER(SetDopplerFactor, 3) { return 0; }
+// (this, factor, apply): the buffer's own rolloff, not modelled (the listener's is). Its console code works on the
+// console voice a host buffer does not have (Juiced 0x2781EB, .XTLID 0xB007A, crashed in 0x277AD4 as a race loaded)
+BUFFER(SetRolloffFactor, 3) { return 0; }
 // (this, 3D voice data or null): sets or clears a flag of the console voice; the name is inferred (no .XTLID
 // entry), from that and from its user, XACT's 3D voices (Forza 0x3F2FF1 and the stream's 0x3F3057)
 BUFFER(Use3DVoiceData, 2) { return 0; }
