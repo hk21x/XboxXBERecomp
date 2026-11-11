@@ -5352,6 +5352,9 @@ constexpr int kBmpImageSize = 34;
 constexpr uint32_t kBmpInfoBytes = 40;
 
 void D3D12Backend::CapSave(const CapImage& img, const char* name) {
+    // the draws recorded so far go into the list first: Shrink and ReadBack write it directly, and with the recorded
+    // draws still in rec_ (render-mt2) the copy came before them, a capture's targets only their clear colour
+    CLAt("CapSave");
     ComPtr<ID3D12Resource> down = Shrink(img.res, *img.state, img.fmt, img.w, img.h, {.mul = img.mul});
     std::vector<uint8_t> px;
     if (!down || !ReadBack(down.Get(), img.w, img.h, px)) return;
