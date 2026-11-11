@@ -585,6 +585,39 @@ void FvfInputs(uint32_t fvf, VertexShader& vs) {
     vs.stream_stride[0] = off;
 }
 
+void KeepLastVertex(State& state, uint32_t start, uint32_t count, const uint8_t* ip) {
+    using namespace kernel;
+    if (!count) return;
+    const bool input = state.input_active;
+    const auto& streams = input ? state.input_streams : state.streams;
+    VertexShader fvf_layout, input_layout;
+    const VertexShader* layout = nullptr;
+    if (input) {
+        input_layout.inputs = state.input_layout;
+        layout = &input_layout;
+    } else {
+        layout = PickLayout(state, fvf_layout);
+    }
+    if (!layout) return;
+    uint32_t last = start + count - 1;
+    if (ip) {
+        uint16_t v;
+        std::memcpy(&v, ip + size_t(count - 1) * 2, 2);
+        last = v + state.base_vertex;
+    }
+    for (int r = 0; r < 16; r++) {
+        const auto& in = layout->inputs[size_t(r)];
+        if (in.stream < 0 || !in.type || in.type == kTypeNone) continue;
+        const auto& st = streams[size_t(in.stream)];
+        if (!st.vb) continue;
+        uint32_t stride = st.stride ? st.stride : layout->stream_stride[size_t(in.stream)];
+        uint32_t vertex = stride ? last : (ip ? 0 : start);
+        uint32_t at = mem::VirtualFromPhysical(R32(st.vb + kResData)) + in.offset + vertex * stride;
+        if (!mem::IsCommitted(at) || !mem::IsCommitted(at + 15)) continue;
+        Convert(in.type, static_cast<const uint8_t*>(HostPtr(at)), state.vattr[size_t(r)].data());
+    }
+}
+
 bool Assemble(const State& state, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* ip, Assembled& out) {
     ResetAssembled(out);
     if (!count || prim < 1 || prim > 10) return false;

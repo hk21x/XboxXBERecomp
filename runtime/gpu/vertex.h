@@ -64,4 +64,11 @@ void FvfInputs(uint32_t fvf, VertexShader& out);
 // indices: the title's 16 bit indices, null for an unindexed draw
 bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices, Assembled& out);
 
+// After a draw from vertex arrays the GPU's attribute registers hold the values of the draw's last vertex (the highest
+// one of an unindexed draw, the last listed index of an indexed one; a stream of stride 0 its first vertex), and a later
+// draw whose declaration leaves a register without a stream reads it there. Juiced draws its font with no colour in
+// the vertex and takes the colour from the quad before. Each fed register of s.vattr is set so (xemu does the same:
+// pgraph_gl_bind_vertex_attributes, pgraph_update_inline_value).
+void KeepLastVertex(State& s, uint32_t start, uint32_t count, const uint8_t* indices);
+
 }  // namespace gpu
