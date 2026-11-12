@@ -171,9 +171,13 @@ bool UnitTexcoords(const Assembled& a);
 D3D_PRIMITIVE_TOPOLOGY PrimitiveTopology(const Assembled& a);
 
 // Ultrawide: a screen shaped target shown wider than its guest shape gets more pixels across than down
+// A frame drawn at twice the height and resolved into the frame buffer (Juiced's race: 640x960 into 640x480) is screen
+// shaped too: without the stretch it has fewer pixels across than the frame buffer it fills (1920 for 3440)
 inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) {
-    if (!guest_h || gh != guest_h || gw < gh || aspect <= 0) return 1;
-    return std::max(1.0f, aspect * float(gh) / float(gw));
+    if (!guest_h || aspect <= 0) return 1;
+    const uint32_t rows = gh == guest_h * 2 ? 2 : 1;
+    if (gh != guest_h * rows || gw * rows < gh) return 1;
+    return std::max(1.0f, aspect * float(gh / rows) / float(gw));
 }
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
 // a paced frame rate that a high refresh display does not divide evenly (60 on 280 Hz: frames alternately 4 and 5 refreshes): vsync
