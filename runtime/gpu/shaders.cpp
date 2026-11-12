@@ -692,6 +692,49 @@ bool ScreenProgram(const std::vector<uint32_t>& prog) {
     return any;
 }
 
+bool FlatProgram(const std::vector<uint32_t>& prog) {
+    bool flat[16];  // each register holds only v0 and constants moved, multiplied and added (12 the position)
+    std::fill(std::begin(flat), std::end(flat), true);
+    bool position = false, input = false;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        const uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
+        if (mac || ilu) {
+            // an operand: a register that is flat, v0, or a constant not indexed by a0
+            const uint32_t mux[3] = {k.f(2, 26, 2), k.f(2, 11, 2), k.f(3, 28, 2)};
+            const uint32_t reg[3] = {k.f(2, 28, 4), k.f(2, 13, 4), k.f(2, 0, 2) << 2 | k.f(3, 30, 2)};
+            auto operand = [&](int i) {
+                if (mux[i] == 1) return flat[reg[i]];
+                if (mux[i] == 2) return k.f(1, 9, 4) == 0 ? (input = true) : false;
+                return k.f(3, 1, 1) == 0;
+            };
+            // operands read: A always, B for mul and mad, C for add and mad; the ILU reads C
+            const bool mac_flat = mac >= 1 && mac <= 4 && operand(0) && (mac == 2 || mac == 4 ? operand(1) : true) &&
+                                  (mac == 3 || mac == 4 ? operand(2) : true);
+            const bool ilu_flat = ilu >= 1 && ilu <= 3 && operand(2);
+            const uint32_t r = k.f(3, 20, 4), ir = mac ? 1 : r;
+            auto write = [&](uint32_t dest, uint32_t mask, bool value) {
+                if (!mask || dest > 12) return;
+                flat[dest] = mask == 0xF ? value : flat[dest] && value;
+                position |= dest == 12;
+            };
+            if (mac && mac != 13 && !(ilu && r == 1)) write(r, k.f(3, 24, 4), mac_flat);
+            if (ilu) write(ir, k.f(3, 16, 4), ilu_flat);
+            const bool use_ilu = k.f(3, 2, 1) == 1;
+            if (k.f(3, 12, 4) && k.f(3, 11, 1) && (k.f(3, 3, 8) & 0xF) == 0 && ((use_ilu && ilu) || (!use_ilu && mac && mac != 13)))
+                write(12, k.f(3, 12, 4), use_ilu ? ilu_flat : mac_flat);
+        }
+        if (k.f(3, 0, 1)) break;  // last instruction
+    }
+    return position && input && flat[12];
+}
+
+bool SqueezePrograms() { return app::kGame.squeeze_screen_programs || app::kGame.squeeze_flat_programs; }
+
+bool SqueezableScreenProgram(const std::vector<uint32_t>& prog) {
+    return ScreenProgram(prog) || (app::kGame.squeeze_flat_programs && FlatProgram(prog));
+}
+
 int MatrixProgram(const std::vector<uint32_t>& prog) {
     int k = -1;
     for (int i = 0; i < 4; i++) {
@@ -758,7 +801,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     }
     // ultrawide: 2D squeezed as pretransformed draws are (FixedVertexHlsl), at the near plane by its w (4 or less);
     // a matrix program's only when the draw's matrix is 2D (hud.x 1 otherwise: gpu::ScreenDraw)
-    if (app::kGame.squeeze_screen_programs && (ScreenProgram(prog) || MatrixProgram(prog) >= 0))
+    if (SqueezePrograms() && (SqueezableScreenProgram(prog) || MatrixProgram(prog) >= 0))
         s += "    if ((hud.x < 0 || (oPos.x > 1.5 && oPos.x < hud.y * 2 - 1.5)) && (hud.z == 0 || oPos.w <= 4))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
     s += kVsEpilogue;
@@ -1098,7 +1141,7 @@ void main(point VOut v[1], inout TriangleStream<VOut> strip) {
 // the last host rows: True Crime clears its shadow map's border with four such lines, and a clamped read past an edge
 // kept its shadow, so the wet road's sheen ended in a dark band ahead of the player (which edge, by the way he faced).
 std::string LineHlsl() {
-    return Common() + R"(
+    std::string s = Common() + R"(
 [maxvertexcount(4)]
 void main(line VOut v[2], inout TriangleStream<VOut> strip) {
     if (v[0].pos.w <= 0 || v[1].pos.w <= 0) return;  // crosses the eye plane: left out
@@ -1107,7 +1150,7 @@ void main(line VOut v[2], inout TriangleStream<VOut> strip) {
     float2 d = (b - a) * px;
     float n2 = dot(d, d);
     d = n2 > 1e-12 ? d * rsqrt(n2) : float2(1, 0);
-    float2 along = d / px * 0.5, across = float2(-d.y, d.x) / px * 0.5;  // half a console pixel, in clip units
+    float2 along = d / px * 0.5, across = float2(-d.y, d.x) / px * 0.5 * LINE_WIDTH;  // half a console pixel, in clip units
     float2 centre = float2(0.5, -0.5) / px;  // half a pixel right and down (clip y is up)
     for (int i = 0; i < 4; i++) {
         VOut o = v[i >> 1];
@@ -1117,6 +1160,9 @@ void main(line VOut v[2], inout TriangleStream<VOut> strip) {
     }
 }
 )";
+    const std::string width = F("%g", app::kGame.line_width);  // GameInfo::line_width
+    for (size_t at; (at = s.find("LINE_WIDTH")) != std::string::npos;) s.replace(at, 10, width);
+    return s;
 }
 
 }  // namespace gpu

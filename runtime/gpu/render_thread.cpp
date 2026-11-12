@@ -27,6 +27,7 @@
 #include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/shaders.h"
 #include "gpu/vertex.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
@@ -899,7 +900,7 @@ private:
     // not for a title whose programs draw 2D the renderers squeeze per draw (GameInfo::squeeze_screen_programs)
     const bool merge_programs_ = [] {
         const char* e = std::getenv("XBE_MERGE_DRAWS");
-        bool on = e && *e == '2' && !app::kGame.squeeze_screen_programs;
+        bool on = e && *e == '2' && !SqueezePrograms();
         if (on) LOGR("gpu: XBE_MERGE_DRAWS=2, vertex program draws are merged too (experiment)");
         return on;
     }();

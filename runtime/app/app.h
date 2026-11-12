@@ -277,6 +277,13 @@ struct GameInfo {
     // a fixed-function stage with no texture reads (0,0,0,0) as its texture, as the hardware's stage with texture mode NONE
     // does, not white: True Crime clears its shadow map's border with untextured lines that select the texture
     bool unbound_texture_zero = false;
+    // 2D squeezed as squeeze_screen_programs' also where a program reaches its position from v0 and constants by moves,
+    // multiplies and adds alone, through its registers (gpu::FlatProgram): Juiced's 2D is (v0 + c) * c + c, then the
+    // viewport's scale and offset, for the HUD, the menus and the full screen effects alike
+    bool squeeze_flat_programs = false;
+    // how wide a line is drawn, in console pixels (the console's is 1): a title whose lines are fine detail (Juiced's
+    // overhead wires, line strips in the scene) keeps them fine at a PC's resolution with less
+    float line_width = 1;
 };
 extern const GameInfo kGame;
 

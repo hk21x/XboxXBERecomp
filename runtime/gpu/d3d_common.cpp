@@ -982,8 +982,8 @@ void NoteSqueeze(const State& s, const Assembled& a, uint32_t rt, uint32_t gw, u
 // a draw by a program that only moves its position to the screen, or multiplies it by a 2D matrix, for a title asking
 // (GameInfo::squeeze_screen_programs); the program's kind kept with the shader
 bool ScreenDraw(const State& s) {
-    if (!app::kGame.squeeze_screen_programs || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
-    if (s.vs->screen < 0) s.vs->screen = ScreenProgram(s.vs->program) ? 1 : 0;
+    if (!SqueezePrograms() || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
+    if (s.vs->screen < 0) s.vs->screen = SqueezableScreenProgram(s.vs->program) ? 1 : 0;
     if (s.vs->screen == 1) return true;
     if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
     return s.vs->matrix >= 0 && OrthoConstants(s.vsc, s.vs->matrix);
@@ -1101,7 +1101,7 @@ void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, 
 
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
     const float wide = app::HudAspect();
-    if (!(a.pretransformed || ScreenDraw(s)) || aspect <= wide + 1e-3f || stretch <= 1) return 1;
+    if (s.no_squeeze || !(a.pretransformed || ScreenDraw(s)) || aspect <= wide + 1e-3f || stretch <= 1) return 1;
     return wide / aspect;
 }
 

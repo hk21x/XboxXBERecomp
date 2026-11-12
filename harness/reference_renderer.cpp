@@ -1228,8 +1228,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     float squeeze = 1;
     const bool depth_tested = s.rs[kRsZEnable] && s.simple[kMZFunc >> 2] != 0x207;
     // a program only moving its position to the screen likewise, for a title asking (GameInfo::squeeze_screen_programs)
-    const bool screen = program && app::kGame.squeeze_screen_programs &&
-                        (ScreenProgram(s.vs->program) || (MatrixProgram(s.vs->program) >= 0 &&
+    const bool screen = program && SqueezePrograms() &&
+                        (SqueezableScreenProgram(s.vs->program) || (MatrixProgram(s.vs->program) >= 0 &&
                                                           OrthoConstants(s.vsc, MatrixProgram(s.vs->program))));
     // the hardware renderers' 2D sharpening (GameInfo::sharpen_2d) run headless too: its pictures with XBE_SHARPEN_DUMP
     if (as.pretransformed || screen)
@@ -1237,12 +1237,14 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             TextureDesc sd;
             if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], sd) && !FindReplacement(sd.data)) Sharpen2D(sd);
         }
-    if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
+    // a frame, or one drawn at twice the height and resolved into it (Juiced: 640x960), as gpu::XStretch has it
+    const bool frame_shaped = ((rt.h == 480 || rt.h == 576) && rt.w >= rt.h) || ((rt.h == 960 || rt.h == 1152) && rt.w * 2 >= rt.h);
+    if (!s.no_squeeze && (as.pretransformed || screen) && slot[0] >= 0 && rt.ok && frame_shaped &&
         app::FrameAspect() > app::HudAspect() + 1e-3f)
         squeeze = app::HudAspect() / app::FrameAspect();
     // State::pillar_aspect: squeezed whole to that shape (the renderers' Pillarbox)
     const bool pillar = s.pillar_aspect > 0 && (as.pretransformed || screen) && slot[0] >= 0 && rt.ok &&
-                        (rt.h == 480 || rt.h == 576) && rt.w >= rt.h && app::FrameAspect() > s.pillar_aspect + 1e-3f &&
+                        frame_shaped && app::FrameAspect() > s.pillar_aspect + 1e-3f &&
                         (!s.pillar_format ||
                          (s.textures[0] && (kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.pillar_format));
     const float hud_squeeze = squeeze;  // what a pillar draw not spanning the frame keeps

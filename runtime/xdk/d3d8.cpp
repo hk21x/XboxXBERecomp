@@ -2335,6 +2335,7 @@ void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
         // and what a title's hooks ask now (gpu::State::squeeze_beyond, blank_format; set as its binds are seen)
         s.squeeze_beyond = g_state.squeeze_beyond;
         s.squeeze_shift = g_state.squeeze_shift;
+        s.no_squeeze = g_state.no_squeeze;
         s.pillar_aspect = g_state.pillar_aspect;
         s.pillar_format = g_state.pillar_format;
         s.pillar_fill = g_state.pillar_fill;

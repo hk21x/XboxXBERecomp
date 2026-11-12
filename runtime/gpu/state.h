@@ -250,6 +250,9 @@ struct State {
     // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
     // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
     int squeeze_margin = 0;
+    // a game hook draws a full screen effect with corners inside the frame (Juiced's speed blur: the frame over itself
+    // in rings, each vertex's texture coordinate its own place): left as drawn, not squeezed
+    bool no_squeeze = false;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
     // 1 / the projection's far w, as the XDK's SetTransform derives it (0x1C34A0). W-buffered, the fixed function and
     // pretransformed vertices have w scaled by zscale * inv_wfar (0x1C0FC0 folds it into the matrix, 0x1C0300 into

@@ -69,6 +69,13 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t reg
 // an ILU mov) of v0 and constants (D3D's pass-through program form: oPos.xy = v0.xy + c[59].w, z = v0.z * c[58].z,
 // w = v0.w)
 bool ScreenProgram(const std::vector<uint32_t>& program);
+// a program whose position comes from v0 and constants alone by mov, mul, add and mad (and an ILU mov, rcp or rcc),
+// through registers too: no matrix, so what it draws is flat on the screen (GameInfo::squeeze_flat_programs)
+bool FlatProgram(const std::vector<uint32_t>& program);
+// a title asks for its programs' 2D to be squeezed (GameInfo::squeeze_screen_programs, squeeze_flat_programs)
+bool SqueezePrograms();
+// ScreenProgram, or FlatProgram for a title asking
+bool SqueezableScreenProgram(const std::vector<uint32_t>& program);
 // a program that starts by multiplying its position input by four consecutive constants (dp4 v0 with c[k] .. c[k+3],
 // then the screen tail): k, else -1. With an orthographic 2D matrix there (gpu::OrthoConstants), it draws 2D
 int MatrixProgram(const std::vector<uint32_t>& program);
