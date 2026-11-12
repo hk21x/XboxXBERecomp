@@ -428,10 +428,14 @@ private:
     // buffer's address, when they are set; the title points the same header elsewhere before the GPU gets there.
     uint32_t Header(uint32_t header) {
         if (!header || !ring_) return header;
+        // a header the title has freed while it is still set (Juiced, entering Arcade: a stage's texture in a heap
+        // block given back, read at the next Clear): nothing, as the console never looks until a draw uses it
+        if (!mem::IsCommitted(header) || !mem::IsCommitted(header + 11)) return 0;
         // vertex buffer, index buffer and palette headers are 12 bytes: reading 20 can run off the end of the heap
         const uint32_t type = kernel::R32(header) & 0x70000;  // 0 vertex, 0x10000 index, 0x30000 palette
         uint8_t now[kHeaderBytes] = {};
-        std::memcpy(now, kernel::HostPtr(header), type < 0x20000 || type == 0x30000 ? 12 : kHeaderBytes);
+        const bool whole = !(type < 0x20000 || type == 0x30000) && mem::IsCommitted(header + kHeaderBytes - 1);
+        std::memcpy(now, kernel::HostPtr(header), whole ? kHeaderBytes : 12);
         Recent<HeaderCopy>& r = recent_headers_[(header >> 3) & 63];
         HeaderCopy& c = r.key == header ? *r.value : headers_[header];
         r = {header, &c};
