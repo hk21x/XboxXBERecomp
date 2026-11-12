@@ -103,6 +103,8 @@ std::string CodeGen::EmitFunction(uint32_t entry) {
             ops[0].mem.segment == ZYDIS_REGISTER_FS && ops[0].mem.base == ZYDIS_REGISTER_NONE &&
             ops[0].mem.index == ZYDIS_REGISTER_NONE && ops[0].mem.disp.value == 0)
             seh = true;
+        // a call returning to a declared continuation (setjmp's): its longjmp resumes in this frame
+        if (const Insn* i = an_.InsnAt(va); i && i->flow == Flow::Call && an_.cfg.continuations.count(va + i->len)) seh = true;
     }
     std::string out;
     out += F("X86_FUNC(__imp__%s) {\n", FuncName(entry).c_str());

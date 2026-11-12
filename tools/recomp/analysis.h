@@ -43,6 +43,7 @@ struct Config {
     std::multimap<uint32_t, Hook> hooks;
     std::map<uint32_t, uint32_t> function_ends;          // declared entries, exclusive decode limit or 0
     std::map<uint32_t, std::vector<uint32_t>> switches;  // indirect jmp to its targets
+    std::set<uint32_t> continuations;  // declared resume points: where a longjmp lands, after a call to setjmp
 };
 
 enum class Flow : uint8_t { Normal, Jcc, Jmp, JmpIndirect, Call, CallIndirect, Ret, Stop, Invalid };

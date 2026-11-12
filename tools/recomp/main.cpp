@@ -48,6 +48,8 @@ static bool ParseExit(const toml::node* n, Hook::Exit& e) {
 //   [[function]] at, end  an entry decoded no further than end (exclusive); it also stops other walks
 //   [[switch]] at, targets  the targets of an indirect jmp, replacing table detection
 //   [xbe] xdk = build  includes <--xdk folder>/<build>/layout.toml
+//   [xbe] continuations = [address, ...]  where a longjmp lands: the address after a call to setjmp. Each is made a
+//     function and a continuation (as a C++ catch block's), and the function holding the call catches the resume
 //   [abi] name = ["esi", "stack", ...]  where a [symbols] function takes each API argument when the image does not
 //     use the convention the host declares: a register, or "stack" for the next stack slot, which the callee pops
 static bool LoadConfig(const fs::path& path, Config& cfg, const fs::path& xdk_dir) {
@@ -98,6 +100,9 @@ static bool LoadConfig(const fs::path& path, Config& cfg, const fs::path& xdk_di
             if (auto r = i.as_array(); r && r->size() == 2)
                 cfg.data_ranges.push_back({uint32_t(r->get(0)->value<int64_t>().value_or(0)),
                                            uint32_t(r->get(1)->value<int64_t>().value_or(0))});
+    if (auto a = t["xbe"]["continuations"].as_array())
+        for (auto& i : *a)
+            if (auto v = i.value<int64_t>()) cfg.continuations.insert(uint32_t(*v));
     if (auto f = t["functions"].as_table())
         for (auto& [k, v] : *f) cfg.functions[ParseAddr(k.str())] = v.value<std::string>().value_or("");
     for (auto [key, out] : {std::pair{"symbols", &cfg.symbols}, std::pair{"data", &cfg.data}})

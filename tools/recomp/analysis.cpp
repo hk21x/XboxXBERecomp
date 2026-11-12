@@ -564,6 +564,13 @@ void Analysis::Run() {
         std::fprintf(stderr, "\n");
     }
     EhContinuations();
+    // declared resume points (setjmp's return, where longjmp lands): continuations as a catch block's are
+    for (uint32_t c : cfg.continuations) {
+        MakeFunction(c);
+        if (functions.count(c)) continuations.insert(c);
+        else std::fprintf(stderr, "continuation %X: not decoded as code\n", c);
+    }
+    if (!cfg.continuations.empty()) std::fprintf(stderr, "declared continuations: %zu\n", cfg.continuations.size());
     // every direct call from decoded code names a function
     for (bool changed = true; changed;) {
         changed = false;
