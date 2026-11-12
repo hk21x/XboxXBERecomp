@@ -1481,12 +1481,16 @@ uint64_t D3D12Backend::SizedTargetKey(uint32_t data, bool depth, uint32_t gw, ui
     return key | uint64_t(gw) << kKeyWidthShift | uint64_t(gh) << kKeyHeightShift;
 }
 
-// the colour target at an address the CPU reads: the frame sized one, else the size last drawn there
+// the colour target at an address the CPU reads: the one drawn there last. A smaller one set up after the frame sized
+// one comes first: 50 Cent: Bulletproof draws its save picture into a 512x512 target at 821A1180, where its front end
+// had a 720x480 one, and locks it; read back at 720x480 the old target's pixels ran 375 KB past the 512x512 surface,
+// over the game's own data there (a crash in 0x1145D0 after the profile was saved)
 std::unordered_map<uint64_t, Target>::iterator D3D12Backend::ColourTargetAt(uint32_t data) {
-    auto it = targets_.find(TargetMapKey(data, false));
-    if (it != targets_.end()) return it;
-    auto last = small_colour_.find(data);
-    return last == small_colour_.end() ? targets_.end() : targets_.find(last->second);
+    if (auto last = small_colour_.find(data); last != small_colour_.end()) {
+        auto it = targets_.find(last->second);
+        if (it != targets_.end()) return it;
+    }
+    return targets_.find(TargetMapKey(data, false));
 }
 
 // alt: the extension's bits of the key
@@ -1521,7 +1525,9 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth, uint32_t gw, ui
     if (ext_ && !ext_->TargetKey(s, depth, alt)) return nullptr;
     TargetSlot slot = FindTargetSlot(s, depth, alt, gw, gh);
     target_used_[slot.data] = frame_;
+    // a colour target smaller than the frame is the one drawn there last until a frame sized one is set up again
     if (!depth && (slot.gw != guest_w_ || slot.gh != guest_h_)) small_colour_[slot.data] = slot.key;
+    else if (!depth) small_colour_.erase(slot.data);
     if (slot.sized) return &slot.it->second;
     if (slot.it != targets_.end()) ReleaseTarget(slot.it);
     Target t;
