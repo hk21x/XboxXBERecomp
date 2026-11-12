@@ -179,6 +179,12 @@ inline float XStretch(float aspect, uint32_t guest_h, uint32_t gw, uint32_t gh) 
     if (gh != guest_h * rows || gw * rows < gh) return 1;
     return std::max(1.0f, aspect * float(gh / rows) / float(gw));
 }
+// That frame read by the pass that resolves it into the frame buffer: a frame pixel is two of its rows, which the tap's
+// own filter averages. The spread taps of a shrinking pass (each averaged over a console texel) would bring the whole
+// picture down to the console's size (Juiced on Windows: every frame goes through this pass)
+inline bool ResolvesTallFrame(uint32_t gw, uint32_t gh, uint32_t into_gw, uint32_t into_gh, uint32_t guest_w, uint32_t guest_h) {
+    return gw == guest_w && gh == guest_h * 2 && into_gw == guest_w && into_gh == guest_h;
+}
 // DrawConstants::hud[0] for a draw on a target stretched by stretch (0 without a colour target)
 // a paced frame rate that a high refresh display does not divide evenly (60 on 280 Hz: frames alternately 4 and 5 refreshes): vsync
 // would show frames unevenly, so they go out when the pacing says, the display following with variable refresh. XBE_VSYNC_ALWAYS=1: not so

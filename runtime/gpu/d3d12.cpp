@@ -2204,7 +2204,8 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     // a pass shrinking it averages each tap over a console texel, else upscaled taps skip texels and ghost
     Target* rt = FindTarget(s.rt, false);
     float k = float(t.w) / (t.gw * stages.k[stage]);
-    if (!t.depth && box && k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) {
+    if (!t.depth && box && k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh) &&
+        !ResolvesTallFrame(t.gw, t.gh, rt->gw, rt->gh, guest_w_, guest_h_)) {
         stages.wide[stage] = k;
         info.flags |= kTexWide;
     }

@@ -1285,7 +1285,8 @@ ID3D11ShaderResourceView* D3D11Backend::BindTargetTexture(const State& s, int st
     // a pass shrinking it averages each tap over a console texel, else upscaled taps skip texels and ghost
     Target* rt = FindTarget(s.rt, false);
     float k = float(t.w) / t.gw;
-    if (!t.depth && k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh)) {
+    if (!t.depth && k > kUpscaledMin && rt && rt != &t && (t.gw > rt->gw || t.gh > rt->gh) &&
+        !ResolvesTallFrame(t.gw, t.gh, rt->gw, rt->gh, guest_w_, guest_h_)) {
         stages.reads.wide[stage] = k;
         info.flags |= kTexWide;
     }
