@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <mutex>
+#include <shared_mutex>
 
 #include "app/app.h"
 #include "kernel/crypto.h"
@@ -58,6 +60,7 @@ void PutAnsi(uint32_t str, const char* text) {
 
 uint8_t& Irql() { return G<uint8_t>(Current()->kpcr + 0x24); }
 
+
 int64_t TimeoutArg(uint32_t ptr) { return ptr ? int64_t(R64(ptr)) : INT64_MAX; }
 
 // KSYSTEM_TIME: readers retry until High1Time equals High2Time
@@ -74,6 +77,61 @@ uint64_t InterruptTime() {
 }
 
 }  // namespace
+
+namespace {
+// shared by the threads at dispatch level, exclusive to the DPC running: a DPC never overlaps a raised thread, as on the
+// one processor. Raised threads do not keep each other out: an exclusive lock there deadlocked a first boot (1 in about
+// 50: a raised thread waiting on a critical section whose holder waited to raise)
+std::shared_mutex g_dispatch;
+thread_local int t_dispatch = 0;  // 1 holding it shared (raised), 2 exclusive (running a DPC); the IRQL byte is guest memory
+}  // namespace
+
+// XBE_NO_DISPATCH_LOCK=1: IRQL kept as a number only, as before (to compare)
+bool DispatchLockOn() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_NO_DISPATCH_LOCK");
+        return !(e && *e == '1');
+    }();
+    return on;
+}
+
+void SetIrql(uint8_t irql) {
+    if (!DispatchLockOn()) {
+        Irql() = irql;
+        return;
+    }
+    if (irql >= 2 && t_dispatch == 0) {
+        g_dispatch.lock_shared();
+        t_dispatch = 1;
+    } else if (irql < 2 && t_dispatch == 1) {
+        t_dispatch = 0;
+        g_dispatch.unlock_shared();
+    }
+    Irql() = irql;
+}
+
+void EnterDpc() {
+    if (!DispatchLockOn()) {
+        Irql() = 2;
+        return;
+    }
+    g_dispatch.lock();
+    t_dispatch = 2;
+    Irql() = 2;
+}
+
+void LeaveDpc() {
+    Irql() = 0;
+    if (!DispatchLockOn()) return;
+    t_dispatch = 0;
+    g_dispatch.unlock();
+}
+
+void DropDispatch() {
+    if (t_dispatch != 1) return;
+    t_dispatch = 0;
+    g_dispatch.unlock_shared();
+}
 
 uint32_t g_tick_count_va = 0;
 uint32_t g_launch_data_page_va = 0;
@@ -189,27 +247,29 @@ KERNEL_EXPORT(122, KeLeaveCriticalRegion, 0) { return 0; }
 
 // irql, time
 
+// raising to dispatch level keeps the DPCs and other raised threads out, as the one processor did (SetIrql): DirectSound's
+// calls raise to it (0x26B2D0 in 50 Cent: Bulletproof, from some 70 places) while XACT's DPC works on the same voices
 KERNEL_FASTCALL(160, KfRaiseIrql) {
     uint8_t old = Irql();
-    Irql() = uint8_t(ctx.ecx);
+    SetIrql(uint8_t(ctx.ecx));
     return old;
 }
 
 KERNEL_FASTCALL(161, KfLowerIrql) {
-    Irql() = uint8_t(ctx.ecx);
+    SetIrql(uint8_t(ctx.ecx));
     return 0;
 }
 
 KERNEL_EXPORT(129, KeRaiseIrqlToDpcLevel, 0) {
     uint8_t old = Irql();
-    Irql() = 2;
+    SetIrql(2);
     return old;
 }
 
 // one processor: synch level is dispatch level
 KERNEL_EXPORT(130, KeRaiseIrqlToSynchLevel, 0) {
     uint8_t old = Irql();
-    Irql() = 2;
+    SetIrql(2);
     return old;
 }
 

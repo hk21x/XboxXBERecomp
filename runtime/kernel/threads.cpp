@@ -196,6 +196,7 @@ void StartThread(ThreadRef t) {
         else
             code = CallGuest(ctx, si.start_routine, {si.start_context});
         LOGI("thread %X returned %08X", t->id, code);
+        DropDispatch();
         MarkExited(*t, code);
         Unregister(t.get());
         t_current.reset();
@@ -222,6 +223,7 @@ void ExitThread(uint32_t code) {
     Thread* t = Current();
     if (t) {
         LOGI("thread %X exits with %08X", t->id, code);
+        DropDispatch();
         MarkExited(*t, code);
         Unregister(t);
     }

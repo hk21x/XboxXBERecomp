@@ -2,6 +2,7 @@
 // the game folder may come from GAME_DIR instead
 #include <chrono>
 #include <csignal>
+#include <sys/prctl.h>
 #include <execinfo.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -43,6 +44,9 @@ int main(int argc, char** argv) {
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
+    // XBE_PTRACER=1: any process may attach a debugger (Yama's ptrace_scope 1 lets only an ancestor), to read a hung
+    // run's threads where starting it under gdb hides the hang
+    if (const char* e = std::getenv("XBE_PTRACER"); e && *e == '1') prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
     std::string game;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--instance") && i + 1 < argc) setenv("INSTANCE", argv[++i], 1);

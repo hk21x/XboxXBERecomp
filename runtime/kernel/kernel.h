@@ -165,6 +165,13 @@ Thread* Current();
 ThreadRef CurrentRef();
 void StartHostThread(const char* name, std::function<void(X86Context&)> fn);
 void RunDpcs(X86Context& ctx);
+// The console's one processor at dispatch level: no DPC runs while a thread is at IRQL 2 or above. Here threads run
+// side by side, so raising IRQL to 2 holds a lock shared and lowering below 2 lets it go (SetIrql), and each DPC runs
+// holding it exclusive (EnterDpc, LeaveDpc); DropDispatch lets it go at a thread's exit.
+void SetIrql(uint8_t irql);
+void EnterDpc();
+void LeaveDpc();
+void DropDispatch();
 void InitKernelData();
 void LogGuestStack(X86Context& ctx, int words);
 X86Context& CurrentContext();
