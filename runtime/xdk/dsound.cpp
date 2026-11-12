@@ -224,6 +224,7 @@ struct Voice {
     bool playing = false, looping = false, paused = false;
     bool sync = false;  // held until IDirectSound_SynchPlayback
     bool active = false, ending = false;  // stream: took a packet since it went quiet, quiet again once they run out
+    bool released = false;  // stream: flushed with FlushEx since its last packet, DSSTREAMSTATUS_ENVELOPECOMPLETE
     double pos = 0;  // frames
     uint32_t freq = 0;
     // stream
@@ -1207,8 +1208,13 @@ STREAM(GetInfo, 2) {
     W32(info + 12, 0);
     return 0;
 }
+// DSSTREAMSTATUS_READY (1: it takes a packet) and, after a FlushEx, DSSTREAMSTATUS_ENVELOPECOMPLETE (0x80000). The
+// console's FlushEx lets the voice's envelope release, then flushes; the host flushes at once, so the envelope is over
+// from then until the next packet. XACT stops a streaming cue with FlushEx (Juiced 0x29F130) and decodes on until it
+// reads that bit (0x2A44D7, then Flush): without it a stopped music track was decoded for good, past the close of its
+// file, where the WMA decoder spun (Juiced froze a few seconds into a race and as a saved profile loaded)
 STREAM(GetStatus, 2) {
-    W32(a[1], v.packets.size() < v.max_packets ? 1u : 0u);  // XMEDIASTATUS_ACCEPT_INPUT
+    W32(a[1], (v.packets.size() < v.max_packets ? 1u : 0u) | (v.released ? 0x80000u : 0u));
     return 0;
 }
 STREAM(Process, 3) {
@@ -1220,6 +1226,7 @@ STREAM(Process, 3) {
     v.packets.push_back(pk);
     v.active = true;
     v.ending = false;
+    v.released = false;
     return 0;
 }
 STREAM(Discontinuity, 1) {
@@ -1232,6 +1239,7 @@ STREAM(Flush, 1) {
     return 0;
 }
 STREAM(FlushEx, 4) {
+    v.released = true;
     if (a[3] && !v.active) return 0;
     FlushStream(v);
     return 0;

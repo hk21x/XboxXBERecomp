@@ -1,11 +1,8 @@
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <map>
 #include <queue>
-#include <vector>
 
-#include "app/app.h"
 #include "kernel/kernel.h"
 
 namespace kernel {
@@ -36,26 +33,10 @@ std::unordered_map<std::string, std::weak_ptr<Object>> g_names;
 std::mutex& DispatchLock() { return g_dispatch; }
 void SignalChanged() { g_cv.notify_all(); }
 
-// GameInfo::handle_reuse (XBE_HANDLE_REUSE=0 or 1 overrides): a closed handle's number goes to the next object, the
-// last freed first, as the console's handle table gives them
-std::vector<uint32_t> g_free_handles;
-bool HandleReuse() {
-    static const bool on = [] {
-        const char* e = std::getenv("XBE_HANDLE_REUSE");
-        return e && *e ? *e == '1' : app::kGame.handle_reuse;
-    }();
-    return on;
-}
-
 uint32_t NewHandle(ObjectRef obj) {
     std::lock_guard<std::mutex> lock(g_handles_lock);
     uint32_t h = g_next_handle;
-    if (HandleReuse() && !g_free_handles.empty()) {
-        h = g_free_handles.back();
-        g_free_handles.pop_back();
-    } else {
-        g_next_handle += 4;
-    }
+    g_next_handle += 4;
     g_handles[h] = std::move(obj);
     return h;
 }
@@ -69,9 +50,7 @@ ObjectRef FromHandle(uint32_t handle) {
 
 bool CloseHandle(uint32_t handle) {
     std::lock_guard<std::mutex> lock(g_handles_lock);
-    bool had = g_handles.erase(handle) != 0;
-    if (had && HandleReuse()) g_free_handles.push_back(handle);
-    return had;
+    return g_handles.erase(handle) != 0;
 }
 
 uint32_t DuplicateHandle(uint32_t handle) {
