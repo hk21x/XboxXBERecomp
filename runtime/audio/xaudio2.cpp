@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <xaudio2.h>
 
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -32,8 +33,20 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         wf.nAvgBytesPerSec = kRate * 8;
         if (FAILED(XAudio2Create(&xa, 0, XAUDIO2_DEFAULT_PROCESSOR)) || FAILED(xa->CreateMasteringVoice(&master)) ||
             FAILED(xa->CreateSourceVoice(&voice, &wf))) {
-            LOGE("audio: XAudio2 unavailable, no sound");
-            return;
+            LOGE("audio: XAudio2 unavailable, no sound; the mixer is pulled on the clock instead");
+            if (voice) voice->DestroyVoice();
+            if (master) master->DestroyVoice();
+            if (xa) xa->Release();
+            // a title's sound still runs by the samples taken: with nothing taking them, its streams stood still, and
+            // so did 50 Cent: Bulletproof's CRI movies, timed by their sound (a machine with no audio device stayed on
+            // the first logo). Pulled every 10 ms, as a device would, the output dropped
+            std::vector<float> b(kRate / 100 * 2);
+            auto next = std::chrono::steady_clock::now();
+            for (;;) {
+                if (!app::Paused()) render(b.data(), kRate / 100);
+                next += std::chrono::milliseconds(10);
+                std::this_thread::sleep_until(next);
+            }
         }
         voice->Start();
         constexpr uint32_t kFrames = kRate / 100, kSlots = 4;
