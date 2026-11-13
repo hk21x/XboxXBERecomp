@@ -17,4 +17,12 @@ enum DXGI_FORMAT : unsigned {
     DXGI_FORMAT_R16_SINT = 59,
     DXGI_FORMAT_R8_UNORM = 61,
     DXGI_FORMAT_B8G8R8A8_UNORM = 87,
+    // and the ones the shared Direct3D code names (gpu/d3d_common, for the Metal renderer)
+    DXGI_FORMAT_R24G8_TYPELESS = 44,
+    DXGI_FORMAT_D24_UNORM_S8_UINT = 45,
+    DXGI_FORMAT_R16_UNORM = 56,
+    DXGI_FORMAT_R16_UINT = 57,
+    DXGI_FORMAT_BC1_UNORM = 71,
+    DXGI_FORMAT_BC2_UNORM = 74,
+    DXGI_FORMAT_BC3_UNORM = 77,
 };

@@ -4,6 +4,10 @@
 #include <csignal>
 #include <sys/prctl.h>
 #include <execinfo.h>
+#ifdef __APPLE__
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <ucontext.h>
 #include <unistd.h>
 #include <cstdio>
@@ -27,9 +31,16 @@
 void OnCrash(int sig, siginfo_t* info, void* uc) {
     char line[160];
     auto* ctx = static_cast<ucontext_t*>(uc);
-    int n = std::snprintf(line, sizeof line, "crash: signal %d at %p, rip %llx, guest esp (rdi+16) %08x\n", sig, info->si_addr,
-                          (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP],
-                          ctx->uc_mcontext.gregs[REG_RDI] ? *reinterpret_cast<const uint32_t*>(ctx->uc_mcontext.gregs[REG_RDI] + 16) : 0u);
+    // the host pc, and the first argument register: the X86Context of the recompiled function that faulted
+#if defined(__APPLE__) && defined(__aarch64__)
+    unsigned long long pc = ctx->uc_mcontext->__ss.__pc, arg0 = ctx->uc_mcontext->__ss.__x[0];
+#elif defined(__APPLE__)
+    unsigned long long pc = ctx->uc_mcontext->__ss.__rip, arg0 = ctx->uc_mcontext->__ss.__rdi;
+#else
+    unsigned long long pc = ctx->uc_mcontext.gregs[REG_RIP], arg0 = ctx->uc_mcontext.gregs[REG_RDI];
+#endif
+    int n = std::snprintf(line, sizeof line, "crash: signal %d at %p, pc %llx, guest esp (arg0+16) %08x\n", sig, info->si_addr,
+                          pc, arg0 ? *reinterpret_cast<const uint32_t*>(arg0 + 16) : 0u);
     if (n > 0) (void)!write(2, line, size_t(n));
     void* frames[32];
     backtrace_symbols_fd(frames, backtrace(frames, 32), 2);

@@ -1,6 +1,7 @@
 // controllers through SDL: Xbox, PlayStation and Switch pads read into the console controller's report
 #include "core/input.h"
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -8,6 +9,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -28,6 +30,18 @@
 namespace input {
 
 namespace {
+
+// a key (a Windows virtual key code, VK_LBUTTON .. for the mouse) held, and the game window in front
+#ifdef _WIN32
+bool HostKeyHeld(uint16_t vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+bool GameWindowInFront() {
+    HWND hwnd = static_cast<HWND>(app::Window());
+    return hwnd && GetForegroundWindow() == hwnd;
+}
+#else
+bool HostKeyHeld(uint16_t vk) { return app::KeyHeld(vk); }
+bool GameWindowInFront() { return app::WindowInFront(); }
+#endif
 
 // a controller takes the lowest free port when it is plugged in and keeps it until it is unplugged
 std::mutex g_lock;
@@ -65,6 +79,12 @@ void UpdatePads() {
     uint64_t now = SDL_GetTicks();
     if (!g_sdl || now == last) return;
     last = now;
+#ifndef _WIN32
+    // SDL's events are the main thread's there (app::DeviceEvent passes on the controllers'); SDL_UpdateGamepads only
+    // reads the controllers, from any thread
+    SDL_UpdateGamepads();
+    return;
+#endif
     SDL_PumpEvents();
     SDL_Event e;
     while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
@@ -204,8 +224,7 @@ int TakeWheel() {
 
 uint32_t MouseButtons() {
     if (!MouseLooking()) return 0;
-    return uint32_t((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) | ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) |
-           ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
+    return uint32_t(HostKeyHeld(0x01) ? 1 : 0) | (HostKeyHeld(0x02) ? 2 : 0) | (HostKeyHeld(0x04) ? 4 : 0);
 }
 
 std::array<uint16_t, 2> ControlKeys(int c) {
@@ -229,9 +248,7 @@ bool TakeMouse(float& x, float& y) {
 
 bool MouseLooking() {
     const app::Settings& s = app::Get();
-    HWND hwnd = static_cast<HWND>(app::Window());
-    return app::kGame.mouse_look && s.mouse_look && s.keyboard && hwnd && GetForegroundWindow() == hwnd &&
-           !app::OverlayOpen();
+    return app::kGame.mouse_look && s.mouse_look && s.keyboard && GameWindowInFront() && !app::OverlayOpen();
 }
 
 const char* ControlName(int c) { return c >= 0 && c < kControls ? kNames[c] : ""; }
@@ -278,17 +295,16 @@ Pad Poll(int port) {
     }
     // the keyboard is controller 1, plugged in while keyboard play is on (alt-tabbing away must not unplug it), its
     // keys read while the game window has the focus
-    HWND hwnd = static_cast<HWND>(app::Window());
     if (port == 0) {
         bool pad_used = false, key_used = false;
         for (int c = 0; c < kControls; c++) pad_used |= in[c] >= 0.5f;
         if (s.keyboard && !p.connected) key_used = true;  // nothing else to play with
         if (s.keyboard) p.connected = true;
-        if (s.keyboard && hwnd && GetForegroundWindow() == hwnd) {
+        if (s.keyboard && GameWindowInFront()) {
             for (int c = 0; c < kControls; c++) {
                 std::array<uint16_t, 2> keys = c < int(s.keys.size()) ? s.keys[c] : app::DefaultKeys(c);
                 for (uint16_t k : keys)
-                    if (k && (GetAsyncKeyState(k) & 0x8000)) out[c] = 1.0f, key_used = true;
+                    if (k && HostKeyHeld(k)) out[c] = 1.0f, key_used = true;
             }
         }
         if (pad_used) {
@@ -334,6 +350,15 @@ Pad Poll(int port) {
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
 }
+
+#ifndef _WIN32
+void DeviceEvent(bool added, uint32_t id) {
+    std::lock_guard lock(g_lock);
+    if (!g_sdl) return;
+    if (added) AddPad(SDL_JoystickID(id));
+    else RemovePad(SDL_JoystickID(id));
+}
+#endif
 
 uint16_t HeldOnAnyController() {
     constexpr std::pair<SDL_GamepadButton, uint16_t> kFaceButtons[] = {

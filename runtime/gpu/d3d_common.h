@@ -2,16 +2,20 @@
 // What the Direct3D 12 and Direct3D 11 renderers share: console state to host state, pipeline and shader keys, the
 // draw constants, the full screen pass shaders and the guest's rect lists. Windows only (D3D12 enums: the D3D11 ones
 // have the same values and layouts).
+#include "gpu/smaa.h"
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "gpu/smaa.h"
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcommon.h>
+#else
+#include "gpu/d3d_compat.h"  // the same names and values elsewhere, for the Metal renderer
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -119,8 +123,10 @@ struct DrawShaders {
 // compiled shaders kept on disk by their Compile hash (shadercache.bin beside the exe), so a shader compiled in one
 // run is not compiled again in the next: D3DCompile takes tens of milliseconds a shader, a stall the first time a
 // draw needs it (a new car, effect or stretch of road in the middle of a race). Thread safe.
+#ifdef _WIN32
 bool CachedShader(uint64_t hash, ID3DBlob** out);  // the blob made from that hash's source, if kept
 void KeepShader(uint64_t hash, ID3DBlob* code);
+#endif
 // built pipelines' cached blobs on disk by their key (pipelinecache.bin beside the exe), so a pipeline seen in an earlier run
 // builds without the driver's compile: the hitch the first time something new is drawn
 const std::string* CachedPipeline(uint64_t key);  // valid until ForgetPipelines

@@ -21,24 +21,26 @@ REPO=$(realpath "$REPO"); GEN=$(realpath "$GEN"); mkdir -p "$OUT"; OUT=$(realpat
 EXE=${EXE:-$(basename "$GEN")}; GEN_OBJ=${GEN_OBJ:-$OUT/gen}; mkdir -p "$GEN_OBJ" "$OUT/host"
 H=$(dirname "$(realpath "$0")"); RT=$REPO/sdk/runtime
 CXX=${CXX:-clang++}; JOBS=${JOBS:-$(nproc)}
-BASE="-std=c++20 -march=x86-64-v2 -fno-strict-aliasing"
+# arm64: no fused multiply add, which the x86-64-v2 build cannot emit either (the guest's float results)
+ARCH_FLAGS=-march=x86-64-v2; [ "$(uname -m)" = arm64 ] && ARCH_FLAGS=-ffp-contract=off
+BASE="-std=c++20 $ARCH_FLAGS -fno-strict-aliasing"
 HOST="$BASE -O1 -g -I$REPO/src -I$RT -I$GEN -I$H -I$H/compat -DXBE_RAW_VERTICES=${RAW:-0} -DXBE_RENDER_THREAD=${RT_THREAD:-0} ${HOST_FLAGS:-}"
 
 # generated code, an object rebuilt only when its partition is newer
 export CXX BASE RT GEN GEN_OBJ GEN_OPT
-ls "$GEN"/x86_recomp.*.cpp "$GEN"/x86_func_mapping.cpp | xargs -P "$JOBS" -I{} sh -c '
-    o="$GEN_OBJ/$(basename {} .cpp).o"; [ "$o" -nt {} ] && exit 0
-    $CXX $BASE ${GEN_OPT:--O1} -g0 -w -I"$RT" -I"$GEN" -c {} -o "$o.tmp" && mv "$o.tmp" "$o"'
+ls "$GEN"/x86_recomp.*.cpp "$GEN"/x86_func_mapping.cpp | xargs -P "$JOBS" -n 1 sh -c '
+    o="$GEN_OBJ/$(basename "$1" .cpp).o"; [ "$o" -nt "$1" ] && exit 0
+    $CXX $BASE ${GEN_OPT:--O1} -g0 -w -I"$RT" -I"$GEN" -c "$1" -o "$o.tmp" && mv "$o.tmp" "$o"' _
 
 others=$(ls "$GEN/.." | grep -vx "$(basename "$GEN")" | paste -sd'|' -)
-SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/core/wheel.cpp|/gpu/d3d12.cpp|/gpu/d3d11.cpp|/gpu/d3d_common.cpp|/audio/xaudio2.cpp")
+SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/core/wheel.cpp|/gpu/d3d12.cpp|/gpu/d3d11.cpp|/gpu/d3d_common.cpp|/audio/xaudio2.cpp|/audio/sdl_audio.cpp|/core/wheel_none.cpp")
 SRC="$SRC $(ls "$REPO"/src/*/*.cpp | grep -Ev "/src/(${others:-^$})/" || true)"
 SRC="$SRC $(ls "$H"/*.cpp) ${EXTRA[*]}"
 for x in "${EXCL[@]}"; do SRC=$(echo $SRC | tr ' ' '\n' | grep -Ev -- "$x"); done
 
 # host objects, keyed by the flags; rebuilt when the source or any header of the repo, harness or image is newer
-stamp=$(echo "$HOST" | md5sum | cut -c1-8)
-newest=$(find "$RT" "$REPO/src" "$H" "$GEN/image_symbols.h" -name '*.h' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2)
+stamp=$(echo "$HOST" | { md5sum 2>/dev/null || md5 -q; } | cut -c1-8)
+newest=$(ls -t $(find "$RT" "$REPO/src" "$H" "$GEN/image_symbols.h" -name '*.h') | head -1)
 objs=()
 for f in $SRC; do
     o=$OUT/host/$(echo "${f#/}" | tr / _ | sed "s/\.cpp$/.$stamp.o/"); objs+=("$o")

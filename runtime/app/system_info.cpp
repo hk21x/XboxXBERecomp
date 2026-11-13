@@ -1,4 +1,5 @@
 // the log's opening lines: what the game runs on and with which settings
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -7,6 +8,10 @@
 #endif
 #include <windows.h>
 #include <intrin.h>
+#else
+#include <sys/sysctl.h>
+#include <sys/utsname.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -21,12 +26,17 @@
 #include "core/log.h"
 #include "image_symbols.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "advapi32.lib")
+#endif
+
+extern char** environ;
 
 namespace app {
 
 namespace {
 
+#ifdef _WIN32
 std::string RegString(HKEY key, const char* name) {
     char text[256] = {};
     DWORD size = sizeof(text) - 1;
@@ -69,9 +79,44 @@ std::string CpuName() {
     s.erase(s.find_last_not_of(' ') + 1);
     return s;
 }
+#else
+std::string Sysctl(const char* name) {
+    char text[256] = {};
+    size_t size = sizeof(text) - 1;
+    return sysctlbyname(name, text, &size, nullptr, 0) == 0 ? text : "unknown";
+}
+#endif
 
 }  // namespace
 
+#ifndef _WIN32
+void LogSystem() {
+    std::time_t now = std::time(nullptr);
+    char date[32] = {};
+    std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    LOGR("%ls (%s), %s", kGame.title, IMAGE_XBE, date);
+    LOGR("Path: %s", ExeDir().string().c_str());
+    utsname u{};
+    uname(&u);
+    LOGR("OS: macOS %s (%s %s, %s)", Sysctl("kern.osproductversion").c_str(), u.sysname, u.release, u.machine);
+    int threads = 0;
+    size_t size = sizeof(threads);
+    sysctlbyname("hw.logicalcpu", &threads, &size, nullptr, 0);
+    LOGR("CPU: %s (%d threads)", Sysctl("machdep.cpu.brand_string").c_str(), threads);
+    uint64_t ram = 0;
+    size = sizeof(ram);
+    sysctlbyname("hw.memsize", &ram, &size, nullptr, 0);
+    LOGR("RAM: %.1f GB", ram / 1073741824.0);
+    Mode desk = Desktop();
+    LOGR("Desktop: %ux%u", desk.width, desk.height);
+    LogSettings();
+    std::string game;
+    for (const char* c = kGame.log; *c; c++) game += char(std::toupper(static_cast<unsigned char>(*c)));
+    game += "_";
+    for (char** e = environ; e && *e; e++)
+        if (std::strncmp(*e, "XBE_", 4) == 0 || std::strncmp(*e, game.c_str(), game.size()) == 0) LOGR("Environment: %s", *e);
+}
+#else
 void LogSystem() {
     std::time_t now = std::time(nullptr);
     char date[32] = {};
@@ -111,5 +156,7 @@ void LogSystem() {
         FreeEnvironmentStringsW(env);
     }
 }
+
+#endif
 
 }  // namespace app

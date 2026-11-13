@@ -74,6 +74,27 @@ target_include_directories(xbe_symbols PRIVATE ${XBE_SDK_DIR}/runtime)
 target_compile_definitions(xbe_symbols PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(xbe_symbols PRIVATE Zydis tomlplusplus::tomlplusplus)
 
+if(APPLE)
+    # the Metal renderer and ImGui's Metal backend are Objective-C++: the game's project() enables OBJCXX on Apple
+    set(XBE_IMGUI_SOURCES
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm)
+    # this ImGui's SDL3 backend predates SDL 3's release: SDL's old names for it
+    set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${sdl3_SOURCE_DIR}/include" COMPILE_DEFINITIONS SDL_ENABLE_OLD_NAMES)
+    # the Metal renderer compiles the generated HLSL to SPIR-V (glslang) and on to MSL (SPIRV-Cross)
+    find_path(XBE_GLSLANG_INCLUDE glslang/Public/ShaderLang.h HINTS /opt/homebrew/include /usr/local/include REQUIRED)
+    find_library(XBE_GLSLANG glslang HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+    find_library(XBE_GLSLANG_LIMITS glslang-default-resource-limits HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+    find_path(XBE_SPIRV_CROSS_INCLUDE spirv_cross/spirv_msl.hpp HINTS /opt/homebrew/include /usr/local/include REQUIRED)
+    find_library(XBE_SPIRV_CROSS_MSL spirv-cross-msl HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+    find_library(XBE_SPIRV_CROSS_GLSL spirv-cross-glsl HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+    find_library(XBE_SPIRV_CROSS_CORE spirv-cross-core HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+else()
 set(XBE_IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -82,12 +103,25 @@ set(XBE_IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp)
+endif()
 
 # the settings window reads controllers from the runtime's SDL input (app::FeedPad), not XInput
 set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp PROPERTIES
     COMPILE_DEFINITIONS IMGUI_IMPL_WIN32_DISABLE_GAMEPAD)
 
 file(GLOB XBE_RUNTIME_SOURCES CONFIGURE_DEPENDS ${XBE_SDK_DIR}/runtime/*/*.cpp)
+if(APPLE)
+    # what only Windows has: its window and message loop, splash, handover, game code DLL, screenshots (WIC),
+    # DirectInput wheels, XAudio2 and the Direct3D renderers; SDL, Metal and stand ins instead
+    list(FILTER XBE_RUNTIME_SOURCES EXCLUDE REGEX
+        "/runtime/(app/(main|splash|handover|game_code|screenshot)|core/wheel|audio/xaudio2|gpu/d3d1[12])\\.cpp$")
+    list(APPEND XBE_RUNTIME_SOURCES ${XBE_SDK_DIR}/runtime/gpu/metal.mm)
+    foreach(f app/main_sdl.cpp audio/sdl_audio.cpp app/game_files.cpp)
+        set_property(SOURCE ${XBE_SDK_DIR}/runtime/${f} APPEND PROPERTY INCLUDE_DIRECTORIES "${sdl3_SOURCE_DIR}/include")
+    endforeach()
+else()
+    list(FILTER XBE_RUNTIME_SOURCES EXCLUDE REGEX "/runtime/(app/main_sdl|audio/sdl_audio|core/wheel_none)\\.cpp$")
+endif()
 # SDL's headers go to the input code alone (it is linked LINK_ONLY), so the generated sources' compile line stays the same
 set_source_files_properties(${XBE_SDK_DIR}/runtime/core/input.cpp PROPERTIES INCLUDE_DIRECTORIES "${sdl3_SOURCE_DIR}/include")
 
@@ -182,6 +216,21 @@ function(add_xbe_image target xbe config partitions game_dir)
     file(SHA1 ${xbe_file} xbe_sha1)
     set(XBE_HASH ${CMAKE_CURRENT_BINARY_DIR}/${target}_xbe.cpp)
     file(CONFIGURE OUTPUT ${XBE_HASH} CONTENT "extern const char kImageSha1[] = \"${xbe_sha1}\";\n")
+    if(APPLE)
+        add_executable(${target} ${XBE_RUNTIME_SOURCES} ${XBE_HOST_SOURCES} ${GAME_SOURCES} ${GEN_SOURCES} ${XBE_IMGUI_SOURCES} ${XBE_HASH})
+        add_dependencies(${target} recompile_${target})
+        target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${XBE_SDK_DIR}/runtime ${GEN}
+            ${XBE_SDK_DIR}/harness/compat)
+        target_include_directories(${target} SYSTEM PRIVATE ${imgui_SOURCE_DIR} ${XBE_GLSLANG_INCLUDE} ${XBE_SPIRV_CROSS_INCLUDE})
+        # no fused multiply add: the guest's float results as on x86
+        target_compile_options(${target} PRIVATE -fno-strict-aliasing -ffp-contract=off)
+        set_source_files_properties(${XBE_SDK_DIR}/runtime/gpu/metal.mm ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(${target} PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static
+            ${XBE_GLSLANG} ${XBE_GLSLANG_LIMITS} ${XBE_SPIRV_CROSS_MSL} ${XBE_SPIRV_CROSS_GLSL} ${XBE_SPIRV_CROSS_CORE}
+            "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework AppKit")
+        return()
+    endif()
     add_executable(${target} WIN32 ${XBE_RUNTIME_SOURCES} ${XBE_HOST_SOURCES} ${GAME_SOURCES} ${GEN_SOURCES} ${XBE_IMGUI_SOURCES} ${XBE_HASH})
     add_dependencies(${target} recompile_${target})
     target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${XBE_SDK_DIR}/runtime ${GEN})

@@ -2,13 +2,7 @@
 // settings file at once; display mode, resolution and render scale apply at once, aspect at the next start.
 // A section list on the left and one full-width row per setting, in classic Steam's dark olive. Made for a controller:
 // LB/RB change section, up/down rows, left/right change a row's value, A presses, Y clears a binding, B or Start closes.
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "core/vk.h"
 
 #include <algorithm>
 #include <atomic>
@@ -319,6 +313,9 @@ void Note(const char* text) {
 }
 
 // the monitor's modes, widest first, each size once
+#ifndef _WIN32
+std::vector<Mode> Modes() { return HostModes(); }
+#else
 std::vector<Mode> Modes() {
     std::vector<Mode> modes;
     HMONITOR mon = static_cast<HMONITOR>(Monitor());
@@ -338,6 +335,7 @@ std::vector<Mode> Modes() {
     });
     return modes;
 }
+#endif
 
 void Display(Settings& s) {
     bool changed = false;
@@ -888,14 +886,20 @@ bool OverlayKey(uint16_t vk) {
 void OverlayInit() {
     ImGuiIO& io = ImGui::GetIO();
     // Tahoma, as classic Steam, at the size the desktop's height wants; the default font on a machine without it
+#ifdef _WIN32
     wchar_t dir[MAX_PATH];
     UINT len = GetWindowsDirectoryW(dir, MAX_PATH);
     std::filesystem::path fonts = std::filesystem::path(std::wstring(dir, len)) / L"Fonts";
+#else
+    std::filesystem::path fonts = "/System/Library/Fonts/Supplemental";  // Tahoma ships with macOS there
+#endif
     float px = std::round(kBaseFont * std::max(1.0f, float(Desktop().height) / 720.0f));
     std::error_code ec;
-    if (std::filesystem::exists(fonts / L"tahoma.ttf", ec)) io.Fonts->AddFontFromFileTTF((fonts / L"tahoma.ttf").string().c_str(), px);
+    if (std::filesystem::exists(fonts / "tahoma.ttf", ec)) io.Fonts->AddFontFromFileTTF((fonts / "tahoma.ttf").string().c_str(), px);
+    else if (std::filesystem::exists(fonts / "Tahoma.ttf", ec)) io.Fonts->AddFontFromFileTTF((fonts / "Tahoma.ttf").string().c_str(), px);
     if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();
-    if (std::filesystem::exists(fonts / L"tahomabd.ttf", ec)) g_bold = io.Fonts->AddFontFromFileTTF((fonts / L"tahomabd.ttf").string().c_str(), px);
+    if (std::filesystem::exists(fonts / "tahomabd.ttf", ec)) g_bold = io.Fonts->AddFontFromFileTTF((fonts / "tahomabd.ttf").string().c_str(), px);
+    else if (std::filesystem::exists(fonts / "Tahoma Bold.ttf", ec)) g_bold = io.Fonts->AddFontFromFileTTF((fonts / "Tahoma Bold.ttf").string().c_str(), px);
 }
 
 namespace {
