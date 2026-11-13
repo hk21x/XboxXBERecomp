@@ -212,6 +212,11 @@ struct GameInfo {
     // ultrawide: an untextured fill ending on the frame's left or right edge (EoN's sniper scope) keeps that edge (gpu::
     // DrawSpan); off, it is squeezed with the rest of the 2D (PGR2's HUD backdrops behind the times and the speed)
     bool edge_fills = true;
+    // a draw under a multisample mode asking for more samples than its target was made with (gpu::State::aa_x, aa_y)
+    // lands that many samples to a pixel: the console's SetViewport then halves the viewport it gives the vertex
+    // programs (c-38, c-37), so the draw lands where the others do. True applies that (Juiced's glow materials set
+    // D3DRS_MULTISAMPLERENDERTARGETMODE 4X on its 640x960 scene target around their draws)
+    bool sample_scaled_viewport = false;
     // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)

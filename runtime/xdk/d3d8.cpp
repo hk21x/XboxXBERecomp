@@ -314,8 +314,12 @@ void UpdateViewportConstants() {
     g_state.zscale = ZScale(g_state.zs);
     float hw = v.w * 0.5f, hh = v.h * 0.5f;
     if (!g_own_constants) {
-        g_state.vsc[58] = {hw, -hh, (v.max_z - v.min_z) * g_state.zscale, 0};
-        g_state.vsc[59] = {v.x + g_state.ss_offset_x + hw, v.y + g_state.ss_offset_y + hh, v.min_z * g_state.zscale, 0};
+        // GameInfo::sample_scaled_viewport: as the console's SetViewport, by its scale of 1 over the samples to a pixel
+        float kx = 1, ky = 1;
+        if (app::kGame.sample_scaled_viewport) kx = 1.0f / float(g_state.aa_x), ky = 1.0f / float(g_state.aa_y);
+        g_state.vsc[58] = {hw * kx, -hh * ky, (v.max_z - v.min_z) * g_state.zscale, 0};
+        g_state.vsc[59] = {v.x * kx + g_state.ss_offset_x + hw * kx, v.y * ky + g_state.ss_offset_y + hh * ky,
+                           v.min_z * g_state.zscale, 0};
     }
     // the viewport as the library's SetViewport stores it, for inlined readers
     if (XDK_CDevice_Viewport != xdk::kUnknown) {
@@ -355,6 +359,7 @@ void UpdateSampleScale() {
         return v;
     }();
     if (off) g_state.aa_x = g_state.aa_y = 1;
+    if (app::kGame.sample_scaled_viewport) UpdateViewportConstants();
     // each target the back buffer's mode is asked on, once: applied (the back buffer) or not (another target)
     uint32_t asked = g_state.rs[gpu::kRsMultiSampleMode];
     if (asked && g_state.rt.header) {
