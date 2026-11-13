@@ -3,12 +3,14 @@
 // splash, the handover between images, the game code DLL, screenshots).
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <TargetConditionals.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <execinfo.h>
@@ -34,6 +36,7 @@ namespace {
 SDL_Window* g_window = nullptr;
 SDL_MetalView g_metal_view = nullptr;
 std::atomic<bool> g_active{true};
+std::atomic<bool> g_background{false};  // iOS: the app is not on screen, and may not use the GPU
 std::atomic<bool> g_keys[256];
 Uint32 g_apply_event = 0;  // ApplyDisplay from another thread: the main thread applies it
 
@@ -102,6 +105,10 @@ SDL_DisplayID Display() {
 
 void ApplyNow() {
     if (!g_window) return;
+#if TARGET_OS_IPHONE
+    SDL_SetWindowFullscreen(g_window, true);  // the whole screen, always
+    return;
+#endif
     const Settings& s = Get();
     if (s.display_mode == DisplayMode::Windowed) {
         SDL_SetWindowFullscreen(g_window, false);
@@ -138,6 +145,14 @@ bool WindowInFront() { return g_active; }
 
 std::filesystem::path ExeDir() {
     static const std::filesystem::path dir = [] {
+#if TARGET_OS_IPHONE
+        // the bundle cannot be written: the app's Documents, which the Files app shows, hold the game, settings and logs
+        const char* home = std::getenv("HOME");
+        std::filesystem::path docs = std::filesystem::path(home ? home : ".") / "Documents";
+        std::error_code ec;
+        std::filesystem::create_directories(docs, ec);
+        return docs;
+#else
         char path[4096];
         uint32_t size = sizeof(path);
         if (_NSGetExecutablePath(path, &size) != 0) return std::filesystem::current_path();
@@ -147,6 +162,7 @@ std::filesystem::path ExeDir() {
         // inside an app bundle: the folder holding the bundle, where assets and the settings live
         if (d.filename() == "MacOS" && d.parent_path().filename() == "Contents") d = d.parent_path().parent_path().parent_path();
         return d;
+#endif
     }();
     return dir;
 }
@@ -173,7 +189,7 @@ void Quit() {
     SDL_PushEvent(&e);
 }
 
-bool Paused() { return Get().pause_unfocused && !g_active; }
+bool Paused() { return g_background || (Get().pause_unfocused && !g_active); }
 
 void Pace(uint32_t vblanks) {
     using clock = std::chrono::steady_clock;
@@ -233,8 +249,13 @@ std::vector<std::string> Monitors() {
 
 // in pixels: a Retina display's own resolution, not its points
 Mode Desktop() {
-    if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(Display()))
-        return {uint32_t(m->w * m->pixel_density), uint32_t(m->h * m->pixel_density)};
+    if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(Display())) {
+        Mode d{uint32_t(m->w * m->pixel_density), uint32_t(m->h * m->pixel_density)};
+#if TARGET_OS_IPHONE
+        if (d.height > d.width) std::swap(d.width, d.height);  // iOS gives the screen upright; the game plays sideways
+#endif
+        return d;
+    }
     return {1920, 1080};
 }
 
@@ -309,6 +330,10 @@ int main(int argc, char** argv) {
     sigaction(SIGABRT, &sa, nullptr);
 
     logx::Init((app::ExeDir() / "logs").string(), app::kGame.log, false);
+#if TARGET_OS_IPHONE
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, "2");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         LOGE("SDL failed to start: %s", SDL_GetError());
         return 1;
@@ -323,7 +348,12 @@ int main(int argc, char** argv) {
     std::string title;
     for (const wchar_t* t = app::kGame.title; t && *t; t++) title += *t < 128 ? char(*t) : '?';
     app::g_apply_event = SDL_RegisterEvents(1);
-    app::g_window = SDL_CreateWindow(title.c_str(), 1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+#if TARGET_OS_IPHONE
+    const SDL_WindowFlags kWindowFlags = SDL_WINDOW_METAL | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#else
+    const SDL_WindowFlags kWindowFlags = SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#endif
+    app::g_window = SDL_CreateWindow(title.c_str(), 1280, 720, kWindowFlags);
     if (!app::g_window) {
         LOGE("no window: %s", SDL_GetError());
         return 1;
@@ -341,6 +371,7 @@ int main(int argc, char** argv) {
                       ImGuiConfigFlags_NoMouseCursorChange;
     app::OverlayInit();
     ImGui_ImplSDL3_InitForMetal(app::g_window);
+    app::TouchInit(app::g_window);
 
     input::Init();
     if (app::kGame.window) app::kGame.window(app::g_window);
@@ -361,6 +392,7 @@ int main(int argc, char** argv) {
                 std::lock_guard lock(app::UiLock());
                 ImGui_ImplSDL3_ProcessEvent(&e);
             }
+            app::TouchEvent(&e);
             if (e.type == app::g_apply_event) {
                 app::ApplyNow();
                 continue;
@@ -371,6 +403,12 @@ int main(int argc, char** argv) {
                     running = false;
                     break;
                 case SDL_EVENT_WINDOW_FOCUS_GAINED: app::g_active = true; break;
+                case SDL_EVENT_WILL_ENTER_BACKGROUND:
+                    app::g_background = true;
+                    app::Save();
+                    logx::Flush();
+                    break;
+                case SDL_EVENT_DID_ENTER_FOREGROUND: app::g_background = false; break;
                 case SDL_EVENT_WINDOW_FOCUS_LOST:
                     app::g_active = false;
                     for (auto& k : app::g_keys) k = false;
@@ -404,6 +442,7 @@ int main(int argc, char** argv) {
                 }
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 case SDL_EVENT_MOUSE_BUTTON_UP: {
+                    if (e.button.which == SDL_TOUCH_MOUSEID) break;  // a tap, which the on-screen controls read
                     bool down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
                     uint16_t vk = e.button.button == SDL_BUTTON_LEFT     ? VK_LBUTTON
                                   : e.button.button == SDL_BUTTON_RIGHT  ? VK_RBUTTON

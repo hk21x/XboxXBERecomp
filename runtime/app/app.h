@@ -118,6 +118,13 @@ void SaveScreenshot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h);
 bool ScreenshotJustSaved();  // for a few seconds after one is written
 void DrawHud(double fps);         // the frame counter, inside the ImGui frame (overlay.cpp)
 void FeedPad();                   // controllers to the settings window's navigation, before each ImGui frame
+// on-screen controls on a touch screen (touch.cpp, iOS; stand ins elsewhere): the window once made, SDL's events from
+// the main thread, controller 1's inputs (in input::Control order, false without a touch screen), and the drawing
+// inside the ImGui frame
+void TouchInit(void* window);
+void TouchEvent(const void* sdl_event);
+bool TouchRead(float* v);
+void DrawTouch();
 Mode Output();
 float RenderScale(uint32_t guest_height);
 // the output is 3:2 or wider: the console reports a widescreen TV and the frame is shown 16:9, else 4:3 as on a 4:3 TV;

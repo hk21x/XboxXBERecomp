@@ -58,7 +58,8 @@ if(XBE_GAME_DLL)
         VERBATIM)
 endif()
 
-# x86 to C++ recompiler
+# x86 to C++ recompiler. Not in an iOS build: the generated code comes from the macOS build of the same tree
+if(NOT IOS)
 file(GLOB XBE_RECOMP_SOURCES CONFIGURE_DEPENDS ${XBE_SDK_DIR}/tools/recomp/*.cpp)
 add_executable(xbe_recomp ${XBE_RECOMP_SOURCES})
 if(XBE_GAME_DLL)
@@ -73,6 +74,7 @@ add_executable(xbe_symbols ${XBE_SDK_DIR}/tools/symbols/main.cpp)
 target_include_directories(xbe_symbols PRIVATE ${XBE_SDK_DIR}/runtime)
 target_compile_definitions(xbe_symbols PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(xbe_symbols PRIVATE Zydis tomlplusplus::tomlplusplus)
+endif()
 
 if(APPLE)
     # the Metal renderer and ImGui's Metal backend are Objective-C++: the game's project() enables OBJCXX on Apple
@@ -86,7 +88,41 @@ if(APPLE)
     # this ImGui's SDL3 backend predates SDL 3's release: SDL's old names for it
     set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp PROPERTIES
         INCLUDE_DIRECTORIES "${sdl3_SOURCE_DIR}/include" COMPILE_DEFINITIONS SDL_ENABLE_OLD_NAMES)
-    # the Metal renderer compiles the generated HLSL to SPIR-V (glslang) and on to MSL (SPIRV-Cross)
+    # the Metal renderer compiles the generated HLSL to SPIR-V (glslang) and on to MSL (SPIRV-Cross): Homebrew's on
+    # macOS, built from source for iOS
+    if(IOS)
+        set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+        set(ENABLE_HLSL ON CACHE BOOL "" FORCE)
+        set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
+        set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+        set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+        set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+        FetchContent_Declare(glslang GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git GIT_TAG 16.6.0 GIT_SHALLOW TRUE)
+        FetchContent_Declare(spirv_cross GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+            GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(glslang spirv_cross)
+        # the include paths as installed: glslang/SPIRV/... and spirv_cross/...
+        set(XBE_SHADER_SHIM ${CMAKE_BINARY_DIR}/shader_shim)
+        file(WRITE ${XBE_SHADER_SHIM}/glslang/SPIRV/GlslangToSpv.h "#include \"${glslang_SOURCE_DIR}/SPIRV/GlslangToSpv.h\"\n")
+        file(WRITE ${XBE_SHADER_SHIM}/spirv_cross/spirv_msl.hpp "#include \"${spirv_cross_SOURCE_DIR}/spirv_msl.hpp\"\n")
+        set(XBE_GLSLANG_INCLUDE ${XBE_SHADER_SHIM} ${glslang_SOURCE_DIR} ${glslang_BINARY_DIR}/include)
+        set(XBE_SPIRV_CROSS_INCLUDE ${spirv_cross_SOURCE_DIR})
+        set(XBE_GLSLANG glslang)
+        set(XBE_GLSLANG_LIMITS glslang-default-resource-limits)
+        set(XBE_SPIRV_CROSS_MSL spirv-cross-msl)
+        set(XBE_SPIRV_CROSS_GLSL spirv-cross-glsl)
+        set(XBE_SPIRV_CROSS_CORE spirv-cross-core)
+    else()
     find_path(XBE_GLSLANG_INCLUDE glslang/Public/ShaderLang.h HINTS /opt/homebrew/include /usr/local/include REQUIRED)
     find_library(XBE_GLSLANG glslang HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
     find_library(XBE_GLSLANG_LIMITS glslang-default-resource-limits HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
@@ -94,6 +130,7 @@ if(APPLE)
     find_library(XBE_SPIRV_CROSS_MSL spirv-cross-msl HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
     find_library(XBE_SPIRV_CROSS_GLSL spirv-cross-glsl HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
     find_library(XBE_SPIRV_CROSS_CORE spirv-cross-core HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+    endif()
 else()
 set(XBE_IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -116,7 +153,7 @@ if(APPLE)
     list(FILTER XBE_RUNTIME_SOURCES EXCLUDE REGEX
         "/runtime/(app/(main|splash|handover|game_code|screenshot)|core/wheel|audio/xaudio2|gpu/d3d1[12])\\.cpp$")
     list(APPEND XBE_RUNTIME_SOURCES ${XBE_SDK_DIR}/runtime/gpu/metal.mm)
-    foreach(f app/main_sdl.cpp audio/sdl_audio.cpp app/game_files.cpp)
+    foreach(f app/main_sdl.cpp audio/sdl_audio.cpp app/game_files.cpp app/touch.cpp)
         set_property(SOURCE ${XBE_SDK_DIR}/runtime/${f} APPEND PROPERTY INCLUDE_DIRECTORIES "${sdl3_SOURCE_DIR}/include")
     endforeach()
 else()
@@ -196,6 +233,11 @@ function(add_xbe_image target xbe config partitions game_dir)
     foreach(i RANGE ${last})
         list(APPEND GEN_SOURCES ${GEN}/x86_recomp.${i}.cpp)
     endforeach()
+    if(IOS)
+        if(NOT EXISTS ${GEN}/codegen.stamp)
+            message(FATAL_ERROR "iOS: no generated code in ${GEN}. Build for macOS first, which runs the recompiler")
+        endif()
+    else()
     file(GLOB configs CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/config/*.toml ${XBE_SDK_DIR}/xdk/*/*.toml)
     add_custom_command(
         OUTPUT ${GEN}/codegen.stamp
@@ -207,6 +249,7 @@ function(add_xbe_image target xbe config partitions game_dir)
         COMMENT "Recompiling ${xbe}"
         VERBATIM)
     add_custom_target(recompile_${target} DEPENDS ${GEN}/codegen.stamp)
+    endif()
     set_source_files_properties(${GEN_SOURCES} PROPERTIES GENERATED TRUE
         COMPILE_OPTIONS "-O2;-fno-strict-aliasing;-Wno-unused-label;-Wno-parentheses-equality;-Wno-unused-variable")
     file(GLOB GAME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/${game_dir}/*.cpp)
@@ -218,7 +261,9 @@ function(add_xbe_image target xbe config partitions game_dir)
     file(CONFIGURE OUTPUT ${XBE_HASH} CONTENT "extern const char kImageSha1[] = \"${xbe_sha1}\";\n")
     if(APPLE)
         add_executable(${target} ${XBE_RUNTIME_SOURCES} ${XBE_HOST_SOURCES} ${GAME_SOURCES} ${GEN_SOURCES} ${XBE_IMGUI_SOURCES} ${XBE_HASH})
-        add_dependencies(${target} recompile_${target})
+        if(NOT IOS)
+            add_dependencies(${target} recompile_${target})
+        endif()
         target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${XBE_SDK_DIR}/runtime ${GEN}
             ${XBE_SDK_DIR}/harness/compat)
         target_include_directories(${target} SYSTEM PRIVATE ${imgui_SOURCE_DIR} ${XBE_GLSLANG_INCLUDE} ${XBE_SPIRV_CROSS_INCLUDE})
@@ -228,7 +273,29 @@ function(add_xbe_image target xbe config partitions game_dir)
             PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(${target} PRIVATE tomlplusplus::tomlplusplus SDL3::SDL3-static
             ${XBE_GLSLANG} ${XBE_GLSLANG_LIMITS} ${XBE_SPIRV_CROSS_MSL} ${XBE_SPIRV_CROSS_GLSL} ${XBE_SPIRV_CROSS_CORE}
-            "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework AppKit")
+            "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+        if(IOS)
+            # an app the Files app can put the disc image in. XBE_IOS_TEAM and XBE_IOS_BUNDLE_ID: the signer's own
+            if(NOT XBE_IOS_TEAM OR NOT XBE_IOS_BUNDLE_ID)
+                message(FATAL_ERROR "iOS: set XBE_IOS_TEAM (an Apple developer team ID) and XBE_IOS_BUNDLE_ID")
+            endif()
+            set(XBE_IOS_NAME ${target})
+            configure_file(${XBE_SDK_DIR}/cmake/ios/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/${target}-Info.plist)
+            set_target_properties(${target} PROPERTIES
+                MACOSX_BUNDLE TRUE
+                MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/${target}-Info.plist
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ${XBE_IOS_BUNDLE_ID}
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM ${XBE_IOS_TEAM}
+                XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
+                XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS ${XBE_SDK_DIR}/cmake/ios/app.entitlements
+                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+                XCODE_ATTRIBUTE_GCC_OPTIMIZATION_LEVEL 2
+                XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT dwarf)
+            target_link_libraries(${target} PRIVATE "-framework UIKit")
+        else()
+            target_link_libraries(${target} PRIVATE "-framework AppKit")
+        endif()
         return()
     endif()
     add_executable(${target} WIN32 ${XBE_RUNTIME_SOURCES} ${XBE_HOST_SOURCES} ${GAME_SOURCES} ${GEN_SOURCES} ${XBE_IMGUI_SOURCES} ${XBE_HASH})

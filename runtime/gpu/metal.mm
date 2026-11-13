@@ -611,7 +611,9 @@ bool MetalBackend::Init(uint32_t width, uint32_t height) {
         layer_.pixelFormat = kBgra;
         layer_.framebufferOnly = NO;
         layer_.maximumDrawableCount = 3;
+#if TARGET_OS_OSX
         layer_.displaySyncEnabled = app::Get().vsync;
+#endif
     }
     in_flight_ = dispatch_semaphore_create(kInFlight);
     for (int i = 0; i < 4; i++) {
@@ -2125,6 +2127,7 @@ void MetalBackend::RenderUi(id<MTLRenderCommandEncoder> enc, MTLRenderPassDescri
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     app::DrawHud(fps_);
+    app::DrawTouch();
     app::DrawOverlay();
     if (app::kGame.ui) app::kGame.ui(fps_);
     ImGui::Render();
@@ -2174,7 +2177,9 @@ void MetalBackend::Present(const Surface& front) {
             SDL_GetWindowSizeInPixels(static_cast<SDL_Window*>(app::Window()), &pw, &ph);
             CGSize want = CGSizeMake(std::max(pw, 1), std::max(ph, 1));
             if (!CGSizeEqualToSize(layer_.drawableSize, want)) layer_.drawableSize = want;
+#if TARGET_OS_OSX
             layer_.displaySyncEnabled = app::Get().vsync;
+#endif
             auto t0 = std::chrono::steady_clock::now();
             drawable = [layer_ nextDrawable];
             perf_.drawable_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

@@ -10,6 +10,9 @@
 #include <windows.h>
 #else
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #endif
 
 #include <algorithm>
@@ -39,7 +42,11 @@ fs::path FindAssets() {
         if (!dir.has_parent_path() || dir.parent_path() == dir) break;
         dir = dir.parent_path();
     }
+#if TARGET_OS_IPHONE
+    return ExeDir();  // the disc image straight in the app's folder in the Files app
+#else
     return {};
+#endif
 }
 
 #ifndef _WIN32
@@ -158,7 +165,12 @@ bool FindGame(GameFiles& game) {
     }
 
     if (other_name.empty()) {
+#if TARGET_OS_IPHONE
+        ShowError(L"No game found.\n\nIn the Files app, copy your disc image (.iso) into On My iPhone (or iPad), in this "
+                  L"app's folder, then open the app again.");
+#else
         ShowError(kGame.missing);
+#endif
         return false;
     }
     std::wstring text = other_name.filename().wstring() +

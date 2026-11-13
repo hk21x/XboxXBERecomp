@@ -16,6 +16,9 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #include "app/app.h"
 #include "app/classic_theme.h"
 #include "core/input.h"
@@ -895,6 +898,25 @@ void OverlayInit() {
 #endif
     float px = std::round(kBaseFont * std::max(1.0f, float(Desktop().height) / 720.0f));
     std::error_code ec;
+#if TARGET_OS_IPHONE
+    // iOS: no Tahoma, and the window counts points, three pixels each: a system font, drawn at the screen's density
+    {
+        ImFontConfig cfg;
+        cfg.RasterizerDensity = 3.0f;
+        px = kBaseFont * 1.2f;
+        for (const char* f : {"/System/Library/Fonts/Core/Helvetica.ttc", "/System/Library/Fonts/Core/Avenir.ttc",
+                              "/System/Library/Fonts/CoreUI/SFUI.ttf", "/System/Library/Fonts/Core/HelveticaNeue.ttc"})
+            if (std::filesystem::exists(f, ec) && io.Fonts->AddFontFromFileTTF(f, px, &cfg)) {
+                LOGR("overlay: font %s", f);
+                break;
+            }
+        if (io.Fonts->Fonts.empty()) {
+            cfg.SizePixels = px;
+            io.Fonts->AddFontDefault(&cfg);
+        }
+        return;
+    }
+#endif
     if (std::filesystem::exists(fonts / "tahoma.ttf", ec)) io.Fonts->AddFontFromFileTTF((fonts / "tahoma.ttf").string().c_str(), px);
     else if (std::filesystem::exists(fonts / "Tahoma.ttf", ec)) io.Fonts->AddFontFromFileTTF((fonts / "Tahoma.ttf").string().c_str(), px);
     if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();

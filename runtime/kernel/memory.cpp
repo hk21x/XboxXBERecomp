@@ -20,6 +20,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#endif
 
 // Apple silicon pages are 16 KB, four guest pages: the guest space is mapped read write once, and committing only
 // tracks pages (macOS backs untouched anonymous memory lazily, so this costs nothing until used)
@@ -74,7 +79,17 @@ bool Init() {
     void* p = mmap(reinterpret_cast<void*>(0x100000000ull), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
 #endif
     g_base = p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
-#ifdef __APPLE__
+#if TARGET_OS_IPHONE
+    // iOS denies shm_open to apps, and ignores the address asked for: the write combined view is the contiguous one
+    // remapped, sharing its pages
+    if (g_base) {
+        vm_address_t to = vm_address_t(g_base + kWriteCombineBase);
+        vm_prot_t cur, max;
+        if (vm_remap(mach_task_self(), &to, kMappedPhysical, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                     vm_address_t(g_base + kContiguousBase), FALSE, &cur, &max, VM_INHERIT_NONE) != KERN_SUCCESS)
+            g_base = nullptr;
+    }
+#elif defined(__APPLE__)
     int fd = -1;
     if (g_base) {
         char name[64];
@@ -85,10 +100,12 @@ bool Init() {
 #else
     int fd = g_base ? memfd_create("ram", 0) : -1;
 #endif
+#if !TARGET_OS_IPHONE
     if (fd < 0 || ftruncate(fd, kMappedPhysical) ||
         mmap(g_base + kContiguousBase, kMappedPhysical, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED ||
         mmap(g_base + kWriteCombineBase, kMappedPhysical, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
         g_base = nullptr;
+#endif
 #endif
     if (!g_base) {
         LOGE("memory: could not reserve the 4 GB guest space");
