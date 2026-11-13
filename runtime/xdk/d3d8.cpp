@@ -251,7 +251,7 @@ uint32_t ScratchPush(uint32_t bytes = 0) {
 gpu::Surface SurfaceOf(uint32_t header) {
     gpu::Surface s;
     s.header = header;
-    if (header && mem::IsCommitted(header + 19)) {
+    if (header) {
         s.data = R32(header + 4);
         s.format = R32(header + 12);
         s.size = R32(header + 16);
