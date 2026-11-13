@@ -141,6 +141,11 @@ struct DrawConstants {
     float pts[4];        // point sprites on, size min, size max, D3DRS_POINTSIZE (console pixels)
     float vattr[16][4];  // State::vattr
     float zclip[4];      // the depth clip planes, near and far, as depth from 0 to 1 (-2 and 2: none)
+    float lodbias[4];    // g_sample_bias: each stage's D3DTSS_MIPMAPLODBIAS
 };
+
+// a renderer whose samplers have no mip LOD bias (Metal on macOS) sets this before its first draw: the pixel shaders
+// add each stage's bias (DrawConstants::lodbias) to their plain samples
+inline bool g_sample_bias = false;
 
 }  // namespace gpu

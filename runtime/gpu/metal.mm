@@ -2,7 +2,11 @@
 // the API shared through d3d_common; its HLSL compiled to SPIR-V by glslang and on to Metal's shading language by
 // SPIRV-Cross. One command buffer at a time is recorded; a render pass is open while draws go to the same targets, and
 // anything else (copies, uploads, read-backs, passes into other targets) ends it.
-// Not here yet: MSAA, SMAA, F3 captures, renderer extensions, screenshots, late read-backs (a NOOVERWRITE lock waits).
+// MSAA as d3d11.cpp has it: draws into a multisampled twin of a target, resolved by the render pass's store action
+// (colour, and depth and stencil from sample 0) when something reads the target.
+// Metal's samplers on macOS have no mip LOD bias: the pixel shaders add it (g_sample_bias). A line is drawn one
+// console pixel wide by drawing it again moved by whole host pixels, where d3d11.cpp has a geometry shader.
+// Not here yet: F3 captures, renderer extensions, late read-backs (a NOOVERWRITE lock waits).
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -11,7 +15,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <array>
+#include <cstdio>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -36,6 +43,7 @@
 #include "gpu/backend.h"
 #include "gpu/d3d_common.h"
 #include "gpu/shaders.h"
+#include "gpu/smaa.h"
 #include "gpu/texture.h"
 #include "gpu/vertex.h"
 #include "kernel/kernel.h"
@@ -137,6 +145,40 @@ std::string HlslToMsl(const std::string& src, const char* entry, bool vertex, fl
         error = e.what();
         return {};
     }
+}
+
+// translated shaders kept on disk by source hash (shadercache-metal.bin beside the game), so a shader translated in
+// one run is not translated again: glslang and SPIRV-Cross take milliseconds a shader, a hitch the first time a draw
+// needs it. Metal keeps its own cache of what it compiled from that source. Each entry: hash, register map, length, MSL
+struct MslCache {
+    std::mutex m;
+    bool loaded = false;
+    std::unordered_map<uint64_t, std::pair<std::string, std::array<int8_t, 16>>> entries;
+    FILE* out = nullptr;
+};
+
+MslCache& Msls() {
+    static MslCache c;
+    return c;
+}
+
+void LoadMslCache(MslCache& c) {
+    c.loaded = true;
+    const std::filesystem::path file = app::ExeDir() / "shadercache-metal.bin";
+    if (FILE* f = std::fopen(file.string().c_str(), "rb")) {
+        uint64_t hash;
+        std::array<int8_t, 16> regs;
+        uint32_t n;
+        while (std::fread(&hash, 8, 1, f) == 1 && std::fread(regs.data(), 16, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1 &&
+               n < (1u << 24)) {
+            std::string msl(n, '\0');
+            if (std::fread(msl.data(), 1, n, f) != n) break;
+            c.entries[hash] = {std::move(msl), regs};
+        }
+        std::fclose(f);
+    }
+    c.out = std::fopen(file.string().c_str(), "ab");
+    LOGR("metal: %zu translated shaders kept from earlier runs", c.entries.size());
 }
 
 MTLBlendFactor MtlBlend(D3D12_BLEND b) {
@@ -266,6 +308,9 @@ struct Target {
     bool linear32 = true;
     bool swizzled32 = false;
     std::vector<uint8_t> read;
+    id<MTLTexture> ms = nil;  // MSAA: the multisampled twin draws go to
+    bool ms_dirty = false;    // the twin has pixels res has not
+    bool ms_stale = false;    // res has pixels the twin has not
 };
 
 struct Tex {
@@ -436,6 +481,14 @@ private:
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
     bool TargetStale(uint32_t data) const;
     bool BindTargets(const State& s);
+    bool MsEligible(const Target& t) const { return msaa_ > 1 && (t.depth || (t.gw >= 320 && t.gh >= 240)); }
+    bool EnsureMs(Target& t);
+    void Settle(Target& t);   // the twin's pixels into res
+    void Refresh(Target& t);  // res's pixels into the twin
+    void Wrote(Target& t) {   // res written by other than a draw: the twin is behind
+        if (t.ms) t.ms_stale = true, t.ms_dirty = false;
+    }
+    void DropMs(Target& t);
     void UploadTarget(Target& t, const Surface& s);
     id<MTLTexture> Shrink(Target& t, uint32_t w, uint32_t h);
     id<MTLTexture> PrepareCopySource(Target& t);
@@ -470,6 +523,7 @@ private:
     void DeliverReports(bool wait);
     // present
     void UploadGammaRamp();
+    id<MTLTexture> SmaaFrame(Target& t);  // Settings::smaa: the frame through SMAA's passes, nil when it cannot
     void RenderUi(id<MTLRenderCommandEncoder> enc, MTLRenderPassDescriptor* rpd);
     void ReleaseOldTextures();
     void CountFps();
@@ -498,6 +552,8 @@ private:
     std::unordered_map<uint64_t, id<MTLDepthStencilState>> depth_states_;
     std::unordered_map<uint64_t, id<MTLRenderPipelineState>> pass_pipelines_;
     id<MTLTexture> lut_ = nil;
+    id<MTLTexture> smaa_[3] = {nil, nil, nil};  // edges, weights, the result
+    id<MTLTexture> smaa_area_ = nil, smaa_search_ = nil;
     // caches
     std::unordered_map<uint64_t, Compiled> shaders_;     // by source hash (point size in it)
     std::unordered_map<uint64_t, uint64_t> shader_src_;  // vertex and pixel keys to source hash
@@ -513,6 +569,8 @@ private:
     bool draw_2d_ = false;
     Target* bound_rt_ = nullptr;
     Target* bound_ds_ = nullptr;
+    bool bound_ms_ = false;
+    uint32_t msaa_ = 1;
     Target* draw_rt_ = nullptr;
     Target* draw_ds_ = nullptr;
     uint32_t guest_w_ = 640, guest_h_ = 480;
@@ -564,6 +622,7 @@ bool MetalBackend::Init(uint32_t width, uint32_t height) {
         pass_samplers_[i] = [dev_ newSamplerStateWithDescriptor:sd];
     }
     lut_ = NewTexture(kBgra, 256, 1, MTLTextureUsageShaderRead);
+    g_sample_bias = true;
     ui_ = ImGui_ImplMetal_Init(dev_);
     LOGR("metal: %s, %ux%u guest, render scale %.3f", [[dev_ name] UTF8String], width, height, scale_);
     return true;
@@ -724,9 +783,21 @@ const Compiled* MetalBackend::Compile(const std::string& src, const char* entry,
     auto it = shaders_.find(hash);
     if (it != shaders_.end()) return it->second.fn ? &it->second : nullptr;
     Compiled& c = shaders_[hash];
-    g_shaders_compiled++;
-    std::string error;
-    std::string msl = HlslToMsl(src, entry, vertex, point_size, c.attr_reg, error);
+    std::string error, msl;
+    {
+        MslCache& mc = Msls();
+        std::lock_guard lock(mc.m);
+        if (!mc.loaded) LoadMslCache(mc);
+        if (auto it = mc.entries.find(hash); it != mc.entries.end()) {
+            msl = it->second.first;
+            std::memcpy(c.attr_reg, it->second.second.data(), 16);
+        }
+    }
+    const bool translated = msl.empty();
+    if (translated) {
+        g_shaders_compiled++;  // the frames line's count: shaders translated, not those the disk cache had
+        msl = HlslToMsl(src, entry, vertex, point_size, c.attr_reg, error);
+    }
     if (msl.empty()) {
         LOGE("metal: %s %s did not translate: %s", vertex ? "vertex" : "pixel", entry, error.c_str());
         LOGE("%s", src.c_str());
@@ -745,6 +816,20 @@ const Compiled* MetalBackend::Compile(const std::string& src, const char* entry,
     }
     NSArray<NSString*>* names = [lib functionNames];
     c.fn = names.count ? [lib newFunctionWithName:names[0]] : nil;
+    if (c.fn && translated) {
+        MslCache& mc = Msls();
+        std::lock_guard lock(mc.m);
+        std::array<int8_t, 16> regs;
+        std::memcpy(regs.data(), c.attr_reg, 16);
+        if (mc.entries.emplace(hash, std::make_pair(msl, regs)).second && mc.out) {
+            uint32_t n = uint32_t(msl.size());
+            std::fwrite(&hash, 8, 1, mc.out);
+            std::fwrite(regs.data(), 16, 1, mc.out);
+            std::fwrite(&n, 4, 1, mc.out);
+            std::fwrite(msl.data(), 1, n, mc.out);
+            std::fflush(mc.out);
+        }
+    }
     return c.fn ? &c : nullptr;
 }
 
@@ -761,9 +846,9 @@ void MetalBackend::FullScreen(id<MTLTexture> colour, id<MTLTexture> depth, const
         const void* vs;
         const void* ps;
         uint64_t colour, depth;
-        uint32_t over, mask;
+        uint32_t over, mask, samples;
     } key{(__bridge const void*)vs->fn, (__bridge const void*)ps->fn, colour ? uint64_t(colour.pixelFormat) : 0,
-          depth ? uint64_t(depth.pixelFormat) : 0, over, write_mask};
+          depth ? uint64_t(depth.pixelFormat) : 0, over, write_mask, uint32_t((colour ? colour : depth).sampleCount)};
     uint64_t h = Hash(&key, sizeof(key));
     __strong id<MTLRenderPipelineState>& pso = pass_pipelines_[h];
     if (!pso) {
@@ -784,6 +869,7 @@ void MetalBackend::FullScreen(id<MTLTexture> colour, id<MTLTexture> depth, const
             }
         }
         if (depth) pd.depthAttachmentPixelFormat = pd.stencilAttachmentPixelFormat = depth.pixelFormat;
+        pd.rasterSampleCount = (colour ? colour : depth).sampleCount;
         NSError* err = nil;
         pso = [dev_ newRenderPipelineStateWithDescriptor:pd error:&err];
         if (!pso) {
@@ -837,7 +923,7 @@ void MetalBackend::Blit(id<MTLTexture> dst, id<MTLTexture> src, const float uvre
     if (!ps && final) ps = Compile(kBlitHlsl, "psmain", false, h);
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), 1.0f};
-    if (final) c[5] = float((st.fxaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
     id<MTLTexture> tex[2] = {src, lut_};
     FullScreen(dst, nil, vs, ps, c, 8, tex, 2, o.over, 0, vp, sc);
 }
@@ -858,10 +944,83 @@ bool MetalBackend::DepthCopy(const State& s) {
     const Compiled* vs = Compile(kDepthHlsl, "vs", true, h);
     const Compiled* ps = Compile(kDepthHlsl, "psmain", false, h);
     if (!vs || !ps) return false;
+    Settle(src);
+    Settle(dst);
+    Wrote(dst);
     id<MTLTexture> tex = src.res;
     FullScreen(nil, dst.res, vs, ps, nullptr, 0, &tex, 1, false, 1);
     dst.drawn = true;
     return true;
+}
+
+// ---- MSAA twins
+
+bool MetalBackend::EnsureMs(Target& t) {
+    if (t.ms) return true;
+    if (![dev_ supportsTextureSampleCount:msaa_]) return false;
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.depth ? kDepthFormat : kBgra
+                                                                                 width:t.w
+                                                                                height:t.h
+                                                                             mipmapped:NO];
+    td.textureType = MTLTextureType2DMultisample;
+    td.sampleCount = msaa_;
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModePrivate;
+    t.ms = [dev_ newTextureWithDescriptor:td];
+    if (!t.ms) {
+        LOG_FIRST(4, "metal: MSAA twin of %08X %ux%u could not be made", t.data, t.w, t.h);
+        return false;
+    }
+    t.ms_dirty = false;
+    t.ms_stale = true;  // filled from res before its first draw
+    LOG_FIRST(8, "metal: MSAA %ux twin for %s %08X %ux%u", msaa_, t.depth ? "depth" : "target", t.data, t.w, t.h);
+    return true;
+}
+
+// a pass that only resolves: the twin kept, res given its resolve (depth and stencil from sample 0)
+void MetalBackend::Settle(Target& t) {
+    if (!t.ms || !t.ms_dirty) return;
+    t.ms_dirty = false;
+    Cmd();
+    EndEncoders();
+    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (t.depth) {
+        rpd.depthAttachment.texture = rpd.stencilAttachment.texture = t.ms;
+        rpd.depthAttachment.resolveTexture = rpd.stencilAttachment.resolveTexture = t.res;
+        rpd.depthAttachment.loadAction = rpd.stencilAttachment.loadAction = MTLLoadActionLoad;
+        rpd.depthAttachment.storeAction = rpd.stencilAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        rpd.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+        rpd.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+    } else {
+        rpd.colorAttachments[0].texture = t.ms;
+        rpd.colorAttachments[0].resolveTexture = t.res;
+        rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rpd.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+    }
+    [[cmd_ renderCommandEncoderWithDescriptor:rpd] endEncoding];
+}
+
+void MetalBackend::Refresh(Target& t) {
+    if (!t.ms || !t.ms_stale) return;
+    t.ms_stale = false;
+    uint64_t h;
+    if (!t.depth) {
+        float uv[4] = {0, 0, 1, 1};
+        Blit(t.ms, t.res, uv, {.alpha = true});
+        return;
+    }
+    const Compiled* vs = Compile(kDepthHlsl, "vs", true, h);
+    const Compiled* ps = Compile(kDepthHlsl, "psmain", false, h);
+    id<MTLTexture> tex = t.res;
+    FullScreen(nil, t.ms, vs, ps, nullptr, 0, &tex, 1, false, 1);
+}
+
+void MetalBackend::DropMs(Target& t) {
+    if (!t.ms) return;
+    Settle(t);
+    if (enc_colour_ == t.ms || enc_depth_ == t.ms) EndEncoders();
+    t.ms = nil;
+    t.ms_dirty = t.ms_stale = false;
 }
 
 // ---- targets
@@ -911,7 +1070,9 @@ bool MetalBackend::CreateTarget(Target& t) {
 
 void MetalBackend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it) {
     if (bound_rt_ == &it->second || bound_ds_ == &it->second) bound_rt_ = bound_ds_ = nullptr;
-    if (enc_colour_ == it->second.res || enc_depth_ == it->second.res) EndEncoders();
+    if (enc_colour_ == it->second.res || enc_depth_ == it->second.res || (it->second.ms && (enc_colour_ == it->second.ms ||
+                                                                                          enc_depth_ == it->second.ms)))
+        EndEncoders();
     targets_.erase(it);
 }
 
@@ -978,10 +1139,23 @@ bool MetalBackend::BindTargets(const State& s) {
                  rt->gh, (unsigned long long)presents_);
         UploadTarget(*rt, s.rt);
     }
-    if (rt) rt->drawn = true;
-    if (ds) ds->drawn = true;
+    // MSAA: an eligible colour target and its depth draw into their twins; otherwise into res, with the twins'
+    // pixels settled into it first and the twins behind after
+    bool ms = rt && MsEligible(*rt) && EnsureMs(*rt) && (!ds || EnsureMs(*ds));
+    for (Target* t : {rt, ds}) {
+        if (!t) continue;
+        if (ms) {
+            Refresh(*t);
+            t->ms_dirty = true;
+        } else {
+            Settle(*t);
+            Wrote(*t);
+        }
+        t->drawn = true;
+    }
     bound_rt_ = rt;
     bound_ds_ = ds;
+    bound_ms_ = ms;
     return true;
 }
 
@@ -1000,6 +1174,8 @@ void MetalBackend::UploadTarget(Target& t, const Surface& s) {
     if (px.size() < size_t(pitch) * d.height) px.resize(size_t(pitch) * d.height);
     id<MTLTexture> tex = NewTexture(kBgra, d.width, d.height, MTLTextureUsageShaderRead);
     if (!tex) return;
+    Settle(t);
+    Wrote(t);
     UploadToTexture(tex, 0, 0, d.width, d.height, 1, px.data(), pitch, d.height);
     float uv[4] = {0, 0, 1, 1};
     Blit(t.res, tex, uv, {.alpha = true, .over = over});
@@ -1016,6 +1192,7 @@ id<MTLTexture> MetalBackend::Shrink(Target& t, uint32_t w, uint32_t h) {
 }
 
 id<MTLTexture> MetalBackend::PrepareCopySource(Target& t) {
+    Settle(t);
     if (t.w != t.gw || t.h != t.gh) return Shrink(t, t.gw, t.gh);
     return t.res;
 }
@@ -1112,28 +1289,35 @@ void MetalBackend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
         bool whole = (t->depth || (flags & kClearTarget) == kClearTarget) && rs.size() == 1 && rs[0].left == 0 &&
                      rs[0].top == 0 && rs[0].right == LONG(t->w) && rs[0].bottom == LONG(t->h);
         if (!t->depth && LatchCpuWrite(*t)) UploadTarget(*t, s.rt);
-        // a whole clear of a target that is not being drawn: a pass that only clears
-        bool open = enc_ && (enc_colour_ == t->res || enc_depth_ == t->res);
-        if (whole && !open && (!t->depth || (flags & (kClearZ | kClearStencil)) == (kClearZ | kClearStencil))) {
+        // a whole clear: a pass that only clears, res and the twin alike; part of one goes to res, the twin refreshed
+        // later
+        bool full = whole && (!t->depth || (flags & (kClearZ | kClearStencil)) == (kClearZ | kClearStencil));
+        if (!full) Settle(*t);
+        for (id<MTLTexture> tex : {t->res, full ? t->ms : nil}) {
+            if (!tex) continue;
+            if (!full) {
+                ClearRects(*t, rs, flags, col, std::clamp(z, 0.0f, 1.0f), stencil);
+                Wrote(*t);
+                continue;
+            }
             Cmd();
             EndEncoders();
             MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
             if (t->depth) {
-                rpd.depthAttachment.texture = rpd.stencilAttachment.texture = t->res;
+                rpd.depthAttachment.texture = rpd.stencilAttachment.texture = tex;
                 rpd.depthAttachment.loadAction = rpd.stencilAttachment.loadAction = MTLLoadActionClear;
                 rpd.depthAttachment.storeAction = rpd.stencilAttachment.storeAction = MTLStoreActionStore;
                 rpd.depthAttachment.clearDepth = std::clamp(z, 0.0f, 1.0f);
                 rpd.stencilAttachment.clearStencil = stencil & 0xFF;
             } else {
-                rpd.colorAttachments[0].texture = t->res;
+                rpd.colorAttachments[0].texture = tex;
                 rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
                 rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
                 rpd.colorAttachments[0].clearColor = MTLClearColorMake(col[0], col[1], col[2], col[3]);
             }
             [[cmd_ renderCommandEncoderWithDescriptor:rpd] endEncoding];
-        } else {
-            ClearRects(*t, rs, flags, col, std::clamp(z, 0.0f, 1.0f), stencil);
         }
+        if (full && t->ms) t->ms_dirty = t->ms_stale = false;
         t->drawn = true;
     }
 }
@@ -1141,6 +1325,8 @@ void MetalBackend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
 // ---- copies
 
 void MetalBackend::CopyByDraw(Target& src_t, Target& dst_t, uint32_t count, uint32_t src_rects, uint32_t dst_points) {
+    Settle(dst_t);
+    Wrote(dst_t);
     float src_scale = float(src_t.w) / src_t.gw;
     float dst_scale = float(dst_t.w) / dst_t.gw;
     float dst_scale_y = float(dst_t.h) / dst_t.gh;
@@ -1166,6 +1352,8 @@ void MetalBackend::CopyByDraw(Target& src_t, Target& dst_t, uint32_t count, uint
 }
 
 void MetalBackend::CopyByRegion(Target& src_t, Target& dst_t, uint32_t count, uint32_t src_rects, uint32_t dst_points) {
+    Settle(dst_t);
+    Wrote(dst_t);
     float dst_scale = float(dst_t.w) / dst_t.gw;
     float dst_scale_y = float(dst_t.h) / dst_t.gh;
     bool listed = count && src_rects;
@@ -1213,6 +1401,7 @@ void MetalBackend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
         }
         return;
     }
+    Settle(*src_t);
     Target* dst_t = EnsureTarget(dst, false);
     if (!dst_t || src_t == dst_t) return;
     bool same_scale = src_t->w * dst_t->gw == dst_t->w * src_t->gw && src_t->h * dst_t->gh == dst_t->h * src_t->gh;
@@ -1226,6 +1415,7 @@ id<MTLTexture> MetalBackend::BindTargetTexture(const State& s, int stage, const 
                                                DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
     if (&t == draw_ds_) return nil;
+    Settle(t);
     stages.reads.rt[stage] = true;
     if (!t.depth && LatchCpuWrite(t)) {
         if (++reloads_[t.data] <= 3)
@@ -1395,6 +1585,7 @@ void MetalBackend::CopyCubeTargets(Tex& tx, const TextureDesc& d) {
         if (it == targets_.end() || TargetStale(face)) continue;
         Target& t = it->second;
         if (t.depth || t.gw != d.width || t.gh != d.height) continue;
+        Settle(t);
         id<MTLTexture> src = t.res;
         if (t.w != t.gw || t.h != t.gh) {
             __strong id<MTLTexture>& k = shrinks_[uint64_t(t.gw) << 32 | t.gh];
@@ -1470,6 +1661,12 @@ id<MTLSamplerState> MetalBackend::Sampler(const D3D12_SAMPLER_DESC& d) {
     sd.rAddressMode = MtlAddress(d.AddressW);
     // Metal has three border colours: the nearest
     const float* b = d.BorderColor;
+    if (d.AddressU == D3D12_TEXTURE_ADDRESS_MODE_BORDER || d.AddressV == D3D12_TEXTURE_ADDRESS_MODE_BORDER) {
+        bool exact = (b[3] == 0 && b[0] == 0 && b[1] == 0 && b[2] == 0) ||
+                     (b[3] == 1 && ((b[0] == 0 && b[1] == 0 && b[2] == 0) || (b[0] == 1 && b[1] == 1 && b[2] == 1)));
+        if (!exact) LOG_FIRST(8, "metal: border colour %.2f %.2f %.2f %.2f shown as the nearest of black, transparent, white",
+                              b[0], b[1], b[2], b[3]);
+    }
     sd.borderColor = b[3] < 0.5f ? MTLSamplerBorderColorTransparentBlack
                      : (b[0] + b[1] + b[2]) > 1.5f ? MTLSamplerBorderColorOpaqueWhite
                                                     : MTLSamplerBorderColorOpaqueBlack;
@@ -1536,6 +1733,7 @@ MetalBackend::Pipeline* MetalBackend::EnsurePipeline(const PsoKey& k, const Asse
     }
     if (k.has_ds) pd.depthAttachmentPixelFormat = pd.stencilAttachmentPixelFormat = kDepthFormat;
     if (k.topo == uint32_t(Topology::Points)) pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+    pd.rasterSampleCount = std::max<uint32_t>(k.samples, 1);
     NSError* err = nil;
     p.state = [dev_ newRenderPipelineStateWithDescriptor:pd error:&err];
     if (!p.state) {
@@ -1613,6 +1811,9 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (!BindTargets(s)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
     pk.quad = sh.quad;
+    // alpha tested, not blended, onto MSAA twins: Settings::alpha_coverage (not quads, whose shader is rewritten)
+    if (app::Get().alpha_coverage && bound_ms_ && !sh.quad && SimpleState(s, kMAlphaTestEnable) && !SimpleState(s, kMBlendEnable))
+        pk.coverage = msaa_;
     static const bool wbuffer = [] {
         const char* e = std::getenv("XBE_WBUFFER");
         return !(e && *e == '0');
@@ -1636,7 +1837,7 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     PsoKey k;
     PipelineTargets pt{.rt = bound_rt_ != nullptr, .rtfmt = bound_rt_ ? uint32_t(DXGI_FORMAT_B8G8R8A8_UNORM) : 0u,
                        .ds = bound_ds_ != nullptr, .ds_scale = bound_ds_ ? float(bound_ds_->h) / bound_ds_->gh : 1.0f,
-                       .samples = 1};
+                       .samples = bound_ms_ ? msaa_ : 1};
     BuildPipelineKey(s, a, sh.vh, sh.ph, pt, k);
     if (!adjust.depth_test) k.zen = k.zwrite = 0;
     k.zbias += adjust.depth_bias;
@@ -1678,6 +1879,15 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
+    D3D12_SAMPLER_DESC sds[4];
+    {
+        bool clamp = UnitTexcoords(a);
+        uint32_t aniso = app::Get().aniso;
+        for (int i = 0; i < 4; i++) {
+            sds[i] = StageSampler(s, i, stages.levels[i], stages.info[i].shadow, clamp, aniso, stages.replaced[i]);
+            c.lodbias[i] = sds[i].MipLODBias;
+        }
+    }
 
     // the viewport covers the target, the guest viewport is in the shader; the scissor clips to it
     const Target* b = bound_rt_ ? bound_rt_ : bound_ds_;
@@ -1705,7 +1915,8 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (x1 <= x0 || y1 <= y0) return;  // nothing inside the scissor
 
     // the render pass and its state
-    id<MTLRenderCommandEncoder> enc = Render(bound_rt_ ? bound_rt_->res : nil, bound_ds_ ? bound_ds_->res : nil);
+    id<MTLRenderCommandEncoder> enc = Render(bound_rt_ ? (bound_ms_ ? bound_rt_->ms : bound_rt_->res) : nil,
+                                             bound_ds_ ? (bound_ms_ ? bound_ds_->ms : bound_ds_->res) : nil);
     if (!enc) return;
     [enc setRenderPipelineState:p->state];
     [enc setDepthStencilState:p->depth];
@@ -1723,12 +1934,9 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     [enc setFragmentBytes:s.vsc.data() length:sizeof(s.vsc) atIndex:0];
     [enc setVertexBytes:&c length:sizeof(c) atIndex:1];
     [enc setFragmentBytes:&c length:sizeof(c) atIndex:1];
-    bool clamp = UnitTexcoords(a);
-    uint32_t aniso = app::Get().aniso;
     for (int i = 0; i < 4; i++) {
         [enc setFragmentTexture:stages.tex[i] atIndex:i];
-        D3D12_SAMPLER_DESC sd = StageSampler(s, i, stages.levels[i], stages.info[i].shadow, clamp, aniso, stages.replaced[i]);
-        [enc setFragmentSamplerState:Sampler(sd) atIndex:i];
+        [enc setFragmentSamplerState:Sampler(sds[i]) atIndex:i];
     }
 
     // geometry: every stream in upload memory
@@ -1755,20 +1963,40 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
             [enc setVisibilityResultMode:MTLVisibilityResultModeCounting offset:vis_used_ * 8];
         }
     }
+    Upload ib{};
     if (a.index_count) {
         uint32_t ibytes = a.index_count * (a.index16 ? 2 : 4);
-        Upload u = Allocate(ibytes, 4);
-        std::memcpy(u.p, a.index_src, ibytes);
-        [enc drawIndexedPrimitives:type
-                        indexCount:a.index_count
-                         indexType:a.index16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
-                       indexBuffer:u.buf
-                 indexBufferOffset:u.offset
-                     instanceCount:1
-                        baseVertex:a.base_vertex
-                      baseInstance:0];
+        ib = Allocate(ibytes, 4);
+        std::memcpy(ib.p, a.index_src, ibytes);
+    }
+    auto draw = [&] {
+        if (a.index_count)
+            [enc drawIndexedPrimitives:type
+                            indexCount:a.index_count
+                             indexType:a.index16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
+                           indexBuffer:ib.buf
+                     indexBufferOffset:ib.offset
+                         instanceCount:1
+                            baseVertex:a.base_vertex
+                          baseInstance:0];
+        else
+            [enc drawPrimitives:type vertexStart:0 vertexCount:a.draw_count];
+    };
+    // a line one console pixel wide: n x n copies, each moved by a whole host pixel. Blended lines are drawn once (the
+    // copies would blend over each other), as are lines under a visibility test (they would count n x n times)
+    const int wide = (type == MTLPrimitiveTypeLine || type == MTLPrimitiveTypeLineStrip) && !k.blend && !counting
+                         ? std::clamp(int(std::lround(c.surf[3])), 1, 8)
+                         : 1;
+    if (wide > 1) {
+        for (int dy = 0; dy < wide; dy++)
+            for (int dx = 0; dx < wide; dx++) {
+                double ox = dx - (wide - 1) / 2, oy = dy - (wide - 1) / 2;
+                [enc setViewport:MTLViewport{ox, oy, W, H, 0, 1}];
+                draw();
+            }
+        [enc setViewport:MTLViewport{0, 0, W, H, 0, 1}];
     } else {
-        [enc drawPrimitives:type vertexStart:0 vertexCount:a.draw_count];
+        draw();
     }
     perf_.draws++;
     if (counting) {
@@ -1783,7 +2011,7 @@ void MetalBackend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
 float MetalBackend::SamplesPerPixel() const {
     const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
     if (!t || !t->gw || !t->gh) return 1;
-    return float(t->w) * float(t->h) / (float(t->gw) * float(t->gh));
+    return float(t->w) * float(t->h) / (float(t->gw) * float(t->gh)) * float(bound_ms_ ? msaa_ : 1);
 }
 
 void MetalBackend::DeliverReports(bool wait) {
@@ -1842,6 +2070,53 @@ void MetalBackend::UploadGammaRamp() {
     gamma_ = !identity;
 }
 
+id<MTLTexture> MetalBackend::SmaaFrame(Target& t) {
+    if (!smaa_area_) {
+        smaa_area_ = NewTexture(MTLPixelFormatRG8Unorm, kSmaaAreaWidth, kSmaaAreaHeight, MTLTextureUsageShaderRead);
+        smaa_search_ = NewTexture(MTLPixelFormatR8Unorm, kSmaaSearchWidth, kSmaaSearchHeight, MTLTextureUsageShaderRead);
+        if (!smaa_area_ || !smaa_search_) {
+            smaa_area_ = nil;
+            return nil;
+        }
+        UploadToTexture(smaa_area_, 0, 0, kSmaaAreaWidth, kSmaaAreaHeight, 1, kSmaaArea, kSmaaAreaWidth * 2, kSmaaAreaHeight);
+        UploadToTexture(smaa_search_, 0, 0, kSmaaSearchWidth, kSmaaSearchHeight, 1, kSmaaSearch, kSmaaSearchWidth,
+                        kSmaaSearchHeight);
+    }
+    if (!smaa_[0] || smaa_[0].width != t.w || smaa_[0].height != t.h) {
+        for (auto& p : smaa_) {
+            p = NewTexture(kBgra, t.w, t.h, MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
+            if (!p) {
+                smaa_[0] = nil;
+                return nil;
+            }
+        }
+    }
+    const float c[8] = {0, 0, 1, 1, 1.0f / t.w, 1.0f / t.h, float(t.w), float(t.h)};
+    auto pass = [&](const char* vse, const char* pse, id<MTLTexture> dst, std::initializer_list<id<MTLTexture>> tex) {
+        uint64_t h;
+        const Compiled* vs = Compile(kSmaaHlsl, vse, true, h);
+        const Compiled* ps = Compile(kSmaaHlsl, pse, false, h);
+        if (!vs || !ps) return false;
+        std::vector<id<MTLTexture>> list(tex);
+        // the edges pass leaves pixels without an edge as they were: each pass starts from black
+        Cmd();
+        EndEncoders();
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        rpd.colorAttachments[0].texture = dst;
+        rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        [[cmd_ renderCommandEncoderWithDescriptor:rpd] endEncoding];
+        FullScreen(dst, nil, vs, ps, c, 8, list.data(), uint32_t(list.size()), false, 0);
+        return true;
+    };
+    if (!pass("vsedge", "psedge", smaa_[0], {t.res}) ||
+        !pass("vsweight", "psweight", smaa_[1], {smaa_[0], smaa_area_, smaa_search_}) ||
+        !pass("vsblend", "psblend", smaa_[2], {t.res, smaa_[1]}))
+        return nil;
+    return smaa_[2];
+}
+
 void MetalBackend::RenderUi(id<MTLRenderCommandEncoder> enc, MTLRenderPassDescriptor* rpd) {
     if (!ui_) return;
     std::lock_guard lock(app::UiLock());
@@ -1881,16 +2156,17 @@ void MetalBackend::CountFps() {
 void MetalBackend::Present(const Surface& front) {
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
+    if (t) Settle(*t);
     if (ramp_dirty_) UploadGammaRamp();
-    // F12, or every XBE_SHOT_EVERY frames: the frame as the game drew it, before the interface
+    // F12, or every XBE_SHOT_EVERY frames: the frame as shown, before the interface
     static const uint64_t shot_every = [] {
         const char* e = std::getenv("XBE_SHOT_EVERY");
         return e ? uint64_t(std::atoll(e)) : 0ull;
     }();
-    if (t && (app::TakeScreenshotRequest() || (shot_every && presents_ && presents_ % shot_every == 0))) {
-        std::vector<uint8_t> px;
-        if (ReadBack(t->res, t->w, t->h, px)) app::SaveScreenshot(std::move(px), t->w, t->h);
-    }
+    const bool shot = app::TakeScreenshotRequest() || (shot_every && presents_ && presents_ % shot_every == 0);
+    id<MTLTexture> frame = t ? t->res : nil;
+    if (t && app::Get().smaa)
+        if (id<MTLTexture> smoothed = SmaaFrame(*t)) frame = smoothed;
     @autoreleasepool {
         id<CAMetalDrawable> drawable = nil;
         if (layer_) {
@@ -1915,14 +2191,19 @@ void MetalBackend::Present(const Surface& front) {
             enc_ = [cmd_ renderCommandEncoderWithDescriptor:rpd];
             enc_colour_ = bb;
             enc_depth_ = nil;
-            if (t) {
+            if (frame) {
                 // the frame at its shape (16:9 or 4:3, ultrawide the screen's), centred on black
                 float aspect = app::FrameAspect();
                 float w = float(bb.width), h = float(bb.height);
                 float vw = std::min(w, h * aspect), vh = vw / aspect;
                 MTLViewport vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
                 float uv[4] = {0, 0, 1, 1};
-                Blit(bb, t->res, uv, {.gamma = gamma_, .final = true}, &vp);
+                Blit(bb, frame, uv, {.gamma = gamma_, .final = true}, &vp);
+            }
+            if (shot) {
+                std::vector<uint8_t> px;
+                if (ReadBack(bb, uint32_t(bb.width), uint32_t(bb.height), px))
+                    app::SaveScreenshot(std::move(px), uint32_t(bb.width), uint32_t(bb.height));
             }
             id<MTLRenderCommandEncoder> enc = Render(bb, nil);
             [enc setViewport:MTLViewport{0, 0, double(bb.width), double(bb.height), 0, 1}];
@@ -1950,10 +2231,16 @@ void MetalBackend::Present(const Surface& front) {
 }
 
 void MetalBackend::ApplySettings() {
-    static bool told_msaa = false;
-    if ((app::Get().msaa || app::Get().smaa) && !told_msaa) {
-        told_msaa = true;
-        LOGR("metal: MSAA and SMAA are not in the Metal renderer yet");
+    // the msaa setting 1, 2, 3: MSAA 2x, 4x, 8x; a change settles and drops every twin, the next draws make new ones
+    static const uint32_t kSamples[] = {1, 2, 4, 8};
+    uint32_t want_ms = kSamples[std::min<uint32_t>(app::Get().msaa, 3)];
+    while (want_ms > 1 && ![dev_ supportsTextureSampleCount:want_ms]) want_ms /= 2;
+    if (want_ms != msaa_) {
+        for (auto& [key, t] : targets_) DropMs(t);
+        msaa_ = want_ms;
+        bound_rt_ = bound_ds_ = nullptr;
+        bound_ms_ = false;
+        LOGR("metal: MSAA %ux", msaa_);
     }
     float aspect = app::FrameAspect();
     if (std::fabs(aspect - aspect_) > 1e-4f) {
@@ -1976,6 +2263,7 @@ void MetalBackend::ApplySettings() {
 }
 
 void MetalBackend::RescaleTargets() {
+    for (auto& [key, t] : targets_) DropMs(t);
     EndEncoders();
     bound_rt_ = bound_ds_ = nullptr;
     for (auto it = targets_.begin(); it != targets_.end();) {

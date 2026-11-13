@@ -66,8 +66,15 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
     float4 vattr[16];  // the v registers a draw gives no stream
     float4 zclip;  // the depth clip planes
+    float4 lodbias;  // g_sample_bias: each stage's mip LOD bias, for a renderer whose samplers have none
 };
 )";
+
+// a stage's plain sample: with g_sample_bias the stage's mip LOD bias is applied here, not by the sampler
+std::string Fetch(int i, const std::string& coord) {
+    if (g_sample_bias) return F("tex%d.SampleBias(smp%d, %s, lodbias.%c)", i, i, coord.c_str(), "xyzw"[i & 3]);
+    return F("tex%d.Sample(smp%d, %s)", i, i, coord.c_str());
+}
 
 const ShaderHooks& Hooks() {
     static const ShaderHooks plain;
@@ -413,22 +420,22 @@ std::string TexFetch(const PixelKey& k, int i) {
     };
     auto tex2d = [&](const std::string& uv) {
         if (t.flags & kTexWide) return F("spreadtap(tex%d, smp%d, %s, spread[%d], %s)", i, i, uv.c_str(), i, Hooks().ReadScale(t).c_str());
-        return F("tex%d.Sample(smp%d, %s)", i, i, uv.c_str());
+        return Fetch(i, uv);
     };
     auto cube = [&](const std::string& dir) {
         std::string c = Hooks().Cube(t, i, dir);
-        return c.empty() ? F("tex%d.Sample(smp%d, %s)", i, i, dir.c_str()) : c;
+        return c.empty() ? Fetch(i, dir) : c;
     };
     auto sample2 = [&](const std::string& uv) {
         if (t.kind == kTex2D) return tex2d(F("(%s)%s", uv.c_str(), norm.c_str()));
         if (t.kind == kTexCube) return cube("float3(" + uv + ", 1)");
-        if (t.kind == kTex3D) return F("tex%d.Sample(smp%d, float3(%s, 0))", i, i, uv.c_str());
+        if (t.kind == kTex3D) return Fetch(i, "float3(" + uv + ", 0)");
         return std::string("float4(0,0,0,1)");
     };
     auto sample3 = [&](const std::string& uvw) {
         if (t.kind == kTex2D) return tex2d(F("(%s).xy%s", uvw.c_str(), norm.c_str()));
         if (t.kind == kTexCube) return cube(uvw);
-        if (t.kind == kTex3D) return F("tex%d.Sample(smp%d, %s)", i, i, uvw.c_str());
+        if (t.kind == kTex3D) return Fetch(i, uvw);
         return std::string("float4(0,0,0,1)");
     };
     auto depth = [&](const std::string& ref) {
@@ -1011,9 +1018,9 @@ std::string PixelHlsl(const PixelKey& k) {
                           i, i, i, norm.c_str(), i, i, t.shadow, i);
             else if (t.kind == kTex2D && (t.flags & kTexWide))
                 body += F("float4 t%d = spreadtap(tex%d, smp%d, %s, spread[%d], %s);\n", i, i, i, uv.c_str(), i, Hooks().ReadScale(t).c_str());
-            else if (t.kind == kTex2D) body += F("float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, uv.c_str());
+            else if (t.kind == kTex2D) body += F("float4 t%d = %s;\n", i, Fetch(i, uv).c_str());
             else if (t.kind == kTexCube && !(cube = Hooks().Cube(t, i, F("tc%d.xyz", i))).empty()) body += F("float4 t%d = %s;\n", i, cube.c_str());
-            else if (t.kind) body += F("float4 t%d = tex%d.Sample(smp%d, tc%d.xyz);\n", i, i, i, i);
+            else if (t.kind) body += F("float4 t%d = %s;\n", i, Fetch(i, F("tc%d.xyz", i)).c_str());
             else body += F("float4 t%d = float4(%s);\n", i, app::kGame.unbound_texture_zero ? "0,0,0,0" : "1,1,1,1");
             body += Hooks().Fetched(t, i);
             if (t.flags & kTexDepthBytes) body += F("t%d = depthbytes(t%d.r, %d);\n", i, i, DepthBytesArg(t.flags));
