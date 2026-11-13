@@ -5,7 +5,7 @@
 #include <cstring>
 
 #include <dxgiformat.h>
-#include <emmintrin.h>
+#include "core/simd.h"
 
 #include "core/log.h"
 #include "kernel/kernel.h"

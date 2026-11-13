@@ -16,8 +16,15 @@
 #define NOMINMAX
 #include <windows.h>
 #else
+#ifdef __APPLE__
+#define _XOPEN_SOURCE 700  // macOS keeps the ucontext routines behind it
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <sys/mman.h>
 #include <ucontext.h>
+#ifndef MAP_STACK
+#define MAP_STACK 0
+#endif
 #endif
 
 using namespace kernel;

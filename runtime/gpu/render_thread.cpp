@@ -9,7 +9,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <smmintrin.h>
+#include "core/simd.h"
 
 #include <algorithm>
 #include <chrono>

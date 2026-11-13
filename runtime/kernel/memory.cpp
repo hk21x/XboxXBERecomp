@@ -16,7 +16,15 @@
 #define NOMINMAX
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+// Apple silicon pages are 16 KB, four guest pages: the guest space is mapped read write once, and committing only
+// tracks pages (macOS backs untouched anonymous memory lazily, so this costs nothing until used)
+#if defined(__APPLE__)
+#define XBE_HOST_TRACKS_COMMIT 1
 #endif
 
 namespace mem {
@@ -59,9 +67,24 @@ bool Init() {
         UnmapViewOfFile(b + kWriteCombineBase);
     }
 #else
+#ifdef XBE_HOST_TRACKS_COMMIT
+    // above the executable, which macOS loads at 0x100000000
+    void* p = mmap(reinterpret_cast<void*>(0x200000000ull), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+#else
     void* p = mmap(reinterpret_cast<void*>(0x100000000ull), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+#endif
     g_base = p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
+#ifdef __APPLE__
+    int fd = -1;
+    if (g_base) {
+        char name[64];
+        snprintf(name, sizeof(name), "/xbe-ram-%d", int(getpid()));
+        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        shm_unlink(name);
+    }
+#else
     int fd = g_base ? memfd_create("ram", 0) : -1;
+#endif
     if (fd < 0 || ftruncate(fd, kMappedPhysical) ||
         mmap(g_base + kContiguousBase, kMappedPhysical, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED ||
         mmap(g_base + kWriteCombineBase, kMappedPhysical, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
@@ -88,6 +111,7 @@ bool Commit(uint32_t va, uint32_t size) {
         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
         return false;
     }
+#elif defined(XBE_HOST_TRACKS_COMMIT)
 #else
     if (mprotect(g_base + first, size_t(end - first), PROT_READ | PROT_WRITE)) {
         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
@@ -105,6 +129,8 @@ void Decommit(uint32_t va, uint32_t size) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
 #ifdef _WIN32
     VirtualFree(g_base + first, size_t(end - first), MEM_DECOMMIT);
+#elif defined(XBE_HOST_TRACKS_COMMIT)
+    memset(g_base + first, 0, size_t(end - first));  // committed again, the pages read as zero
 #else
     madvise(g_base + first, size_t(end - first), MADV_DONTNEED);
     mprotect(g_base + first, size_t(end - first), PROT_NONE);
