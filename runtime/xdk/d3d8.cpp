@@ -251,7 +251,7 @@ uint32_t ScratchPush(uint32_t bytes = 0) {
 gpu::Surface SurfaceOf(uint32_t header) {
     gpu::Surface s;
     s.header = header;
-    if (header) {
+    if (header && mem::IsCommitted(header + 19)) {
         s.data = R32(header + 4);
         s.format = R32(header + 12);
         s.size = R32(header + 16);
@@ -296,7 +296,9 @@ void SyncDeferred() {
     // (NightFire's scope colours 16384 points from a 128x128 swizzled target a pass before drew)
     if (g_backend)
         for (const auto& st : g_state.streams)
-            if (st.vb) g_backend->SyncVertices(mem::VirtualFromPhysical(R32(st.vb + 4)));
+            // a buffer the title freed while it is still set as a stream is left alone (Juiced's menus: a draw
+            // from the stack with a freed vertex buffer set, its header's heap block given back)
+            if (st.vb && mem::IsCommitted(st.vb + 7)) g_backend->SyncVertices(mem::VirtualFromPhysical(R32(st.vb + 4)));
 }
 
 float ZScale(const gpu::Surface& zs) {
