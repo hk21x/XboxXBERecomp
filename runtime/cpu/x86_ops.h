@@ -200,6 +200,20 @@ inline int32_t sse_cvt(float v) {
     if (!(r >= -2147483648.0f && r < 2147483648.0f)) return INT32_MIN;
     return int32_t(r);
 }
+// CVTSS2SI and CVTPS2PI round as MXCSR's rounding control says (bits 13 and 14: nearest, down, up, truncate). Juiced
+// sets truncate at startup (0x186AA0: or 0x6000) and converts through CVTSS2SI everywhere (0x2D4B0): rounded to
+// nearest, its race timer's seconds ran one ahead for the second half of every second.
+inline int32_t sse_cvt(X86Context& ctx, float v) {
+    float r;
+    switch ((ctx.mxcsr >> 13) & 3) {
+        case 0: r = std::nearbyint(v); break;
+        case 1: r = std::floor(v); break;
+        case 2: r = std::ceil(v); break;
+        default: r = std::trunc(v); break;
+    }
+    if (!(r >= -2147483648.0f && r < 2147483648.0f)) return INT32_MIN;
+    return int32_t(r);
+}
 inline int32_t sse_cvtt(float v) {
     if (!(v >= -2147483648.0f && v < 2147483648.0f)) return INT32_MIN;
     return int32_t(v);

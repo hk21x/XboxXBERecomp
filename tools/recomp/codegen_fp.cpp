@@ -329,7 +329,7 @@ bool CodeGen::EmitSse(uint32_t va, const ZydisDecodedInstruction& in, const Zydi
             emit(F("ctx.xmm[%d].f[0] = (float)(int32_t)%s;", d, Read(ops[1], "ea").c_str()));
             return true;
         case ZYDIS_MNEMONIC_CVTSS2SI:
-            emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvt(%s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
+            emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvt(ctx, %s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
             return true;
         case ZYDIS_MNEMONIC_CVTTSS2SI:
             emit(RegWrite(ops[0].reg.value, F("(uint32_t)sse_cvtt(%s)", s >= 0 ? F("ctx.xmm[%d].f[0]", s).c_str() : "X86_MEMF32(ea)")));
@@ -342,9 +342,9 @@ bool CodeGen::EmitSse(uint32_t va, const ZydisDecodedInstruction& in, const Zydi
         }
         case ZYDIS_MNEMONIC_CVTPS2PI:
         case ZYDIS_MNEMONIC_CVTTPS2PI: {
-            const char* fn = m == ZYDIS_MNEMONIC_CVTPS2PI ? "sse_cvt" : "sse_cvtt";
+            const char* fn = m == ZYDIS_MNEMONIC_CVTPS2PI ? "sse_cvt(ctx, " : "sse_cvtt(";
             std::string src = s >= 0 ? F("ctx.xmm[%d]", s) : "*X86_PTR(X86Xmm, ea)";
-            emit(F("X86Xmm v = %s; ctx.mm[%d] = (uint64_t)(uint32_t)%s(v.f[0]) | ((uint64_t)(uint32_t)%s(v.f[1]) << 32);",
+            emit(F("X86Xmm v = %s; ctx.mm[%d] = (uint64_t)(uint32_t)%sv.f[0]) | ((uint64_t)(uint32_t)%sv.f[1]) << 32);",
                    src.c_str(), MmIndex(ops[0]), fn, fn));
             return true;
         }
