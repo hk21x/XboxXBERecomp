@@ -21,7 +21,8 @@ REPO=$(realpath "$REPO"); GEN=$(realpath "$GEN"); mkdir -p "$OUT"; OUT=$(realpat
 EXE=${EXE:-$(basename "$GEN")}; GEN_OBJ=${GEN_OBJ:-$OUT/gen}; mkdir -p "$GEN_OBJ" "$OUT/host"
 H=$(dirname "$(realpath "$0")"); RT=$REPO/sdk/runtime
 CXX=${CXX:-clang++}; JOBS=${JOBS:-$(nproc)}
-ARCH_FLAGS=-march=x86-64-v2; [ "$(uname -m)" = arm64 ] && ARCH_FLAGS=
+# arm64: no fused multiply add, which the x86-64-v2 build cannot emit either (the guest's float results)
+ARCH_FLAGS=-march=x86-64-v2; [ "$(uname -m)" = arm64 ] && ARCH_FLAGS=-ffp-contract=off
 BASE="-std=c++20 $ARCH_FLAGS -fno-strict-aliasing"
 HOST="$BASE -O1 -g -I$REPO/src -I$RT -I$GEN -I$H -I$H/compat -DXBE_RAW_VERTICES=${RAW:-0} -DXBE_RENDER_THREAD=${RT_THREAD:-0} ${HOST_FLAGS:-}"
 
@@ -32,7 +33,7 @@ ls "$GEN"/x86_recomp.*.cpp "$GEN"/x86_func_mapping.cpp | xargs -P "$JOBS" -n 1 s
     $CXX $BASE ${GEN_OPT:--O1} -g0 -w -I"$RT" -I"$GEN" -c "$1" -o "$o.tmp" && mv "$o.tmp" "$o"' _
 
 others=$(ls "$GEN/.." | grep -vx "$(basename "$GEN")" | paste -sd'|' -)
-SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/core/wheel.cpp|/gpu/d3d12.cpp|/gpu/d3d11.cpp|/gpu/d3d_common.cpp|/audio/xaudio2.cpp")
+SRC=$(ls "$RT"/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/core/wheel.cpp|/gpu/d3d12.cpp|/gpu/d3d11.cpp|/gpu/d3d_common.cpp|/audio/xaudio2.cpp|/audio/sdl_audio.cpp|/core/wheel_none.cpp")
 SRC="$SRC $(ls "$REPO"/src/*/*.cpp | grep -Ev "/src/(${others:-^$})/" || true)"
 SRC="$SRC $(ls "$H"/*.cpp) ${EXTRA[*]}"
 for x in "${EXCL[@]}"; do SRC=$(echo $SRC | tr ' ' '\n' | grep -Ev -- "$x"); done

@@ -105,6 +105,11 @@ Mode Desktop();
 void* Monitor();                  // HMONITOR of the monitor setting (the primary display when it is gone)
 std::vector<std::string> Monitors();  // the displays' names, in the monitor setting's order from 1
 std::vector<Mode> ListModes();        // the monitor setting's display modes, widest first, each size once
+// not on Windows: the window thread's key and mouse button state, by Windows virtual key code, and the game window
+// has the focus (app/main_sdl.cpp)
+bool KeyHeld(uint16_t vk);
+bool WindowInFront();
+std::vector<Mode> HostModes();  // the display's modes, widest first, each size once
 bool Paused();                    // pause_unfocused and the window is not in front (Windows)
 // F12: the renderers save the next frame, before they draw the interface (app/screenshot.cpp)
 void RequestScreenshot();

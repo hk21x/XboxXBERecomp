@@ -1,5 +1,6 @@
 // The game in assets: its files, or a disc image (.iso) with this executable's xbe on it. The xbe must be the one
 // this executable was recompiled from; another release's would run its own data under this code.
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -7,6 +8,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <SDL3/SDL.h>
+#endif
 
 #include <algorithm>
 #include <cwctype>
@@ -36,6 +40,40 @@ fs::path FindAssets() {
         dir = dir.parent_path();
     }
     return {};
+}
+
+#ifndef _WIN32
+std::string Utf8(const std::wstring& w) {
+    std::string out;
+    for (wchar_t c : w) {
+        uint32_t u = uint32_t(c);
+        if (u < 0x80) out += char(u);
+        else if (u < 0x800) out += char(0xC0 | (u >> 6)), out += char(0x80 | (u & 0x3F));
+        else out += char(0xE0 | (u >> 12)), out += char(0x80 | ((u >> 6) & 0x3F)), out += char(0x80 | (u & 0x3F));
+    }
+    return out;
+}
+#endif
+
+void ShowError(const wchar_t* text) {
+#ifdef _WIN32
+    MessageBoxW(nullptr, text, kGame.short_title, MB_ICONERROR);
+#else
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, Utf8(kGame.short_title).c_str(), Utf8(text).c_str(), nullptr);
+#endif
+}
+
+bool AskYesNo(const std::wstring& text) {
+#ifdef _WIN32
+    return MessageBoxW(nullptr, text.c_str(), kGame.short_title, MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDYES;
+#else
+    const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "No"},
+                                                {0, 1, "Yes"}};
+    std::string title = Utf8(kGame.short_title), body = Utf8(text);
+    const SDL_MessageBoxData box{SDL_MESSAGEBOX_WARNING, nullptr, title.c_str(), body.c_str(), 2, buttons, nullptr};
+    int hit = 0;
+    return SDL_ShowMessageBox(&box, &hit) && hit == 1;
+#endif
 }
 
 bool ReadHostFile(const fs::path& path, std::vector<uint8_t>& out) {
@@ -96,8 +134,15 @@ bool FindGame(GameFiles& game) {
         return false;
     };
 
+    // the extracted files: the xbe with the disc's folders beside it. The xbe alone beside a disc image is the copy
+    // the build recompiles from (README), not the game's files
+    bool folders = false;
+    if (!assets.empty())
+        for (auto& e : fs::directory_iterator(assets, ec)) folders |= e.is_directory(ec);
     std::vector<uint8_t> xbe;
-    if (!assets.empty() && ReadHostFile(assets / IMAGE_XBE, xbe) && consider(assets, std::move(xbe), nullptr)) return true;
+    if (!assets.empty() && (folders || isos.empty()) && ReadHostFile(assets / IMAGE_XBE, xbe) &&
+        consider(assets, std::move(xbe), nullptr))
+        return true;
     for (const fs::path& iso : isos) {
         auto disc = std::make_unique<kernel::Disc>();
         std::string error;
@@ -113,13 +158,13 @@ bool FindGame(GameFiles& game) {
     }
 
     if (other_name.empty()) {
-        MessageBoxW(nullptr, kGame.missing, kGame.short_title, MB_ICONERROR);
+        ShowError(kGame.missing);
         return false;
     }
     std::wstring text = other_name.filename().wstring() +
                         L" is a different release of the game than this build was made from, and will most likely "
                         L"crash.\n\nStart it anyway?";
-    if (MessageBoxW(nullptr, text.c_str(), kGame.short_title, MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) return false;
+    if (!AskYesNo(text)) return false;
     game = std::move(other);
     kernel::MountDisc(std::move(other_disc));
     return true;

@@ -27,6 +27,9 @@ const char* ControlLabel(int c); // shown to the player, "D-pad up" ...
 int ControlByName(const char* name);  // -1 when unknown
 
 void Init();  // window thread, before boot; the game code window starts it earlier
+// SDL's controller plugged in or unplugged, from the main thread's event loop (not on Windows, where the reading
+// threads take SDL's events themselves)
+void DeviceEvent(bool added, uint32_t id);
 uint16_t HeldOnAnyController();  // face buttons as XINPUT_GAMEPAD_A/B/X/Y masks, GameInfo::pad left out
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);

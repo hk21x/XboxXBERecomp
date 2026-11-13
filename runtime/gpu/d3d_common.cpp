@@ -1,7 +1,9 @@
 // What the Direct3D 12 and Direct3D 11 renderers share (d3d_common.h)
 #include "gpu/d3d_common.h"
 
+#ifdef _WIN32
 #include <d3dcompiler.h>
+#endif
 
 #include <cmath>
 #include <cstdio>
@@ -71,6 +73,7 @@ void LoadShaderCache(ShaderCache& c) {
 }
 }  // namespace
 
+#ifdef _WIN32
 bool CachedShader(uint64_t hash, ID3DBlob** out) {
     ShaderCache& c = Shaders();
     std::lock_guard lock(c.m);
@@ -95,6 +98,7 @@ void KeepShader(uint64_t hash, ID3DBlob* code) {
     std::fwrite(code->GetBufferPointer(), 1, n, c.out);
     std::fflush(c.out);
 }
+#endif
 
 namespace {
 // 2: the key takes the geometry shader's hash (lines and points); version 1's blobs had none and are dropped

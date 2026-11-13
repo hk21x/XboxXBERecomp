@@ -1,11 +1,5 @@
 // the settings file beside the exe
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "core/vk.h"
 
 #include <algorithm>
 #include <cctype>
@@ -35,6 +29,7 @@ constexpr uint32_t kMsaaCount = 4;
 const char* kRenderers[] = {"d3d12", "d3d11"};
 constexpr uint32_t kRendererCount = 2;
 
+#ifdef _WIN32
 // the displays in Windows' order
 std::vector<HMONITOR> MonitorList() {
     std::vector<HMONITOR> list;
@@ -44,6 +39,7 @@ std::vector<HMONITOR> MonitorList() {
     }, reinterpret_cast<LPARAM>(&list));
     return list;
 }
+#endif
 
 // keys by name in the settings file: letters, digits and these
 struct KeyName {
@@ -376,6 +372,7 @@ void LogSettings() {
         if (!line.empty()) LOGR("  %s", line.c_str());
 }
 
+#ifdef _WIN32  // elsewhere the window layer's (app/main_sdl.cpp)
 void* Monitor() {
     uint32_t n = Get().monitor;
     if (n) {
@@ -412,6 +409,7 @@ Mode Desktop() {
         return {dm.dmPelsWidth, dm.dmPelsHeight};
     return {uint32_t(GetSystemMetrics(SM_CXSCREEN)), uint32_t(GetSystemMetrics(SM_CYSCREEN))};
 }
+#endif
 
 Mode Output() {
     const Settings& s = Get();

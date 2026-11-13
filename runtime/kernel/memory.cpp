@@ -130,7 +130,9 @@ void Decommit(uint32_t va, uint32_t size) {
 #ifdef _WIN32
     VirtualFree(g_base + first, size_t(end - first), MEM_DECOMMIT);
 #elif defined(XBE_HOST_TRACKS_COMMIT)
-    memset(g_base + first, 0, size_t(end - first));  // committed again, the pages read as zero
+    // committed again, the pages read as zero; only committed ones, which keeps untouched reserved pages unbacked
+    for (uint64_t p = first; p < end; p += kPage)
+        if (g_committed[size_t(p >> 12)]) memset(g_base + p, 0, kPage);
 #else
     madvise(g_base + first, size_t(end - first), MADV_DONTNEED);
     mprotect(g_base + first, size_t(end - first), PROT_NONE);
