@@ -518,8 +518,11 @@ bool MakeFrameBuffers(uint32_t pp) {
     SetDev(kDevRenderTarget, g_buffers[1]);
     SetDev(kDevDepth, g_depth);
     if (XDK_CDevice_FrameSurfaces == xdk::kUnknown) {
+        // the front slot holds the front buffer: Juiced reads both slots inline at startup and keeps each one's
+        // memory address in a texture, swapping the two after every Swap (0x12BAFA) as the library rotates the
+        // memory; with the back buffer in both, every other frame's glow and speed blur sampled the frame before
         SetDev(kDevBackBuffer, g_buffers[1]);
-        SetDev(kDevFrontBuffer, g_buffers[1]);
+        SetDev(kDevFrontBuffer, g_buffers[0]);
     }
     float one = 1.0f, zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
     std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
@@ -564,8 +567,8 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
     if (!w) w = 640;
     if (!h) h = 480;
-    LOGI("d3d: CreateDevice %ux%u format %X buffers %u depth %u format %X interval %X flags %X", w, h, fmt, count,
-         auto_depth, depth_fmt, interval, R32(pp + 0x28));
+    LOGI("d3d: CreateDevice %ux%u format %X buffers %u depth %u format %X interval %X flags %X multisample %X swap effect %u",
+         w, h, fmt, count, auto_depth, depth_fmt, interval, R32(pp + 0x28), R32(pp + 0x10), R32(pp + 0x14));
     // 3948 keeps the frame buffer objects in the device: kept across the clear, so the same parameters reuse them
     uint8_t frame_surfaces[3 * 24], auto_depth_surface[24];
     bool inline_surfaces = XDK_CDevice_FrameSurfaces != xdk::kUnknown && g_buffers[1];
@@ -644,8 +647,9 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
 HLE_STDCALL(D3DDevice_Reset, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t pp = a[0];
-    LOGI("d3d: Reset %ux%u format %X buffers %u depth %u format %X interval %X flags %X", R32(pp), R32(pp + 4),
-         R32(pp + 8), R32(pp + 12), R32(pp + 0x20), R32(pp + 0x24), R32(pp + 0x30), R32(pp + 0x28));
+    LOGI("d3d: Reset %ux%u format %X buffers %u depth %u format %X interval %X flags %X multisample %X swap effect %u",
+         R32(pp), R32(pp + 4), R32(pp + 8), R32(pp + 12), R32(pp + 0x20), R32(pp + 0x24), R32(pp + 0x30), R32(pp + 0x28),
+         R32(pp + 0x10), R32(pp + 0x14));
     uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
     bool fresh = MakeFrameBuffers(pp);
     // the device's references move to the new targets as SetRenderTarget moves them; new surfaces come with theirs
