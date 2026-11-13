@@ -1524,6 +1524,9 @@ void WalkPending() {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
 }
+namespace d3d {
+void Pending() { WalkPending(); }
+}  // namespace d3d
 // the same for the other setters; XBE_STATE_WALK=0 turns it off to compare
 void WalkBeforeState() {
     static const bool on = [] {
