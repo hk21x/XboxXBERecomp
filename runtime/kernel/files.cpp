@@ -167,7 +167,7 @@ void FillNetworkInfo(uint32_t out, const Disc::Entry& e) {
     FillNetworkInfo(out, MountedDisc()->Time(), e.dir ? 0 : e.size, e.dir);
 }
 
-bool WildMatch(const std::string& pat, const std::string& s) {
+bool WildMatchPlain(const std::string& pat, const std::string& s) {
     size_t p = 0, i = 0, star = std::string::npos, mark = 0;
     while (i < s.size()) {
         if (p < pat.size() && (pat[p] == '?' || std::toupper(uint8_t(pat[p])) == std::toupper(uint8_t(s[i])))) {
@@ -185,6 +185,15 @@ bool WildMatch(const std::string& pat, const std::string& s) {
     }
     while (p < pat.size() && pat[p] == '*') p++;
     return p == pat.size();
+}
+
+// as the console's (DOS's) rule has it, a pattern ending in ".*" also matches a name with no dot: "*.*" is every name,
+// and 50 Cent: Bulletproof finds its profile file "~P5628E0D4" in a save's folder by "~*.*" (not found, every save
+// was listed as damaged)
+bool WildMatch(const std::string& pat, const std::string& s) {
+    if (WildMatchPlain(pat, s)) return true;
+    return pat.size() >= 2 && pat.compare(pat.size() - 2, 2, ".*") == 0 && s.find('.') == std::string::npos &&
+           WildMatchPlain(pat.substr(0, pat.size() - 2), s);
 }
 
 // past 2 GB a long offset wraps on Windows
