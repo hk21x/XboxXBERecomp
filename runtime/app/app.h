@@ -276,6 +276,10 @@ struct GameInfo {
     // DSP image would have balanced drown it out): the level of PCM streams and of every other voice; none is full level
     float (*pcm_stream_level)() = nullptr;
     float (*other_voice_level)() = nullptr;
+    // the level of the title's 3D voices (its engines and effects placed in the world) against its music and menu
+    // sounds, read on the audio thread at each mix; none is full level. Juiced's 3D voices have no headroom where its
+    // 2D ones have the library's 6 dB, and a race came out 15 dB over the menus, clipping: a setting there
+    float (*voice_3d_level)() = nullptr;
     // the title's 3D sound positions have +x to the left (DirectSound's is to the right): Project Gotham Racing's head relative
     // ones do, so a car passing on the right was heard on the left
     bool sound_x_left = false;

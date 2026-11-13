@@ -415,6 +415,7 @@ void Levels(Voice& v, float g[kMixChannels][2]) {
     float side = rel ? d[0] : d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
     float pan = dist > 1e-3f ? side / dist : 0.0f;
     if (app::kGame.sound_x_left) pan = -pan;
+    if (app::kGame.voice_3d_level) att *= std::clamp(app::kGame.voice_3d_level(), 0.0f, 1.0f);
     for (uint32_t c = 0; c < kMixChannels; c++) {
         g[c][0] *= att * std::min(1.0f, 1.0f - pan);
         g[c][1] *= att * std::min(1.0f, 1.0f + pan);
