@@ -44,6 +44,7 @@ constexpr uint32_t kHeaderBytes = 20;                         // a resource head
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
 constexpr uint32_t kRegionBytes = 8u << 20, kRegionHeaders = 1u << 16;  // kept vertices of a step, in guest memory, two steps' worth
 constexpr uint32_t kRegisters = 192, kMatrixRegisters = 4;    // the first are the title's transform in every program seen
+constexpr float kConstantLeap = 0.2f;                         // a constant past the transform changed this much, and by half, is not blended
 
 struct Rec {
     enum Kind : uint8_t { Clear, Draw, Copy } kind = Draw;
@@ -174,6 +175,17 @@ private:
     static void UseAsDrawn(const Rec& r, State& d) {
         d.rt.format = r.rt_format, d.rt.size = r.rt_size, d.rt.as_drawn = d.rt.header != 0;
         d.zs.format = r.zs_format, d.zs.size = r.zs_size, d.zs.as_drawn = d.zs.header != 0;
+    }
+    // a constant past the matrix blended from the step before, unless it leapt: Juiced's constants after the transform pick an
+    // atlas cell (c129 0, 0.5, 0.75), toggle each step (c132.y 0.4 and 1) or tint one of many alike (the crowd's c138), and halfway
+    // between two of those is neither, the texture seen flickering in every in-between frame (Harry, 2026-11-14). Those are the
+    // step's own; what moves smoothly (lights, the bones) changes little in a step
+    static float Between(uint32_t k, float was, float now, float alpha) {
+        if (k >= kMatrixRegisters) {
+            const float d = std::fabs(now - was);
+            if (d >= kConstantLeap && d >= 0.5f * std::max(std::fabs(was), std::fabs(now))) return now;
+        }
+        return was + (now - was) * alpha;
     }
     static void AddHeader(Rec& r, uint32_t va) {
         // a stream still bound to a buffer the title has freed (Juiced, as a race loads): its memory is gone, and no
@@ -331,6 +343,21 @@ void Interpolating::LogJumps() {
         o[0] = m[0][3] / w, o[1] = m[1][3] / w, o[2] = w;
         return true;
     };
+    // constants past the matrix that change far in a step (a scroll wrapping, a counter): blended, they sweep the whole range
+    static std::unordered_map<uint64_t, int> wraps;
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind != Rec::Draw || r.prev < 0) continue;
+        const Rec& p = before_[size_t(r.prev)];
+        for (uint32_t k = kMatrixRegisters; k < kRegisters; k++)
+            for (uint32_t c = 0; c < 4; c++) {
+                const float x = p.vsc[k][c], y = r.vsc[k][c], d = std::fabs(x - y);
+                if (d < kConstantLeap || d < 0.5f * std::max(std::fabs(x), std::fabs(y))) continue;
+                if (++wraps[(uint64_t(r.s->vs_handle) << 16) ^ (k * 4 + c)] > 3) continue;
+                LOGR("wrap: step %d vs %08X t0 %08X n %u c%u.%c %.4f -> %.4f", steps, r.s->vs_handle, r.s->textures[0], r.c, k,
+                     "xyzw"[c], x, y);
+            }
+    }
     for (size_t i = 0; i < count_ && shown < 200; i++) {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw || std::fabs(r.vsc[3][0]) + std::fabs(r.vsc[3][1]) + std::fabs(r.vsc[3][2]) < 1e-6f) continue;
@@ -652,7 +679,7 @@ void Interpolating::Replay(float alpha) {
                         for (uint32_t k = 0; k < kMatrixRegisters; k++) d.vsc[k][3] = p.vsc[k][3] + (r.vsc[k][3] - p.vsc[k][3]) * alpha;
                     } else {
                         for (uint32_t k = 0; k < kRegisters; k++)
-                            for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                            for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = Between(k, p.vsc[k][c], r.vsc[k][c], alpha);
                     }
                 } else if (r.derived && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;
@@ -664,7 +691,7 @@ void Interpolating::Replay(float alpha) {
                     for (uint32_t k = 0; k < kRegisters; k++) {
                         const bool same = !std::memcmp(r.vsc[k].data(), q.vsc[k].data(), sizeof r.vsc[k]);
                         for (uint32_t c = 0; c < 4; c++)
-                            d.vsc[k][c] = same ? p.vsc[k][c] + (q.vsc[k][c] - p.vsc[k][c]) * alpha : r.vsc[k][c];
+                            d.vsc[k][c] = same ? Between(k, p.vsc[k][c], q.vsc[k][c], alpha) : r.vsc[k][c];
                     }
                 } else {
                     d.vsc = r.vsc;
