@@ -39,6 +39,7 @@ constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step cou
 constexpr double kOverrun = 0.001;                            // seconds past their time a step's frames may run
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
+constexpr float kStray = 0.25f, kStrayDepth = 0.15f;          // of the screen and of its depth: matched where the camera's move does not put it
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
@@ -50,7 +51,7 @@ uint32_t Transform() {
     static const uint32_t t = uint32_t(std::clamp(app::kGame.interp_transform + 96, 0, int(kRegisters - kMatrixRegisters)));
     return t;
 }
-constexpr float kConstantLeap = 0.2f;                         // a constant past the transform changed this much, and by half, is not blended
+constexpr float kConstantLeap = 0.05f;                        // a constant past the transform changed this much, and by half, is not blended
 
 struct Rec {
     enum Kind : uint8_t { Clear, Draw, Copy } kind = Draw;
@@ -79,6 +80,7 @@ struct Rec {
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
+    bool stray = false;    // its nearest copy of the step before is not where the camera's move puts it: still scenery come into view
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
@@ -218,6 +220,7 @@ private:
         r.prev = -1;
         r.turning = false;
         r.derived = false;
+        r.stray = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -435,18 +438,23 @@ bool Interpolating::Match() {
     for (size_t i = 0; i < before_count_; i++)
         for (uint32_t k = 0; k < kMatrixRegisters; k++)
             for (uint32_t e = 0; e < 4; e++) predicted[i][k * 4 + e] = before_[i].vsc[k][e];
-    uint32_t draws = 0, matched = 0, moved = 0, jumped = 0;
+    uint32_t draws = 0, matched = 0, moved = 0, jumped = 0, strays = 0;
+    bool predicting = false;  // predicted holds the camera's move taken off
+    // programs whose matched draws mostly go with the camera (still scenery, the crowd): their copies are told apart by where the
+    // camera's move puts them. Not the cars': alike, and each moving its own way
+    std::unordered_map<uint32_t, bool> still;
     const auto match_all = [&] {
         std::unordered_map<uint64_t, std::vector<int>> found;
         found.reserve(before_count_);
         for (size_t i = before_count_; i-- > 0;)
             if (before_[i].kind == Rec::Draw) found[KeyOf(before_[i])].push_back(int(i));  // popped from the back: in order
-        draws = matched = moved = jumped = 0;
+        draws = matched = moved = jumped = strays = 0;
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             if (r.kind != Rec::Draw) continue;
             r.prev = -1;
             r.turning = false;
+            r.stray = false;
             draws++;
             auto it = found.find(KeyOf(r));
             if (it == found.end() || it->second.empty()) continue;
@@ -455,15 +463,35 @@ bool Interpolating::Match() {
             // in-between frames drew it part way to the neighbour's place (Harry's clip of 3f50b78, 2026-11-14)
             auto& list = it->second;
             size_t best = list.size() - 1;
-            float best_distance = 1e30f;
+            float best_distance = 1e30f, second = 1e30f;
             for (size_t l = list.size(); l-- > 0;) {
                 const auto& c = predicted[size_t(list[l])];
                 float distance = 0;
                 for (uint32_t k = 0; k < kMatrixRegisters; k++)
                     for (uint32_t e = 0; e < 4; e++) distance += std::fabs(c[k * 4 + e] - r.vsc[k][e]);
-                if (distance < best_distance) best_distance = distance, best = l;
+                if (distance < best_distance) second = best_distance, best_distance = distance, best = l;
+                else if (distance < second) second = distance;
             }
             const int candidate = list[best];
+            // where the camera's move puts it, the right copy is where it is now, but for its own move: one come into view this step
+            // took a copy elsewhere, a screen or more away (Juiced's street, 2 to 5 screens in the log). It has no self to blend from
+            // only among copies: a draw with one self (a car crossing the screen in the flyover) is that self however it moved
+            // and only when another copy is nearly as near: a copy that moves (a car's wheel in the flyover) is still far nearer its
+            // self than any other
+            if (predicting && list.size() > 1 && second < 2 * best_distance && !flat(r.vsc) && still.count(r.s->vs_handle)) {
+                // on the screen in its own widths: x / w over the projection's scale, the row's length against the w row's
+                const auto len = [](float a, float b, float c) { return std::sqrt(a * a + b * b + c * c); };
+                const auto& c = predicted[size_t(candidate)];
+                const float w0 = c[15], w1 = r.vsc[3][3], sw = len(r.vsc[3][0], r.vsc[3][1], r.vsc[3][2]);
+                const float sx = len(r.vsc[0][0], r.vsc[0][1], r.vsc[0][2]) / sw, sy = len(r.vsc[1][0], r.vsc[1][1], r.vsc[1][2]) / sw;
+                if (sw > 0 && sx > 0 && sy > 0 && std::fabs(w0) > 1 && std::fabs(w1) > 1 &&
+                    (std::fabs(c[3] / w0 - r.vsc[0][3] / w1) > kStray * sx || std::fabs(c[7] / w0 - r.vsc[1][3] / w1) > kStray * sy ||
+                     std::fabs(w0 / w1 - 1) > kStrayDepth)) {
+                    strays++;
+                    r.stray = true;
+                    continue;
+                }
+            }
             list.erase(list.begin() + std::ptrdiff_t(best));
             const Rec& was = before_[size_t(candidate)];
             // by the matrix's turn and scale, each row against its own size: its translation crosses zero as an object is passed, a
@@ -549,6 +577,20 @@ bool Interpolating::Match() {
                         predicted[i][a * 4 + b] = float(t);
                     }
             }
+            std::unordered_map<uint32_t, std::array<int, 2>> share;
+            for (size_t i = 0; i < count_; i++) {
+                const Rec& r = now_[i];
+                if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc)) continue;
+                const Move* camera = camera_of(r.s->rt.data);
+                double d[4][4];
+                if (!camera || !move_of(r, d)) continue;
+                auto& e = share[r.s->vs_handle];
+                e[0]++;
+                if (same_move(d, camera->d)) e[1]++;
+            }
+            for (const auto& [vs, e] : share)
+                if (e[1] * 2 > e[0]) still[vs] = true;
+            predicting = true;
             match_all();
             find_moves();
         }
@@ -556,7 +598,8 @@ bool Interpolating::Match() {
     {
         // XBE_INTERP_LOG: matched draws of the 3D whose own move is not their target's camera's (a car, or a wrong match)
         static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
-        static uint32_t off = 0, all = 0, steps = 0;
+        static uint32_t off = 0, all = 0, steps = 0, stray_sum = 0;
+        stray_sum += strays;
         if (log) {
             for (size_t i = 0; i < count_; i++) {
                 const Rec& r = now_[i];
@@ -568,8 +611,8 @@ bool Interpolating::Match() {
                 if (!same_move(d, camera->d)) off++;
             }
             if (++steps % 600 == 0) {
-                LOGR("gpu: in-between frames: %u of %u matched draws not moving with the camera in 600 steps", off, all);
-                off = all = 0;
+                LOGR("gpu: in-between frames: %u of %u matched draws not moving with the camera in 600 steps, %u strays", off, all, stray_sum);
+                off = all = stray_sum = 0;
             }
         }
     }
@@ -637,7 +680,7 @@ bool Interpolating::Match() {
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
-            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.c < kLeastVertices || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || (r.c < kLeastVertices && !r.stray) || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
