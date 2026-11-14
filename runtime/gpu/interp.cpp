@@ -43,13 +43,20 @@ constexpr uint32_t kFastest = 480;                            // frames a second
 constexpr uint32_t kHeaderBytes = 20;                         // a resource header: common, data, lock, format, size
 constexpr uint32_t kCopyBytes = 64u << 10;                    // a draw's vertices kept when no more than this
 constexpr uint32_t kRegionBytes = 8u << 20, kRegionHeaders = 1u << 16;  // kept vertices of a step, in guest memory, two steps' worth
-constexpr uint32_t kRegisters = 192, kMatrixRegisters = 4;    // the first are the title's transform in every program seen
+constexpr uint32_t kRegisters = 192, kMatrixRegisters = 4;    // the title's transform (GameInfo::interp_transform), four rows
+// a record's constants are kept turned round so that the transform is first, wherever the title has it: Rec::vsc[k] is the
+// title's register Transform() + k
+uint32_t Transform() {
+    static const uint32_t t = uint32_t(std::clamp(app::kGame.interp_transform + 96, 0, int(kRegisters - kMatrixRegisters)));
+    return t;
+}
 constexpr float kConstantLeap = 0.2f;                         // a constant past the transform changed this much, and by half, is not blended
 
 struct Rec {
     enum Kind : uint8_t { Clear, Draw, Copy } kind = Draw;
     std::unique_ptr<State> s;  // Clear, Draw; its registers and streams are changed for a replay, and put back
-    std::array<std::array<float, 4>, 192> vsc;
+    using Constants = std::array<std::array<float, 4>, 192>;
+    Constants vsc;  // turned round: [k] is the title's register Transform() + k
     uint32_t a = 0, b = 0, c = 0, d = 0;
     float z = 0;
     std::vector<uint8_t> bytes;  // indices, rects
@@ -232,7 +239,7 @@ private:
             std::memcpy(to + vsc, from + vsc, transforms - vsc);
             std::memcpy(to + material, from + material, sizeof(State) - material);
         }
-        r.vsc = s.vsc;
+        for (uint32_t k = 0; k < kRegisters; k++) r.vsc[k] = s.vsc[(k + Transform()) % kRegisters];
     }
     // finds each draw's last self; false when there is nothing to blend or the camera was cut
     bool Match();
@@ -354,7 +361,8 @@ void Interpolating::LogJumps() {
                 const float x = p.vsc[k][c], y = r.vsc[k][c], d = std::fabs(x - y);
                 if (d < kConstantLeap || d < 0.5f * std::max(std::fabs(x), std::fabs(y))) continue;
                 if (++wraps[(uint64_t(r.s->vs_handle) << 16) ^ (k * 4 + c)] > 3) continue;
-                LOGR("wrap: step %d vs %08X t0 %08X n %u c%u.%c %.4f -> %.4f", steps, r.s->vs_handle, r.s->textures[0], r.c, k,
+                LOGR("wrap: step %d vs %08X t0 %08X n %u c%d.%c %.4f -> %.4f", steps, r.s->vs_handle, r.s->textures[0], r.c,
+                     int((k + Transform()) % kRegisters) - 96,
                      "xyzw"[c], x, y);
             }
     }
@@ -388,51 +396,179 @@ void Interpolating::LogJumps() {
 
 bool Interpolating::Match() {
     if (!before_count_) return false;
-    std::unordered_map<uint64_t, std::vector<int>> found;
-    found.reserve(before_count_);
-    for (size_t i = before_count_; i-- > 0;)
-        if (before_[i].kind == Rec::Draw) found[KeyOf(before_[i])].push_back(int(i));  // popped from the back: in order
+    struct Move {
+        uint32_t rt;
+        double d[4][4];
+        int votes;
+    };
+    const auto flat = [](const std::array<std::array<float, 4>, 192>& v) {  // a screen's 2D has no perspective row
+        return std::fabs(v[3][0]) + std::fabs(v[3][1]) + std::fabs(v[3][2]) < 1e-6f;
+    };
+    const auto move_of = [&](const Rec& r, double d[4][4]) {
+        double n[4][4], inv[4][4];
+        const auto& p = before_[size_t(r.prev)].vsc;
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) n[a][b] = r.vsc[size_t(a)][size_t(b)];
+        if (!Invert(n, inv)) return false;
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) {
+                d[a][b] = 0;
+                for (int c = 0; c < 4; c++) d[a][b] += double(p[size_t(a)][size_t(c)]) * inv[c][b];
+            }
+        return true;
+    };
+    // a step's moves are all small: alike is judged against how far the camera went, or a car would pass for scenery
+    const auto same_move = [](const double x[4][4], const double y[4][4]) {
+        double e = 0, size = 0;
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) {
+                e += std::fabs(x[a][b] - y[a][b]);
+                size += std::fabs(y[a][b] - (a == b ? 1 : 0));
+            }
+        return e < std::max(kSameMove * size, kStill);
+    };
+    // each draw of the step before where the camera's move would put it now (its target's camera taken back off it), or as it was
+    std::vector<std::array<float, 16>> predicted(before_count_);
+    for (size_t i = 0; i < before_count_; i++)
+        for (uint32_t k = 0; k < kMatrixRegisters; k++)
+            for (uint32_t e = 0; e < 4; e++) predicted[i][k * 4 + e] = before_[i].vsc[k][e];
     uint32_t draws = 0, matched = 0, moved = 0, jumped = 0;
-    for (size_t i = 0; i < count_; i++) {
-        Rec& r = now_[i];
-        if (r.kind != Rec::Draw) continue;
-        draws++;
-        auto it = found.find(KeyOf(r));
-        if (it == found.end() || it->second.empty()) continue;
-        // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
-        auto& list = it->second;
-        size_t best = list.size() - 1;
-        float best_distance = 1e30f;
-        for (size_t l = list.size(); l-- > 0;) {
-            const Rec& c = before_[size_t(list[l])];
-            float distance = 0;
-            for (uint32_t k = 0; k < kMatrixRegisters; k++)
-                for (uint32_t e = 0; e < 4; e++) distance += std::fabs(c.vsc[k][e] - r.vsc[k][e]);
-            if (distance < best_distance) best_distance = distance, best = l;
+    const auto match_all = [&] {
+        std::unordered_map<uint64_t, std::vector<int>> found;
+        found.reserve(before_count_);
+        for (size_t i = before_count_; i-- > 0;)
+            if (before_[i].kind == Rec::Draw) found[KeyOf(before_[i])].push_back(int(i));  // popped from the back: in order
+        draws = matched = moved = jumped = 0;
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw) continue;
+            r.prev = -1;
+            r.turning = false;
+            draws++;
+            auto it = found.find(KeyOf(r));
+            if (it == found.end() || it->second.empty()) continue;
+            // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix, moved as the camera moved, is
+            // nearest: by the matrices alone a crowd, a row of lamps or a street's repeated fronts took a neighbour's, and the
+            // in-between frames drew it part way to the neighbour's place (Harry's clip of 3f50b78, 2026-11-14)
+            auto& list = it->second;
+            size_t best = list.size() - 1;
+            float best_distance = 1e30f;
+            for (size_t l = list.size(); l-- > 0;) {
+                const auto& c = predicted[size_t(list[l])];
+                float distance = 0;
+                for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                    for (uint32_t e = 0; e < 4; e++) distance += std::fabs(c[k * 4 + e] - r.vsc[k][e]);
+                if (distance < best_distance) best_distance = distance, best = l;
+            }
+            const int candidate = list[best];
+            list.erase(list.begin() + std::ptrdiff_t(best));
+            const Rec& was = before_[size_t(candidate)];
+            // by the matrix's turn and scale, each row against its own size: its translation crosses zero as an object is passed, a
+            // small number with a large change, and the object is the same. Past that only a real leap in it counts
+            bool turned = false, leapt = false;
+            for (uint32_t k = 0; k < kMatrixRegisters; k++) {
+                float size = 0;
+                for (uint32_t c = 0; c < 3; c++) size = std::max({size, std::fabs(was.vsc[k][c]), std::fabs(r.vsc[k][c])});
+                for (uint32_t c = 0; c < 3; c++)
+                    if (std::fabs(was.vsc[k][c] - r.vsc[k][c]) > kFar * size) turned = true;
+                const float x = was.vsc[k][3], y = r.vsc[k][3];
+                // in the matrix's own units: the world's rows are near 1, a screen's HUD 0.003 a pixel, across the screen is a leap there
+                if (std::fabs(x - y) > kLeap * size && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) leapt = true;
+            }
+            matched++;
+            if (leapt) {  // a different draw, alike in all but place
+                jumped++;
+                continue;
+            }
+            r.turning = turned;  // a wheel or a piece of debris turning fast stays with what carries it: only its place is blended
+            r.prev = candidate;
+            if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
         }
-        const int candidate = list[best];
-        list.erase(list.begin() + std::ptrdiff_t(best));
-        const Rec& was = before_[size_t(candidate)];
-        // by the matrix's turn and scale, each row against its own size: its translation crosses zero as an object is passed, a small
-        // number with a large change, and the object is the same. Past that only a real leap in it counts
-        bool turned = false, leapt = false;
-        for (uint32_t k = 0; k < kMatrixRegisters; k++) {
-            float size = 0;
-            for (uint32_t c = 0; c < 3; c++) size = std::max({size, std::fabs(was.vsc[k][c]), std::fabs(r.vsc[k][c])});
-            for (uint32_t c = 0; c < 3; c++)
-                if (std::fabs(was.vsc[k][c] - r.vsc[k][c]) > kFar * size) turned = true;
-            const float x = was.vsc[k][3], y = r.vsc[k][3];
-            // in the matrix's own units: the world's rows are near 1, a screen's HUD 0.003 a pixel, across the screen is a leap there
-            if (std::fabs(x - y) > kLeap * size && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) leapt = true;
+    };
+    // the camera's move for each target, the one most matched draws agree on (step before = move * now)
+    std::vector<Move> moves;
+    std::unordered_map<uint32_t, bool> spinning;
+    const auto find_moves = [&] {
+        moves.clear();
+        spinning.clear();
+        for (size_t i = 0, tried = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || flat(r.vsc)) continue;
+            if (r.turning) spinning[r.s->vs_handle] = true;
+            if (r.turning || tried >= kSampleDraws) continue;
+            tried++;
+            Move m{r.s->rt.data, {}, 1};
+            if (!move_of(r, m.d)) continue;
+            bool same = false;
+            for (Move& o : moves)
+                if (o.rt == m.rt && same_move(o.d, m.d)) {
+                    o.votes++;
+                    same = true;
+                    break;
+                }
+            if (!same && moves.size() < kMostMoves) moves.push_back(m);
         }
-        matched++;
-        if (leapt) {  // a different draw, alike in all but place
-            jumped++;
-            continue;
+    };
+    const auto camera_of = [&](uint32_t rt) {
+        const Move* camera = nullptr;
+        for (const Move& o : moves)
+            if (o.rt == rt && (!camera || o.votes > camera->votes)) camera = &o;
+        return camera;
+    };
+    match_all();
+    find_moves();
+    // matched again, with the camera's move from the first matching taken back off the step before's matrices
+    static const bool predict = [] {
+        const char* e = std::getenv("XBE_INTERP_PREDICT");
+        return !e || std::atoi(e) != 0;
+    }();
+    if (predict) {
+        std::unordered_map<uint32_t, std::array<double, 16>> undo;
+        for (const Move& m : moves) {
+            if (undo.count(m.rt)) continue;
+            const Move* camera = camera_of(m.rt);
+            double inv[4][4];
+            if (!camera || camera->votes < kLeastVotes || !Invert(camera->d, inv)) continue;
+            auto& u = undo[m.rt];
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) u[size_t(a * 4 + b)] = inv[a][b];
         }
-        r.turning = turned;  // a wheel or a piece of debris turning fast stays with what carries it: only its place is blended
-        r.prev = candidate;
-        if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
+        if (!undo.empty()) {
+            for (size_t i = 0; i < before_count_; i++) {
+                const Rec& p = before_[i];
+                if (p.kind != Rec::Draw || flat(p.vsc)) continue;
+                const auto u = undo.find(p.s->rt.data);
+                if (u == undo.end()) continue;
+                for (uint32_t a = 0; a < 4; a++)
+                    for (uint32_t b = 0; b < 4; b++) {
+                        double t = 0;
+                        for (uint32_t c = 0; c < 4; c++) t += u->second[a * 4 + c] * p.vsc[c][b];
+                        predicted[i][a * 4 + b] = float(t);
+                    }
+            }
+            match_all();
+            find_moves();
+        }
+    }
+    {
+        // XBE_INTERP_LOG: matched draws of the 3D whose own move is not their target's camera's (a car, or a wrong match)
+        static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint32_t off = 0, all = 0, steps = 0;
+        if (log) {
+            for (size_t i = 0; i < count_; i++) {
+                const Rec& r = now_[i];
+                if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc)) continue;
+                const Move* camera = camera_of(r.s->rt.data);
+                double d[4][4];
+                if (!camera || !move_of(r, d)) continue;
+                all++;
+                if (!same_move(d, camera->d)) off++;
+            }
+            if (++steps % 600 == 0) {
+                LOGR("gpu: in-between frames: %u of %u matched draws not moving with the camera in 600 steps", off, all);
+                off = all = 0;
+            }
+        }
     }
     // the world's pieces come and go between steps. One left at the step's own place, among others blended, is that much out of
     // line with them, its texture seen sliding: it goes with any of the same matrix that has a match
@@ -478,62 +614,6 @@ bool Interpolating::Match() {
     // that way and nothing of that program be turning. A piece of a car given a wheel's move, or the road's, is thrown out of place;
     // it stays at the step's place.
     {
-        struct Move {
-            uint32_t rt;
-            double d[4][4];
-            int votes;
-        };
-        const auto flat = [](const std::array<std::array<float, 4>, 192>& v) {  // a screen's 2D has no perspective row
-            return std::fabs(v[3][0]) + std::fabs(v[3][1]) + std::fabs(v[3][2]) < 1e-6f;
-        };
-        const auto move_of = [&](const Rec& r, double d[4][4]) {
-            double n[4][4], inv[4][4];
-            const auto& p = before_[size_t(r.prev)].vsc;
-            for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) n[a][b] = r.vsc[size_t(a)][size_t(b)];
-            if (!Invert(n, inv)) return false;
-            for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) {
-                    d[a][b] = 0;
-                    for (int c = 0; c < 4; c++) d[a][b] += double(p[size_t(a)][size_t(c)]) * inv[c][b];
-                }
-            return true;
-        };
-        // a step's moves are all small: alike is judged against how far the camera went, or a car would pass for scenery
-        const auto same_move = [](const double x[4][4], const double y[4][4]) {
-            double e = 0, size = 0;
-            for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) {
-                    e += std::fabs(x[a][b] - y[a][b]);
-                    size += std::fabs(y[a][b] - (a == b ? 1 : 0));
-                }
-            return e < std::max(kSameMove * size, kStill);
-        };
-        std::vector<Move> moves;
-        std::unordered_map<uint32_t, bool> spinning;
-        for (size_t i = 0, tried = 0; i < count_; i++) {
-            const Rec& r = now_[i];
-            if (r.kind != Rec::Draw || r.prev < 0 || flat(r.vsc)) continue;
-            if (r.turning) spinning[r.s->vs_handle] = true;
-            if (r.turning || tried >= kSampleDraws) continue;
-            tried++;
-            Move m{r.s->rt.data, {}, 1};
-            if (!move_of(r, m.d)) continue;
-            bool same = false;
-            for (Move& o : moves)
-                if (o.rt == m.rt && same_move(o.d, m.d)) {
-                    o.votes++;
-                    same = true;
-                    break;
-                }
-            if (!same && moves.size() < kMostMoves) moves.push_back(m);
-        }
-        const auto camera_of = [&](uint32_t rt) {
-            const Move* camera = nullptr;
-            for (const Move& o : moves)
-                if (o.rt == rt && (!camera || o.votes > camera->votes)) camera = &o;
-            return camera;
-        };
         // a program is the scenery's when most of what it draws goes with the camera; a car's goes with the car
         std::unordered_map<uint32_t, std::array<int, 2>> program;
         for (size_t i = 0; i < count_; i++) {
@@ -672,30 +752,32 @@ void Interpolating::Replay(float alpha) {
                          alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? "derived" : r.peer >= 0 ? "peer" : "none",
                          r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header);
                 const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
+                Rec::Constants v;  // turned round as kept (Rec::vsc), put back into d.vsc below
                 if (blend) {
                     const Rec& p = before_[size_t(r.prev)];
                     if (r.turning) {
-                        d.vsc = r.vsc;
-                        for (uint32_t k = 0; k < kMatrixRegisters; k++) d.vsc[k][3] = p.vsc[k][3] + (r.vsc[k][3] - p.vsc[k][3]) * alpha;
+                        v = r.vsc;
+                        for (uint32_t k = 0; k < kMatrixRegisters; k++) v[k][3] = p.vsc[k][3] + (r.vsc[k][3] - p.vsc[k][3]) * alpha;
                     } else {
                         for (uint32_t k = 0; k < kRegisters; k++)
-                            for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = Between(k, p.vsc[k][c], r.vsc[k][c], alpha);
+                            for (uint32_t c = 0; c < 4; c++) v[k][c] = Between(k, p.vsc[k][c], r.vsc[k][c], alpha);
                     }
                 } else if (r.derived && alpha != 1 && !at_step) {
-                    d.vsc = r.vsc;
+                    v = r.vsc;
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
-                        for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
+                        for (uint32_t c = 0; c < 4; c++) v[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
                 } else if (r.peer >= 0 && alpha != 1 && !at_step) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
                     for (uint32_t k = 0; k < kRegisters; k++) {
                         const bool same = !std::memcmp(r.vsc[k].data(), q.vsc[k].data(), sizeof r.vsc[k]);
                         for (uint32_t c = 0; c < 4; c++)
-                            d.vsc[k][c] = same ? Between(k, p.vsc[k][c], q.vsc[k][c], alpha) : r.vsc[k][c];
+                            v[k][c] = same ? Between(k, p.vsc[k][c], q.vsc[k][c], alpha) : r.vsc[k][c];
                     }
                 } else {
-                    d.vsc = r.vsc;
+                    v = r.vsc;
                 }
+                for (uint32_t k = 0; k < kRegisters; k++) d.vsc[(k + Transform()) % kRegisters] = v[k];
                 // a draw without a program takes the fixed function matrices: blended too, or what it draws (a car's light and
                 // shadow cast on the road, EoN) stays at the step's place while what is round it is blended, jumping back and forth
                 constexpr uint32_t kFixed[] = {2, 3, 16, 17, 18, 19, 256, 257, 258, 259};  // view, projection, texture 0-3, world 0-3

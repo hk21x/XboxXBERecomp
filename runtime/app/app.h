@@ -250,6 +250,9 @@ struct GameInfo {
     // (a reflection pass drawn from a mirrored view each step: blended, what samples it slid against it, back and forth every
     // other step: EoN's driving floor); off, every matched draw is blended
     bool interp_sampled_targets_at_step = false;
+    // the vertex shader constant (as the title numbers it, -96 to 95) where its programs' world-view-projection rows start, four
+    // of them: in-between frames match a draw to its self of the step before by it, and blend its place. Juiced's are c18 to c21
+    int interp_transform = -96;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
