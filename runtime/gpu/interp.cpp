@@ -318,6 +318,16 @@ bool Interpolating::UploadKept() {
     return true;
 }
 
+// to the time, not past it: a sleep on Windows wakes 1 to 2 ms late even at a 1 ms timer period, and the next frame of a step,
+// timed to be done 1 ms before the title goes on, missed it and was dropped about one step in two (Harry's 120 cap: 880
+// frames for 600 steps, 2 planned; the picture moved unevenly, the arrow boards and the crowd seen to flicker). The last of it
+// waited out
+constexpr auto kSpinTail = std::chrono::microseconds(1500);
+void SleepUntil(Clock::time_point when) {
+    if (Clock::now() < when - kSpinTail) std::this_thread::sleep_until(when - kSpinTail);
+    while (Clock::now() < when) std::this_thread::yield();
+}
+
 // 4 by 4, rows; false when it has no inverse
 bool Invert(const double m[4][4], double out[4][4]) {
     double a[4][8];
@@ -954,7 +964,7 @@ void Interpolating::Present(const Surface& front) {
                 // run of a96ead6: 640 to 780 frames for 600 steps)
                 const double fits = span + replay_seconds_ - frame_seconds_ - kOverrun;
                 const double until = std::max(at, std::min({at + spacing, std::max(span, at), fits}));
-                std::this_thread::sleep_until(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
+                SleepUntil(t + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(until)));
             }
             overran_ = std::chrono::duration<double>(Clock::now() - t).count() > span + replay_seconds_ + kOverrun;
         }
