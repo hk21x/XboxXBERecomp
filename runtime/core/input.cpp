@@ -184,6 +184,16 @@ void MouseMoved(int dx, int dy) {
 }
 
 bool UsingKeyboard() { return g_keyboard; }
+std::atomic<int> g_style{kStyleXbox};  // LastPadStyle
+PadStyle LastPadStyle() { return PadStyle(g_style.load()); }
+PadStyle StyleOf(SDL_Gamepad* pad) {
+    switch (SDL_GetGamepadType(pad)) {
+        case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: return kStylePlayStation;
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return kStyleNintendo;
+        default: return kStyleXbox;
+    }
+}
 
 std::atomic<int> g_wheel{0};  // WHEEL_DELTA units
 
@@ -257,6 +267,9 @@ Pad Poll(int port) {
         if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
             p.connected = true;
             ReadPad(pad, in);
+            bool used = false;
+            for (int c = 0; c < kControls; c++) used |= in[c] >= 0.5f;
+            if (port == 0 && used) g_style = StyleOf(pad);
         }
     }
     // remapped: each console input reads the physical input the settings name for it

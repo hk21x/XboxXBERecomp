@@ -127,6 +127,16 @@ bool TakeMouse(float& x, float& y) {
 }
 
 bool UsingKeyboard() { return g_keyboard; }
+// PAD_STYLE=playstation or nintendo: controller 1 is taken to be that kind of pad (its button labels)
+PadStyle LastPadStyle() {
+    static const PadStyle style = [] {
+        const char* e = std::getenv("PAD_STYLE");
+        if (e && *e == 'p') return kStylePlayStation;
+        if (e && *e == 'n') return kStyleNintendo;
+        return kStyleXbox;
+    }();
+    return style;
+}
 uint32_t MouseButtons() { return g_buttons; }
 // a held WHEELU or WHEELD gives one notch a poll
 void WheelSetup() {}

@@ -42,6 +42,9 @@ bool TakeMouse(float& x, float& y);
 // mouse moved while it looks; the keyboard alone when no controller is plugged in), false for a controller or wheel
 // (a button pressed, a stick pushed half way); a title's button pictures may follow it
 bool UsingKeyboard();
+// the kind of controller 1 was last played with (its button labels): a title's button pictures may follow it
+enum PadStyle : int { kStyleXbox, kStylePlayStation, kStyleNintendo };
+PadStyle LastPadStyle();
 // the keys controller 1's control c is bound to: the settings', else the defaults (0 none; mouse buttons VK_LBUTTON ..)
 std::array<uint16_t, 2> ControlKeys(int c);
 // the mouse for a title's own menus, while it looks (MouseLooking): the wheel's notches since the last call (up
