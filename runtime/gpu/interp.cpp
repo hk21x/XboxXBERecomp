@@ -191,6 +191,12 @@ private:
     // flickering in every in-between frame (Harry, 2026-11-14). Those are the step's own; what moves smoothly (lights, the
     // bones) changes little in a step and is not a whole sixteenth twice
     static float Between(uint32_t k, float was, float now, float alpha) {
+        // XBE_INTERP_CONSTANTS=0 (a test): every constant past the transform at the step's value
+        static const bool constants = [] {
+            const char* e = std::getenv("XBE_INTERP_CONSTANTS");
+            return !e || std::atoi(e) != 0;
+        }();
+        if (k >= kMatrixRegisters && !constants) return now;
         if (k >= kMatrixRegisters && was != now) {
             const float d = std::fabs(now - was);
             if (d >= kConstantLeap && d >= 0.5f * std::max(std::fabs(was), std::fabs(now))) return now;
@@ -716,6 +722,28 @@ bool Interpolating::Match() {
             r.derived = true;
         }
     }
+    // XBE_INTERP_CAMERA_ONLY=1 (a test): every draw of the 3D takes its target's camera move, none its own match; cars and
+    // what turns go wrong, but whatever flickers with matching and blending of the draws' own matrices does not
+    static const bool camera_only = [] {
+        const char* e = std::getenv("XBE_INTERP_CAMERA_ONLY");
+        const bool on = e && std::atoi(e) != 0;
+        if (on) LOGR("gpu: in-between frames: every draw takes its target's camera move (XBE_INTERP_CAMERA_ONLY)");
+        return on;
+    }();
+    if (camera_only)
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            if (!camera || camera->votes < kLeastVotes) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+        }
     LogJumps();
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
