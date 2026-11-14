@@ -197,6 +197,9 @@ private:
             return !e || std::atoi(e) != 0;
         }();
         if (k >= kMatrixRegisters && !constants) return now;
+        if (k >= kMatrixRegisters && app::kGame.interp_blends_constant &&
+            !app::kGame.interp_blends_constant(int((k + Transform()) % kRegisters) - 96))
+            return now;
         if (k >= kMatrixRegisters && was != now) {
             const float d = std::fabs(now - was);
             if (d >= kConstantLeap && d >= 0.5f * std::max(std::fabs(was), std::fabs(now))) return now;
