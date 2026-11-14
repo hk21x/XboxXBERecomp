@@ -183,14 +183,17 @@ private:
         d.rt.format = r.rt_format, d.rt.size = r.rt_size, d.rt.as_drawn = d.rt.header != 0;
         d.zs.format = r.zs_format, d.zs.size = r.zs_size, d.zs.as_drawn = d.zs.header != 0;
     }
-    // a constant past the matrix blended from the step before, unless it leapt: Juiced's constants after the transform pick an
-    // atlas cell (c129 0, 0.5, 0.75), toggle each step (c132.y 0.4 and 1) or tint one of many alike (the crowd's c138), and halfway
-    // between two of those is neither, the texture seen flickering in every in-between frame (Harry, 2026-11-14). Those are the
-    // step's own; what moves smoothly (lights, the bones) changes little in a step
+    // a constant past the matrix blended from the step before, unless it leapt or is a step of a cycle: Juiced's constants after
+    // the transform pick an atlas cell (c33: 0, 0.25, 0.5, 0.75; the corner boards' arrows run through them), toggle each step
+    // (c36.y 0.4 and 1) or tint one of many alike (the crowd's c42), and halfway between two of those is neither, the texture seen
+    // flickering in every in-between frame (Harry, 2026-11-14). Those are the step's own; what moves smoothly (lights, the
+    // bones) changes little in a step and is not a whole sixteenth twice
     static float Between(uint32_t k, float was, float now, float alpha) {
-        if (k >= kMatrixRegisters) {
+        if (k >= kMatrixRegisters && was != now) {
             const float d = std::fabs(now - was);
             if (d >= kConstantLeap && d >= 0.5f * std::max(std::fabs(was), std::fabs(now))) return now;
+            const auto cell = [](float v) { return std::fabs(v) <= 16 && v * 16 == std::floor(v * 16); };
+            if (cell(was) && cell(now)) return now;
         }
         return was + (now - was) * alpha;
     }
