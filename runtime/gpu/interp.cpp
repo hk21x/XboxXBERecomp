@@ -176,7 +176,9 @@ private:
         d.zs.format = r.zs_format, d.zs.size = r.zs_size, d.zs.as_drawn = d.zs.header != 0;
     }
     static void AddHeader(Rec& r, uint32_t va) {
-        if (!va) return;
+        // a stream still bound to a buffer the title has freed (Juiced, as a race loads): its memory is gone, and no
+        // draw reads it (gpu::State keeps the binding as the device does)
+        if (!va || !mem::IsCommitted(va) || !mem::IsCommitted(va + kHeaderBytes - 1)) return;
         for (const Rec::Header& h : r.headers)
             if (h.va == va) return;
         Rec::Header h{va, {}};
@@ -260,7 +262,7 @@ void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_
     }
     for (uint32_t k = 0; k < s.streams.size(); k++) {
         const auto& st = s.streams[k];
-        if (!st.vb || !st.stride) continue;
+        if (!st.vb || !st.stride || !mem::IsCommitted(st.vb + 7)) continue;
         const uint64_t bytes = uint64_t(vertices) * st.stride;
         if (bytes > kCopyBytes) continue;
         const uint32_t data = kernel::R32(st.vb + 4);
