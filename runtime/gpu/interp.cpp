@@ -778,7 +778,9 @@ bool Interpolating::Match() {
             // not one following a matched draw of its own matrix (a peer): a second pass over the same surface (the corner boards'
             // arrows over the board) given the camera's move instead lay a little off the board's own blend and fought with it
             const bool scenery = all_scenery && r.peer < 0 && still.count(r.s->vs_handle);
-            if (!scenery && r.c < kLeastVertices && !r.stray) continue;
+            // and a few vertices are a sprite whatever its program: the corner boards' arrows, small quads, given the camera's move
+            // broke again (Harry, 271295c and 40fc432)
+            if (r.c < kLeastVertices && !r.stray) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
