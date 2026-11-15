@@ -702,6 +702,17 @@ void Controls(Settings& s) {
             Save();
         }
     }
+    Section("Controller sticks");
+    for (int i = 0; i < 2; i++) {
+        int dz = int(s.stick_deadzone[i]), sens = int(s.stick_sensitivity[i]);
+        if (RowSlider(i ? "Right stick dead zone" : "Left stick dead zone", &dz, 0, 50, 1, "%",
+                      "How far the stick moves before it counts, on top of the game's own dead zone. Raise it if a "
+                      "worn stick drifts when let go."))
+            s.stick_deadzone[i] = uint32_t(dz), Save();
+        if (RowSlider(i ? "Right stick sensitivity" : "Left stick sensitivity", &sens, 25, 300, 5, "%",
+                      "Below 100% the stick turns or moves slower at full throw; above, it reaches full speed sooner."))
+            s.stick_sensitivity[i] = uint32_t(sens), Save();
+    }
     Section("Inputs");
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(ImGui::GetStyle().FramePadding.x, ImGui::GetStyle().CellPadding.y));
     bool table = ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX);

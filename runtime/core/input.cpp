@@ -113,8 +113,23 @@ constexpr const char* kLabels[kControls] = {
     "Left stick left", "Left stick right", "Left stick up", "Left stick down",
     "Right stick left", "Right stick right", "Right stick up", "Right stick down"};
 
+// a stick by the settings (Settings::stick_deadzone, stick_sensitivity): a round dead zone, the throw past it stretched
+// to the full, then the sensitivity, each axis kept to -1..1. The defaults leave it as it reads
+void TuneStick(float& x, float& y, uint32_t deadzone, uint32_t sensitivity) {
+    if (deadzone == 0 && sensitivity == 100) return;
+    float m = std::hypot(x, y), dz = deadzone / 100.0f;
+    if (m <= dz) {
+        x = y = 0;
+        return;
+    }
+    float r = std::min(m, 1.0f);  // a square gate's corners read past 1 and keep their full throw
+    float k = (r - dz) / (1 - dz) / r * (sensitivity / 100.0f);
+    x = std::clamp(x * k, -1.0f, 1.0f);
+    y = std::clamp(y * k, -1.0f, 1.0f);
+}
+
 // a pad's inputs as 0 to 1 each, in Control order
-void ReadPad(SDL_Gamepad* pad, float* v) {
+void ReadPad(SDL_Gamepad* pad, float* v, const app::Settings& s) {
     constexpr SDL_GamepadButton kButtons[] = {
         SDL_GAMEPAD_BUTTON_DPAD_UP,    SDL_GAMEPAD_BUTTON_DPAD_DOWN, SDL_GAMEPAD_BUTTON_DPAD_LEFT,
         SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_START,     SDL_GAMEPAD_BUTTON_BACK,
@@ -129,6 +144,8 @@ void ReadPad(SDL_Gamepad* pad, float* v) {
     // SDL's sticks have y down
     float lx = axis(SDL_GAMEPAD_AXIS_LEFTX), ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
     float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX), ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+    TuneStick(lx, ly, s.stick_deadzone[0], s.stick_sensitivity[0]);
+    TuneStick(rx, ry, s.stick_deadzone[1], s.stick_sensitivity[1]);
     v[kLSLeft] = std::max(-lx, 0.0f), v[kLSRight] = std::max(lx, 0.0f);
     v[kLSUp] = std::max(-ly, 0.0f), v[kLSDown] = std::max(ly, 0.0f);
     v[kRSLeft] = std::max(-rx, 0.0f), v[kRSRight] = std::max(rx, 0.0f);
@@ -256,7 +273,7 @@ Pad Poll(int port) {
         UpdatePads();
         if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
             p.connected = true;
-            ReadPad(pad, in);
+            ReadPad(pad, in, s);
         }
     }
     // remapped: each console input reads the physical input the settings name for it

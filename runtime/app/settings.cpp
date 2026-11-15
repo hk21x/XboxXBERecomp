@@ -209,6 +209,11 @@ void Load() {
     s.mouse_look = t["mouse_look"].value_or(s.mouse_look);
     s.mouse_sensitivity = std::clamp<uint32_t>(t["mouse_sensitivity"].value_or(s.mouse_sensitivity), 10, 1000);
     s.mouse_invert_y = t["mouse_invert_y"].value_or(s.mouse_invert_y);
+    for (int i = 0; i < 2; i++) {
+        const std::string side = i ? "right_stick_" : "left_stick_";
+        s.stick_deadzone[i] = std::min<uint32_t>(t[side + "deadzone"].value_or(s.stick_deadzone[i]), 50);
+        s.stick_sensitivity[i] = std::clamp<uint32_t>(t[side + "sensitivity"].value_or(s.stick_sensitivity[i]), 25, 300);
+    }
     s.monitor = t["monitor"].value_or(s.monitor);
     s.pause_unfocused = t["pause_unfocused"].value_or(s.pause_unfocused);
     s.show_fps = t["show_fps"].value_or(s.show_fps);
@@ -352,6 +357,10 @@ toml::table Table() {
         t.insert("mouse_invert_y", s.mouse_invert_y);
     }
     if (!pad.empty()) t.insert("gamepad", pad);
+    t.insert("left_stick_deadzone", int64_t(s.stick_deadzone[0]));
+    t.insert("right_stick_deadzone", int64_t(s.stick_deadzone[1]));
+    t.insert("left_stick_sensitivity", int64_t(s.stick_sensitivity[0]));
+    t.insert("right_stick_sensitivity", int64_t(s.stick_sensitivity[1]));
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));

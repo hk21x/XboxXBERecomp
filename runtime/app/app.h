@@ -41,6 +41,12 @@ struct Settings {
     bool mouse_look = true;
     uint32_t mouse_sensitivity = 100;  // percent
     bool mouse_invert_y = false;
+    // a controller's sticks, left [0] and right [1], before the game reads them: a dead zone (percent of the throw from
+    // the centre that reads as centred, the rest stretched to the full throw; the game's own dead zone still follows)
+    // and a sensitivity (percent: 50 gives half the deflection, so half the turning speed at full throw; above 100 full
+    // deflection comes sooner). 0 and 100 leave the stick as it reads
+    uint32_t stick_deadzone[2] = {0, 0};
+    uint32_t stick_sensitivity[2] = {100, 100};
     uint32_t monitor = 0;            // 0 the primary display, n the nth display Windows lists
     bool pause_unfocused = false;    // the game stands still, silent, while its window is not in front
     bool show_fps = false;           // frames a second in a corner
