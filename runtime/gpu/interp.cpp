@@ -721,8 +721,6 @@ bool Interpolating::Match() {
             if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc) || still.count(r.s->vs_handle)) continue;
             CarMove m{r.s->rt.data, {}};
             if (!move_of(r, m.d)) continue;
-            const Move* camera = camera_of(m.rt);
-            if (camera && same_move(m.d, camera->d)) continue;
             bool known = false;
             for (const CarMove& k : car_moves) known |= k.rt == m.rt && same_move(m.d, k.d);
             if (!known) car_moves.push_back(m);
@@ -738,13 +736,26 @@ bool Interpolating::Match() {
             if (!camera || camera->votes < kLeastVotes) continue;
             const double (*d)[4] = camera->d;
             double own[4][4];
-            if (!car_moves.empty() && r.prev >= 0 && !r.turning && move_of(r, own) && !same_move(own, camera->d))
+            // the nearest of the camera's move and the cars': the player's car moves almost as the chase camera does, and
+            // its lights given the camera's move sat a little off them (Harry's bursts of 173e4b7, reversing: one rider a
+            // step where headless had 24, while a car's move "the same as the camera's" was left out)
+            if (!car_moves.empty() && r.prev >= 0 && !r.turning && move_of(r, own)) {
+                const auto err = [](const double x[4][4], const double y[4][4]) {
+                    double e = 0;
+                    for (int a = 0; a < 4; a++)
+                        for (int b = 0; b < 4; b++) e += std::fabs(x[a][b] - y[a][b]);
+                    return e;
+                };
+                // and clearly nearer: twice as near a car's as the camera's, so scenery whose own match is a little off
+                // the camera's (the buildings, which shook with any of their own) keeps the camera's
+                double best = err(own, camera->d) * 0.5;
                 for (const CarMove& m : car_moves)
-                    if (m.rt == r.s->rt.data && same_move(own, m.d)) {
+                    if (m.rt == r.s->rt.data && same_move(own, m.d) && err(own, m.d) < best) {
+                        best = err(own, m.d);
                         d = m.d;
-                        riders++;
-                        break;
                     }
+                if (d != camera->d) riders++;
+            }
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     double t = 0;
