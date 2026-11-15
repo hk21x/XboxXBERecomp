@@ -38,6 +38,7 @@ constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
 constexpr int kLateWeight = 10, kLateLimit = 60;              // a late step counts this, a step takes one off: about 1 late in 10, held
 constexpr double kOverrun = 0.001;                            // seconds past their time a step's frames may run
 constexpr double kTooLong = 0.6;                              // of a step, a replay's time
+constexpr double kOffCamera = 0.0025;  // a still scenery draw's in-between place this far off the camera's (screen widths)
 constexpr float kFar = 0.25f, kLeap = 4.0f;                   // how far a matrix moves in a step and is still the same draw
 constexpr float kStray = 0.25f, kStrayDepth = 0.15f;          // of the screen and of its depth: matched where the camera's move does not put it
 constexpr uint32_t kFastest = 480;                            // frames a second for an unlimited cap
@@ -614,6 +615,73 @@ bool Interpolating::Match() {
             find_moves();
         }
     }
+    // XBE_INTERP_CAMERA_ONLY=1 (a test): every draw of the 3D takes its target's camera move, none its own match; cars and
+    // what turns go wrong, but whatever flickers with matching and blending of the draws' own matrices does not
+    static const bool camera_only = [] {
+        const char* e = std::getenv("XBE_INTERP_CAMERA_ONLY");
+        const bool on = e && std::atoi(e) != 0;
+        if (on) LOGR("gpu: in-between frames: every draw takes its target's camera move (XBE_INTERP_CAMERA_ONLY)");
+        return on;
+    }();
+    if (camera_only)
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            if (!camera || camera->votes < kLeastVotes) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+        }
+    // a still scenery program's draw whose own move puts its in-between place away from where the camera's move does is matched
+    // to the wrong self (one of a street's repeated fronts): blended from it, a building slid away from the road and back
+    // every step on a corner (Harry's clip of a1979db, 2026-11-15; headless, one in ten of those off the camera's move by 1%
+    // of the screen or more). It takes the camera's move, as scenery come into view does. Before peers are found: a peer
+    // follows its matched draw's match. XBE_INTERP_OFF_CAMERA=0 leaves them blended from their own match
+    static const bool off_camera = [] {
+        const char* e = std::getenv("XBE_INTERP_OFF_CAMERA");
+        return !e || std::atoi(e) != 0;
+    }();
+    uint32_t refit = 0;
+    if (off_camera && predicting)
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc) || !still.count(r.s->vs_handle)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            double d[4][4];
+            if (!camera || camera->votes < kLeastVotes || !move_of(r, d) || same_move(d, camera->d)) continue;
+            // its place halfway, on the screen in its own widths (x / w over the projection's scale), both ways
+            double was[4][4];
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    was[a][b] = 0;
+                    for (int c = 0; c < 4; c++) was[a][b] += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                }
+            const auto& p = before_[size_t(r.prev)].vsc;
+            const double ox = (p[0][3] + r.vsc[0][3]) / 2, ow = (p[3][3] + r.vsc[3][3]) / 2;
+            const double cx = (was[0][3] + r.vsc[0][3]) / 2, cw = (was[3][3] + r.vsc[3][3]) / 2;
+            const auto len = [](double a, double b, double c) { return std::sqrt(a * a + b * b + c * c); };
+            const double sw = len(r.vsc[3][0], r.vsc[3][1], r.vsc[3][2]);
+            const double sx = sw > 0 ? len(r.vsc[0][0], r.vsc[0][1], r.vsc[0][2]) / sw : 0;
+            if (!(std::fabs(ow) > 1 && std::fabs(cw) > 1 && sx > 0) || std::fabs(ox / ow - cx / cw) / sx <= kOffCamera) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) r.was[a][b] = float(was[a][b]);
+            r.prev = -1, r.derived = true;
+            refit++;
+        }
+    {
+        static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint32_t sum = 0, steps = 0;
+        sum += refit;
+        if (log && ++steps % 600 == 0) {
+            LOGR("gpu: in-between frames: %u scenery draws off the camera's move given it in 600 steps", sum);
+            sum = 0;
+        }
+    }
     {
         // XBE_INTERP_LOG: matched draws of the 3D whose own move is not their target's camera's (a car, or a wrong match)
         static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
@@ -695,11 +763,11 @@ bool Interpolating::Match() {
         // once, and its program has as many new as matched: not scenery
         std::unordered_map<uint32_t, int> fresh;
         for (size_t i = 0; i < count_; i++)
-            if (now_[i].kind == Rec::Draw && now_[i].prev < 0) fresh[now_[i].s->vs_handle]++;
+            if (now_[i].kind == Rec::Draw && now_[i].prev < 0 && !now_[i].derived) fresh[now_[i].s->vs_handle]++;
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
-            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || (r.c < kLeastVertices && !r.stray) || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.derived || (r.c < kLeastVertices && !r.stray) || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
@@ -725,28 +793,6 @@ bool Interpolating::Match() {
             r.derived = true;
         }
     }
-    // XBE_INTERP_CAMERA_ONLY=1 (a test): every draw of the 3D takes its target's camera move, none its own match; cars and
-    // what turns go wrong, but whatever flickers with matching and blending of the draws' own matrices does not
-    static const bool camera_only = [] {
-        const char* e = std::getenv("XBE_INTERP_CAMERA_ONLY");
-        const bool on = e && std::atoi(e) != 0;
-        if (on) LOGR("gpu: in-between frames: every draw takes its target's camera move (XBE_INTERP_CAMERA_ONLY)");
-        return on;
-    }();
-    if (camera_only)
-        for (size_t i = 0; i < count_; i++) {
-            Rec& r = now_[i];
-            if (r.kind != Rec::Draw || flat(r.vsc)) continue;
-            const Move* camera = camera_of(r.s->rt.data);
-            if (!camera || camera->votes < kLeastVotes) continue;
-            for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) {
-                    double t = 0;
-                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
-                    r.was[a][b] = float(t);
-                }
-            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
-        }
     LogJumps();
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
