@@ -617,10 +617,13 @@ bool Interpolating::Match() {
     }
     // XBE_INTERP_CAMERA_ONLY=1 (a test): every draw of the 3D takes its target's camera move, none its own match; cars and
     // what turns go wrong, but whatever flickers with matching and blending of the draws' own matrices does not
-    // 2: only the draws of still programs (most of whose matched draws go with the camera); 3: only the others
+    // 2 (GameInfo::interp_scenery_takes_camera): only the draws of still programs (most of whose matched draws go with the camera): the scenery, which
+    // does not move but with the camera, and each of whose draws blended from its own match, or left at the step's place,
+    // or a sprite, or a second pass, could be a little off it, the buildings shaking (Harry, 2026-11-15: steady only like
+    // this). Its constants are the step's own (the corner boards' arrow frames). 3: only the others'; 0: none
     static const int camera_only = [] {
         const char* e = std::getenv("XBE_INTERP_CAMERA_ONLY");
-        const int on = e ? std::atoi(e) : 0;
+        const int on = e && *e ? std::atoi(e) : app::kGame.interp_scenery_takes_camera ? 2 : 0;
         if (on) LOGR("gpu: in-between frames: draws take their target's camera move (XBE_INTERP_CAMERA_ONLY=%d)", on);
         return on;
     }();

@@ -259,6 +259,9 @@ struct GameInfo {
     // given, every constant is blended unless it leapt (gpu/interp.cpp Between). Given the step before's value and this
     // step's: one register can creep on one program and jump between frames on another (Juiced's c33)
     bool (*interp_blends_constant)(int reg, float was, float now) = nullptr;
+    // every draw of a program whose matched draws mostly go with the camera (the scenery) takes the camera's move in those
+    // frames, whatever its own match: Juiced's buildings shook a little with any of them blended from its own (gpu/interp.cpp)
+    bool interp_scenery_takes_camera = false;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
