@@ -2642,7 +2642,11 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         stage_memo_.clear();
         stage_memo_key_ = memo_now;
     }
-    uint32_t pal = s.palettes[size_t(stage)];
+    // the stage's palette counts only for a P8 texture (ReadStagePalette): a title may leave one set on a stage
+    // whatever it draws next, which kept every one of its binds from the memo (Juiced's race: 0 memo hits, 2700 full
+    // binds a frame)
+    constexpr uint32_t kFmtP8 = 0x0B;  // D3DFMT_P8, the Format word's bits 8 to 15
+    uint32_t pal = ((kernel::R32(header + 12) >> 8) & 0xFF) == kFmtP8 ? s.palettes[size_t(stage)] : 0;
     // what the header says, not where it is: a title pointing one header at each material in turn gets a new copy in the
     // render thread's header ring for each, and the Common word's low bits are its reference count. 2D draws apart:
     // BindGuestTexture asks for their sharpened pictures
