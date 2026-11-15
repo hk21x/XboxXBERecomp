@@ -143,6 +143,8 @@ struct PerfScope {
 // XBE_PERF: the GPU's time on the lists sent, from the backend's timestamps (D3D12Backend::StampFor), for LogPerf
 std::atomic<bool> g_stamp_on{false};
 std::atomic<double> g_stamp_ms{0}, g_stamp_lists{0}, g_stamp_missed{0};
+// XBE_PERF: visibility test reports written, and the presents between the title's asking and the writing, summed
+std::atomic<double> g_reports{0}, g_report_presents{0};
 
 bool CaptureOn() {
     if (diag::CaptureDir().empty()) LOGR("capture: set XBE_CAPTURE_DIR");
@@ -354,7 +356,7 @@ public:
     void SetGamma(const uint8_t* ramp) override;
     void ClearReport() override { counted_.clear(); }
     // done once the list being recorded, the next fence value, has run
-    void GetReport(uint32_t report) override { reports_.push_back({report, counted_, fence_value_ + 1}); }
+    void GetReport(uint32_t report) override { reports_.push_back({report, counted_, fence_value_ + 1, presents_}); }
 
     ID3D12Device* Device() override { return dev_.Get(); }
     ID3D12GraphicsCommandList* List() override { return CLAt(__func__); }
@@ -957,6 +959,7 @@ private:
         uint32_t va;
         std::vector<Query> queries;
         uint64_t fence;
+        uint64_t asked = 0;  // presents_ when the title asked for it (XBE_PERF: how late reports come)
     };
     ComPtr<ID3D12QueryHeap> query_heap_;
     ComPtr<ID3D12Resource> query_rb_;
@@ -3358,6 +3361,8 @@ void D3D12Backend::DeliverReports() {
         kernel::W32(r.va + kCount, uint32_t(std::lround(pixels)));
         std::atomic_thread_fence(std::memory_order_release);
         kernel::W32(r.va + kStatus, 0);
+        g_reports += 1;
+        g_report_presents += double(presents_ - r.asked);
         reports_.pop_front();
     }
 }
@@ -4500,6 +4505,9 @@ void LogPerf() {
              p.t_shaders / n, p.pso / n, p.consts / n, p.tables / n, p.setup / n, p.geometry / n,
              p.compile / n, p.clear / n, p.copy / n, p.sync / n, p.present / n, p.swap / n, p.wait / n,
              (el - host) / n);
+        if (const double nr = g_reports.exchange(0); nr > 0)
+            LOGR("perf: visibility tests: %.1f reports a frame, written %.2f presents after they were asked for", nr / n,
+                 g_report_presents.exchange(0) / nr);
         if (g_stamp_on)
             LOGR("perf: GPU per frame: %.2f ms on its lists (%.2f lists timed, %.2f not), the rest of the frame idle or "
                  "presenting", g_stamp_ms.exchange(0) / n, g_stamp_lists.exchange(0) / n, g_stamp_missed.exchange(0) / n);

@@ -157,7 +157,10 @@ public:
     void Kick() override { inner_->Kick(); }
     void SetGamma(const uint8_t* ramp) override { inner_->SetGamma(ramp); }
     void ClearReport() override { inner_->ClearReport(); }
-    void GetReport(uint32_t report) override { inner_->GetReport(report); }
+    void GetReport(uint32_t report) override {
+        inner_->GetReport(report);
+        reports_asked_ = true;
+    }
     uint32_t Fence() override { return inner_->Fence(); }
     bool FencePending(uint32_t f) override { return inner_->FencePending(f); }
     void WaitFence(uint32_t f) override { inner_->WaitFence(f); }
@@ -311,6 +314,7 @@ private:
     bool Match();
     void Replay(float alpha);
     uint32_t steps_seen_ = 1;  // counts every step, for Rec::lerp_step
+    bool reports_asked_ = false;  // the title asked for a visibility test's result this step
     void FindStillTargets();
     std::vector<uint8_t> skip_;  // records left out of the replays (FindStillTargets), for skip_step_
     uint32_t skip_step_ = 0, front_data_ = 0;
@@ -1213,6 +1217,17 @@ void Interpolating::Present(const Surface& front) {
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
+    // XBE_INTERP_REPORTS=1 (a test): a step that asked for visibility tests' results has them written before its replays,
+    // the GPU waited for. Replays queue several frames' work ahead of them, and a result the title found not yet written
+    // could fade a light's glow for a step (the neon, the lights: flickering only with smooth motion, Harry 2026-11-15)
+    static const bool reports_now = [] {
+        const char* e = std::getenv("XBE_INTERP_REPORTS");
+        const bool on = e && *e == '1';
+        if (on) LOGR("gpu: in-between frames: visibility tests' results written before a step's replays (XBE_INTERP_REPORTS=1)");
+        return on;
+    }();
+    if (reports_now && reports_asked_ && On()) inner_->Flush();
+    reports_asked_ = false;
     const auto prepare_began = Clock::now();
     const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
     sum_prepare_ += std::chrono::duration<double>(Clock::now() - prepare_began).count();
