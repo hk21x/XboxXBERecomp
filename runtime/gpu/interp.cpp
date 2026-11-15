@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "app/app.h"
+#include "core/diag.h"
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "gpu/texture.h"
@@ -269,6 +270,12 @@ private:
     bool Match();
     void Replay(float alpha);
     uint32_t steps_seen_ = 1;  // counts every step, for Rec::lerp_step
+    void FindStillTargets();
+    std::vector<uint8_t> skip_;  // records left out of the replays (FindStillTargets), for skip_step_
+    uint32_t skip_step_ = 0, front_data_ = 0;
+    std::unordered_set<uint32_t> camera_targets_;  // the targets with a camera move this step (Match)
+    uint64_t sum_skipped_ = 0;
+    double sum_draw_calls_ = 0;  // XBE_PERF: replays' time in the renderer's Draw
 
     std::unique_ptr<Backend> inner_;
     std::vector<Rec> now_, before_;
@@ -842,6 +849,9 @@ bool Interpolating::Match() {
             r.derived = true;
         }
     }
+    camera_targets_.clear();
+    for (const Move& m : moves)
+        if (m.votes >= kLeastVotes) camera_targets_.insert(m.rt & 0x0FFFFFFF);
     LogJumps();
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
@@ -906,8 +916,10 @@ void Interpolating::Replay(float alpha) {
                 std::memcpy(l.bytes, kernel::HostPtr(h.va), HeaderSize(h.va));
                 left.push_back(l);
             }
+    FindStillTargets();
     for (size_t i = 0; i < count_; i++) {
         Rec& r = now_[i];
+        if (skip_[i]) continue;
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
             case Rec::Clear:
@@ -990,7 +1002,13 @@ void Interpolating::Replay(float alpha) {
                     }
                 }
                 UseAsDrawn(r, d);
-                inner_->Draw(d, r.a, r.b, r.c, indices);
+                if (diag::Perf()) {  // XBE_PERF: a replay's time handing its draws to the renderer, against the rest
+                    const auto drawn = Clock::now();
+                    inner_->Draw(d, r.a, r.b, r.c, indices);
+                    sum_draw_calls_ += std::chrono::duration<double>(Clock::now() - drawn).count();
+                } else {
+                    inner_->Draw(d, r.a, r.b, r.c, indices);
+                }
                 if (fixed)
                     for (size_t i = 0; i < std::size(kFixed); i++) d.transforms[kFixed[i]] = fixed_was[i];
                 d.streams = streams;
@@ -1004,7 +1022,109 @@ void Interpolating::Replay(float alpha) {
     sum_replay_ += replay_seconds_, replays_++;
 }
 
+// GameInfo::interp_skip_still_targets: a target whose draws a replay would repeat exactly holds the step's picture already, from
+// the title's own drawing; its draws and clears are left out of the replays. Exactly: none of its draws blended, given the
+// camera's move or following a peer; none sampling a target drawn this step (a pass over the scene changes with it);
+// nothing copied into it; nothing reading it between its first and last drawing (memory used twice in a step); its depth
+// buffer not another target's; not the picture shown. Juiced's six cube faces and small passes, about a quarter of a step's
+// draws, the render thread's time per frame being what holds the frame rate (Harry's XBE_PERF log, 2026-11-15)
+void Interpolating::FindStillTargets() {
+    if (skip_step_ == steps_seen_ && skip_.size() == count_) return;
+    skip_step_ = steps_seen_;
+    skip_.assign(count_, 0);
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_INTERP_SKIP_STILL");
+        return e && *e ? std::atoi(e) != 0 : app::kGame.interp_skip_still_targets;
+    }();
+    if (!on) return;
+    constexpr uint32_t kMask = 0x0FFFFFFF;
+    struct Target {
+        size_t first = SIZE_MAX, last = 0;
+        bool ok = true;
+    };
+    std::unordered_map<uint32_t, Target> targets;
+    std::unordered_map<uint32_t, uint32_t> depth_of;  // a depth buffer's target, or 0 when it serves more than one
+    const auto target_of = [&](const Rec& r) { return r.s ? r.s->rt.data & kMask : 0u; };
+    // a texture's memory as the draw saw it: from its kept header
+    const auto texture_data = [](const Rec& r, uint32_t t) -> uint32_t {
+        for (const Rec::Header& h : r.headers)
+            if (h.va == t) {
+                uint32_t v;
+                std::memcpy(&v, h.bytes + 4, 4);
+                return v & kMask;
+            }
+        return mem::IsCommitted(t + 7) ? kernel::R32(t + 4) & kMask : 0;
+    };
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind == Rec::Copy) {
+            if (const uint32_t d = r.s2.data & kMask) targets[d].ok = false;
+            continue;
+        }
+        const uint32_t d = target_of(r);
+        if (!d) continue;
+        Target& t = targets[d];
+        t.first = std::min(t.first, i), t.last = std::max(t.last, i);
+        // blended draws change from one replay to the next, but in a target with no camera move of its own (a cube map's faces
+        // following the car, a small pass) that is left at the step's: the car's reflections at the step's rate
+        if (r.kind == Rec::Draw && (r.prev >= 0 || r.derived || r.peer >= 0) && camera_targets_.count(d)) t.ok = false;
+        if (r.s->zs.header) {
+            const uint32_t z = r.s->zs.data & kMask;
+            auto it = depth_of.find(z);
+            if (it == depth_of.end()) depth_of[z] = d;
+            else if (it->second != d) it->second = 0;
+        }
+    }
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        const auto read = [&](uint32_t data) {
+            auto it = targets.find(data);
+            if (it == targets.end()) return;
+            if (r.kind == Rec::Draw) {
+                const uint32_t d = target_of(r);
+                if (auto own = targets.find(d); own != targets.end()) own->second.ok = false;  // samples a target of this step
+            }
+            if (i > it->second.first && i < it->second.last && target_of(r) != data) it->second.ok = false;
+        };
+        if (r.kind == Rec::Draw)
+            for (uint32_t t : r.s->textures)
+                if (t) read(texture_data(r, t));
+        if (r.kind == Rec::Copy) read(r.s1.data & kMask);
+    }
+    // a depth buffer serving several targets: all of them left out or none (the cube's six faces share one)
+    for (const auto& [z, d] : depth_of) {
+        if (d) continue;
+        bool all_ok = true;
+        for (size_t i = 0; i < count_ && all_ok; i++)
+            if (now_[i].kind != Rec::Copy && now_[i].s->zs.header && (now_[i].s->zs.data & kMask) == z)
+                if (auto it = targets.find(target_of(now_[i])); it != targets.end() && !it->second.ok) all_ok = false;
+        if (!all_ok)
+            for (size_t i = 0; i < count_; i++)
+                if (now_[i].kind != Rec::Copy && now_[i].s->zs.header && (now_[i].s->zs.data & kMask) == z)
+                    if (auto it = targets.find(target_of(now_[i])); it != targets.end()) it->second.ok = false;
+    }
+    if (auto it = targets.find(front_data_); it != targets.end()) it->second.ok = false;
+    }
+    uint32_t skipped = 0;
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind == Rec::Copy) continue;
+        auto it = targets.find(target_of(r));
+        if (it != targets.end() && it->second.ok) skip_[i] = 1, skipped++;
+    }
+    sum_skipped_ += skipped;
+    static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+    static uint64_t steps = 0, sum = 0, all = 0;
+    sum += skipped, all += count_;
+    if (log && ++steps % 600 == 0) {
+        LOGR("gpu: in-between frames: %llu of %llu records in 600 steps left out of the replays (their targets the step's own)",
+             (unsigned long long)sum, (unsigned long long)all);
+        sum = all = 0;
+    }
+}
+
 void Interpolating::Present(const Surface& front) {
+    front_data_ = front.data & 0x0FFFFFFF;
     const auto t = Clock::now();
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
@@ -1124,6 +1244,13 @@ void Interpolating::Present(const Surface& front) {
                  sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
                  replays_, sum_planned_ / b, sum_limit_ / b);
             LOGR("gpu: in-between frames: late steps: %u after our frames ran over, %u the title's own", late_ours_, late_title_);
+            if (diag::Perf())
+                LOGR("gpu: in-between frames, a replay: %.2f ms of it handing draws to the renderer", sum_draw_calls_ / std::max(1u, replays_) * 1000);
+            if (sum_skipped_)
+                LOGR("gpu: in-between frames: %.0f records a step left out of the replays, their targets' pictures the step's own",
+                     double(sum_skipped_) / std::max(1u, blended_steps_));
+            sum_draw_calls_ = 0;
+            sum_skipped_ = 0;
         }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;

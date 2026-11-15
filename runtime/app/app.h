@@ -262,6 +262,9 @@ struct GameInfo {
     // every draw of a program whose matched draws mostly go with the camera (the scenery) takes the camera's move in those
     // frames, whatever its own match: Juiced's buildings shook a little with any of them blended from its own (gpu/interp.cpp)
     bool interp_scenery_takes_camera = false;
+    // a target whose draws an in-between frame would repeat exactly (none blended, nothing of this step sampled) is not drawn
+    // again: its picture is the step's own (gpu/interp.cpp FindStillTargets). XBE_INTERP_SKIP_STILL=0 or 1 overrides
+    bool interp_skip_still_targets = false;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
