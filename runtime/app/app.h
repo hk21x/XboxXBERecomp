@@ -256,8 +256,9 @@ struct GameInfo {
     // which of the other constants (the title's numbering) those frames blend; the rest take the step's own value. Juiced's
     // pick an animation's frame, a tint or a phase among a few values (c36: 1, 0.67, 0.5, 0.4, 0.25), and halfway between
     // two of them is none of them: the corner boards' arrows flickered in every in-between frame (Harry, 2026-11-14). Not
-    // given, every constant is blended unless it leapt (gpu/interp.cpp Between)
-    bool (*interp_blends_constant)(int reg) = nullptr;
+    // given, every constant is blended unless it leapt (gpu/interp.cpp Between). Given the step before's value and this
+    // step's: one register can creep on one program and jump between frames on another (Juiced's c33)
+    bool (*interp_blends_constant)(int reg, float was, float now) = nullptr;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)

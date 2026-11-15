@@ -199,7 +199,7 @@ private:
         }();
         if (k >= kMatrixRegisters && !constants) return now;
         if (k >= kMatrixRegisters && app::kGame.interp_blends_constant &&
-            !app::kGame.interp_blends_constant(int((k + Transform()) % kRegisters) - 96))
+            !app::kGame.interp_blends_constant(int((k + Transform()) % kRegisters) - 96, was, now))
             return now;
         if (k >= kMatrixRegisters && was != now) {
             const float d = std::fabs(now - was);
