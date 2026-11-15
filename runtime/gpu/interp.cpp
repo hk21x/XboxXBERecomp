@@ -1104,7 +1104,6 @@ void Interpolating::FindStillTargets() {
                     if (auto it = targets.find(target_of(now_[i])); it != targets.end()) it->second.ok = false;
     }
     if (auto it = targets.find(front_data_); it != targets.end()) it->second.ok = false;
-    }
     uint32_t skipped = 0;
     for (size_t i = 0; i < count_; i++) {
         const Rec& r = now_[i];
