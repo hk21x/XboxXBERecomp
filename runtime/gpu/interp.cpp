@@ -56,6 +56,9 @@ uint32_t Transform() {
     static const uint32_t t = uint32_t(std::clamp(app::kGame.interp_transform + 96, 0, int(kRegisters - kMatrixRegisters)));
     return t;
 }
+constexpr double kOnCar = 300;  // a draw's place on a car, world units (Juiced's look like centimetres: rigid places
+                                 // on a car were 0 or 100 to 300 away, scenery 1000 and more) from the car draw's origin
+constexpr uint32_t kOnCarMost = 96;  // and few vertices: a light, a glow, the neon; not a barrier a car brushes past
 constexpr float kConstantLeap = 0.05f;                        // a constant past the transform changed this much, and by half, is not blended
 
 struct Rec {
@@ -710,20 +713,23 @@ bool Interpolating::Match() {
         const char* e = std::getenv("XBE_INTERP_RIDERS");
         return !e || std::atoi(e) != 0;
     }();
+    // the cars' draws: each one's matrix taken back off (its world in the camera's frame) and its move this step
     struct CarMove {
         uint32_t rt;
+        double inv[4][4];
         double d[4][4];
     };
     std::vector<CarMove> car_moves;
     if (camera_only == 2 && riders_on)
-        for (size_t i = 0; i < count_ && car_moves.size() < 64; i++) {
+        for (size_t i = 0; i < count_ && car_moves.size() < 512; i++) {
             const Rec& r = now_[i];
             if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc) || still.count(r.s->vs_handle)) continue;
-            CarMove m{r.s->rt.data, {}};
-            if (!move_of(r, m.d)) continue;
-            bool known = false;
-            for (const CarMove& k : car_moves) known |= k.rt == m.rt && same_move(m.d, k.d);
-            if (!known) car_moves.push_back(m);
+            CarMove m{r.s->rt.data, {}, {}};
+            double n[4][4];
+            for (int x = 0; x < 4; x++)
+                for (int y = 0; y < 4; y++) n[x][y] = r.vsc[size_t(x)][size_t(y)];
+            if (!Invert(n, m.inv) || !move_of(r, m.d)) continue;
+            car_moves.push_back(m);
         }
     uint32_t riders = 0;
     if (camera_only)
@@ -735,26 +741,64 @@ bool Interpolating::Match() {
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const double (*d)[4] = camera->d;
-            double own[4][4];
-            // the nearest of the camera's move and the cars': the player's car moves almost as the chase camera does, and
-            // its lights given the camera's move sat a little off them (Harry's bursts of 173e4b7, reversing: one rider a
-            // step where headless had 24, while a car's move "the same as the camera's" was left out)
-            if (!car_moves.empty() && r.prev >= 0 && !r.turning && move_of(r, own)) {
-                const auto err = [](const double x[4][4], const double y[4][4]) {
-                    double e = 0;
-                    for (int a = 0; a < 4; a++)
-                        for (int b = 0; b < 4; b++) e += std::fabs(x[a][b] - y[a][b]);
-                    return e;
-                };
-                // and clearly nearer: twice as near a car's as the camera's, so scenery whose own match is a little off
-                // the camera's (the buildings, which shook with any of their own) keeps the camera's
-                double best = err(own, camera->d) * 0.5;
-                for (const CarMove& m : car_moves)
-                    if (m.rt == r.s->rt.data && same_move(own, m.d) && err(own, m.d) < best) {
-                        best = err(own, m.d);
-                        d = m.d;
+            // on a car: the car draw's matrix taken back off this one leaves its place on the car (the car's world inverse
+            // times its own world: the camera and projection cancel), rigid and within a car's length. A light, the neon, a
+            // glow drawn on the car; scenery's place on a car is far off. The car's move then: its own match is not needed
+            // (Harry's bursts of dd0b70f: the reversing lights' glow lost its match one step in three and hung below the lamps)
+            if (!car_moves.empty() && r.c <= kOnCarMost) {
+                // XBE_INTERP_ON_CAR=N (a test): another distance; with XBE_INTERP_LOG the nearest of each still draw is counted
+                static const double on_car = [] {
+                    const char* e = std::getenv("XBE_INTERP_ON_CAR");
+                    return e && *e ? std::atof(e) : kOnCar;
+                }();
+                double best = on_car, nearest = 1e30, nearest_loose = 1e30;
+                for (const CarMove& m : car_moves) {
+                    if (m.rt != r.s->rt.data) continue;
+                    double l[4][4];
+                    for (int x = 0; x < 4; x++)
+                        for (int y = 0; y < 4; y++) {
+                            l[x][y] = 0;
+                            for (int z = 0; z < 4; z++) l[x][y] += m.inv[x][z] * r.vsc[size_t(z)][size_t(y)];
+                        }
+                    // a world's last row: 0 0 0 1; its axes neither shrunk nor stretched much
+                    if (std::fabs(l[3][0]) + std::fabs(l[3][1]) + std::fabs(l[3][2]) + std::fabs(l[3][3] - 1) > 0.01) continue;
+                    bool rigid = true;
+                    for (int y = 0; y < 3 && rigid; y++) {
+                        const double len = std::sqrt(l[0][y] * l[0][y] + l[1][y] * l[1][y] + l[2][y] * l[2][y]);
+                        rigid = len > 0.5 && len < 2;
                     }
+                    const double away = std::sqrt(l[0][3] * l[0][3] + l[1][3] * l[1][3] + l[2][3] * l[2][3]);
+                    if (!rigid) {
+                        nearest_loose = std::min(nearest_loose, away);
+                        continue;
+                    }
+                    nearest = std::min(nearest, away);
+                    if (away < best) best = away, d = m.d;
+                }
                 if (d != camera->d) riders++;
+                static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+                if (log) {
+                    // the nearest rigid place on a car, and (second row) the nearest of those not rigid, for still draws
+                    static uint64_t hist[2][10] = {}, n = 0;
+                    constexpr double edges[9] = {0.5, 2, 5, 10, 30, 100, 300, 1000, 1e29};
+                    for (int row = 0; row < 2; row++) {
+                        const double v = row ? nearest_loose : nearest;
+                        int b = 0;
+                        while (b < 9 && v >= edges[b]) b++;
+                        hist[row][b]++;
+                    }
+                    if (++n % 200000 == 0) {
+                        for (int row = 0; row < 2; row++)
+                            LOGR("gpu: in-between frames: still draws' nearest %s place on a car: <0.5 %llu <2 %llu <5 %llu <10 %llu "
+                                 "<30 %llu <100 %llu <300 %llu <1000 %llu more %llu none %llu", row ? "loose" : "rigid",
+                                 (unsigned long long)hist[row][0], (unsigned long long)hist[row][1], (unsigned long long)hist[row][2],
+                                 (unsigned long long)hist[row][3], (unsigned long long)hist[row][4], (unsigned long long)hist[row][5],
+                                 (unsigned long long)hist[row][6], (unsigned long long)hist[row][7], (unsigned long long)hist[row][8],
+                                 (unsigned long long)hist[row][9]);
+                        for (auto& r2 : hist)
+                            for (auto& h : r2) h = 0;
+                    }
+                }
             }
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
