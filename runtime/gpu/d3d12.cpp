@@ -138,6 +138,10 @@ struct PerfScope {
 };
 
 // F3 captures only with diag::CaptureDir set
+// XBE_PERF: the GPU's time on the lists sent, from the backend's timestamps (D3D12Backend::StampFor), for LogPerf
+std::atomic<bool> g_stamp_on{false};
+std::atomic<double> g_stamp_ms{0}, g_stamp_lists{0}, g_stamp_missed{0};
+
 bool CaptureOn() {
     if (diag::CaptureDir().empty()) LOGR("capture: set XBE_CAPTURE_DIR");
     return !diag::CaptureDir().empty();
@@ -954,6 +958,24 @@ private:
     };
     ComPtr<ID3D12QueryHeap> query_heap_;
     ComPtr<ID3D12Resource> query_rb_;
+    // XBE_PERF: each submitted list's time on the GPU, from timestamps written by two small lists sent around it (recorded
+    // once, sent again whenever the last sending is done)
+    struct GpuStamp {
+        ComPtr<ID3D12CommandAllocator> alloc;
+        ComPtr<ID3D12GraphicsCommandList> before, after;
+        uint64_t fence = 0;
+        bool pending = false;
+    };
+    static constexpr int kStamps = 16;
+    GpuStamp stamps_[kStamps];
+    ComPtr<ID3D12QueryHeap> stamp_heap_;
+    ComPtr<ID3D12Resource> stamp_rb_;
+    const uint64_t* stamp_map_ = nullptr;
+    uint64_t stamp_next_ = 0;
+    double stamp_freq_ = 0;
+    int stamp_state_ = 0;  // 0 not tried, 1 ready, -1 none
+    GpuStamp* StampFor();
+    void CollectStamps();
     const uint64_t* query_counts_ = nullptr;
     uint32_t query_next_ = 0;
     std::vector<Query> counted_;  // since the last ClearReport
@@ -1247,8 +1269,14 @@ void D3D12Backend::Submit(bool wait) {
         LOG_FIRST(4, "d3d12: command list close failed %08X (device %08X)", unsigned(hr), unsigned(dev_->GetDeviceRemovedReason()));
         ReportRemoved("closing a command list");
     }
-    ID3D12CommandList* lists[] = {cl_.Get()};
-    queue_->ExecuteCommandLists(1, lists);
+    GpuStamp* stamp = StampFor();  // XBE_PERF only
+    if (stamp) {
+        ID3D12CommandList* lists[] = {stamp->before.Get(), cl_.Get(), stamp->after.Get()};
+        queue_->ExecuteCommandLists(3, lists);
+    } else {
+        ID3D12CommandList* lists[] = {cl_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+    }
     lists_++;
     sent_notes_.push_back(std::move(list_notes_));
     sent_copies_.push_back(std::move(list_copies_));
@@ -1260,6 +1288,7 @@ void D3D12Backend::Submit(bool wait) {
     list_notes_.clear();
     list_copies_.clear();
     queue_->Signal(fence_.Get(), ++fence_value_);
+    if (stamp) stamp->fence = fence_value_, stamp->pending = true;
     Frame& f = CurrentFrame();
     f.fence = fence_value_;
     // XBE_SYNC_GPU=1 (experiment): every list waited for once sent, so the GPU never runs alongside the CPU
@@ -1285,6 +1314,66 @@ void D3D12Backend::Submit(bool wait) {
         ring_gen_++;
         cl_->Reset(f.alloc.Get(), nullptr);
         Begin();
+    }
+}
+
+// XBE_PERF: a free pair of timestamp lists for the list about to be sent, or none (not timing, or all 16 still in flight)
+D3D12Backend::GpuStamp* D3D12Backend::StampFor() {
+    if (!diag::Perf() || stamp_state_ < 0) return nullptr;
+    if (stamp_state_ == 0) {
+        stamp_state_ = -1;
+        UINT64 freq = 0;
+        if (FAILED(queue_->GetTimestampFrequency(&freq)) || !freq) return nullptr;
+        stamp_freq_ = double(freq);
+        D3D12_QUERY_HEAP_DESC qd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kStamps * 2, 0};
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC bd = BufferDesc(uint64_t(kStamps) * 2 * sizeof(uint64_t));
+        void* p = nullptr;
+        if (FAILED(dev_->CreateQueryHeap(&qd, IID_PPV_ARGS(&stamp_heap_))) ||
+            FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&stamp_rb_))) ||
+            FAILED(stamp_rb_->Map(0, nullptr, &p)))
+            return nullptr;
+        stamp_map_ = static_cast<const uint64_t*>(p);
+        for (int i = 0; i < kStamps; i++) {
+            GpuStamp& s = stamps_[i];
+            if (FAILED(dev_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc))) ||
+                FAILED(dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(), nullptr, IID_PPV_ARGS(&s.before))))
+                return nullptr;
+            s.before->EndQuery(stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, UINT(i * 2));
+            s.before->Close();
+            if (FAILED(dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(), nullptr, IID_PPV_ARGS(&s.after))))
+                return nullptr;
+            s.after->EndQuery(stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, UINT(i * 2 + 1));
+            s.after->ResolveQueryData(stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, UINT(i * 2), 2, stamp_rb_.Get(),
+                                      uint64_t(i) * 2 * sizeof(uint64_t));
+            s.after->Close();
+        }
+        stamp_state_ = 1;
+        g_stamp_on = true;
+        LOGR("perf: the GPU's time per frame from timestamps around each list (%.0f ticks a second)", stamp_freq_);
+    }
+    CollectStamps();
+    GpuStamp& s = stamps_[stamp_next_ % kStamps];
+    if (s.pending) {
+        g_stamp_missed += 1;
+        return nullptr;
+    }
+    stamp_next_++;
+    return &s;
+}
+
+// the timings of lists the GPU has finished, added up
+void D3D12Backend::CollectStamps() {
+    if (stamp_state_ != 1) return;
+    const uint64_t done = fence_->GetCompletedValue();
+    for (int i = 0; i < kStamps; i++) {
+        GpuStamp& s = stamps_[i];
+        if (!s.pending || s.fence > done) continue;
+        s.pending = false;
+        const uint64_t a = stamp_map_[i * 2], b = stamp_map_[i * 2 + 1];
+        if (b > a) g_stamp_ms += double(b - a) * 1000.0 / stamp_freq_;
+        g_stamp_lists += 1;
     }
 }
 
@@ -4375,6 +4464,9 @@ void LogPerf() {
              p.t_shaders / n, p.pso / n, p.consts / n, p.tables / n, p.setup / n, p.geometry / n,
              p.compile / n, p.clear / n, p.copy / n, p.sync / n, p.present / n, p.swap / n, p.wait / n,
              (el - host) / n);
+        if (g_stamp_on)
+            LOGR("perf: GPU per frame: %.2f ms on its lists (%.2f lists timed, %.2f not), the rest of the frame idle or "
+                 "presenting", g_stamp_ms.exchange(0) / n, g_stamp_lists.exchange(0) / n, g_stamp_missed.exchange(0) / n);
         LOGR("perf: title thread per frame: recording %.2f ms, waiting %.2f ms (%.1f waits: read-back %.2f "
              "resource %.2f fence %.2f flush %.2f copy %.2f, next frame %.2f) | read-backs waited for: %.1f lock, "
              "%.1f NOOVERWRITE",
