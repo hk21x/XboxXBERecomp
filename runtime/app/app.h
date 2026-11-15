@@ -110,6 +110,8 @@ bool Paused();                    // pause_unfocused and the window is not in fr
 void RequestScreenshot();
 bool TakeScreenshotRequest();
 void SaveScreenshot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h);
+// one of a burst (XBE_SCREENSHOT_BURST): into screenshots/<folder>/<n>.png
+void SaveBurstShot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h, const std::string& folder, int n);
 bool ScreenshotJustSaved();  // for a few seconds after one is written
 void DrawHud(double fps);         // the frame counter, inside the ImGui frame (overlay.cpp)
 void FeedPad();                   // controllers to the settings window's navigation, before each ImGui frame

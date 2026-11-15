@@ -27,6 +27,8 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -976,6 +978,16 @@ private:
     int stamp_state_ = 0;  // 0 not tried, 1 ready, -1 none
     GpuStamp* StampFor();
     void CollectStamps();
+    // XBE_SCREENSHOT_BURST=N: F12 takes the next N frames as shown, each copied into a read-back buffer of its own without a
+    // wait (one that waited made the in-between frames late, and none were drawn), all written once the last is done
+    std::vector<ComPtr<ID3D12Resource>> burst_rb_;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT burst_fp_{};
+    uint32_t burst_w_ = 0, burst_h_ = 0;
+    int burst_size_ = 0, burst_taken_ = 0, burst_left_ = 0;
+    bool burst_done_ = false;
+    std::string burst_folder_;
+    void BurstCopy(ID3D12Resource* bb);
+    void BurstSave();
     const uint64_t* query_counts_ = nullptr;
     uint32_t query_next_ = 0;
     std::vector<Query> counted_;  // since the last ClearReport
@@ -4368,7 +4380,23 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     bound_rt_ = bound_ds_ = nullptr;
     if (frame) BlitFrame(frame, frame_fmt);
     // F12: the frame as shown, before the interface; the read submits, so the target is set again
-    if (app::TakeScreenshotRequest()) {
+    static const int burst = [] {
+        const char* e = std::getenv("XBE_SCREENSHOT_BURST");
+        const int n = e && *e ? std::clamp(std::atoi(e), 0, 64) : 0;
+        if (n > 1) LOGR("screenshot: F12 takes %d frames one after another (XBE_SCREENSHOT_BURST)", n);
+        return n > 1 ? n : 0;
+    }();
+    if (burst && !burst_left_ && !burst_done_ && app::TakeScreenshotRequest()) {
+        burst_size_ = burst;
+        burst_left_ = burst;
+        burst_taken_ = 0;
+    }
+    if (burst_left_) {
+        Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        BurstCopy(bb_[bi].Get());
+        Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    } else if (!burst && app::TakeScreenshotRequest()) {
         Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_COPY_SOURCE);
         std::vector<uint8_t> px;
         if (ReadBack(bb_[bi].Get(), bb_w_, bb_h_, px)) app::SaveScreenshot(std::move(px), bb_w_, bb_h_);
@@ -4883,6 +4911,7 @@ void D3D12Backend::Present(const Surface& front) {
         ReportRemoved("presenting");
     g_perf.swap += PerfMs(perf_swap);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
+    if (burst_done_) BurstSave();
 
     presents_++;
     // every 5 seconds, kept in release builds: video memory and what the renderer holds (a build-up before a hang)
@@ -5414,6 +5443,68 @@ ComPtr<ID3D12Resource> D3D12Backend::Shrink(ID3D12Resource* src, D3D12_RESOURCE_
 }
 
 // a BGRA copy source to the CPU, rows packed; waits for the GPU
+// a burst's frame: the back buffer copied into its own read-back buffer, made at the burst's first (kept for the next)
+void D3D12Backend::BurstCopy(ID3D12Resource* bb) {
+    D3D12_RESOURCE_DESC rd = bb->GetDesc();
+    if (burst_taken_ == 0) {
+        SYSTEMTIME tm;
+        GetLocalTime(&tm);
+        char f[32];
+        snprintf(f, sizeof f, "burst %02u-%02u-%02u", tm.wHour, tm.wMinute, tm.wSecond);
+        burst_folder_ = f;
+        if (burst_w_ != bb_w_ || burst_h_ != bb_h_) burst_rb_.clear();
+        burst_w_ = bb_w_, burst_h_ = bb_h_;
+        UINT rows;
+        UINT64 row_size, bytes;
+        dev_->GetCopyableFootprints(&rd, 0, 1, 0, &burst_fp_, &rows, &row_size, &bytes);
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC bd = BufferDesc(bytes);
+        while (int(burst_rb_.size()) < burst_size_) {
+            ComPtr<ID3D12Resource> rb;
+            if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                     IID_PPV_ARGS(&rb))))
+                break;
+            burst_rb_.push_back(rb);
+        }
+        if (int(burst_rb_.size()) < burst_size_) {
+            LOGR("screenshot: a burst of %d frames needs %d read-back buffers, %zu made: fewer taken", burst_size_, burst_size_,
+                 burst_rb_.size());
+            burst_size_ = int(burst_rb_.size());
+            burst_left_ = burst_size_;
+            if (!burst_left_) return;
+        }
+        LOGR("screenshot: a burst of %d frames begins at present %llu", burst_size_, (unsigned long long)presents_);
+    }
+    D3D12_TEXTURE_COPY_LOCATION dl{burst_rb_[size_t(burst_taken_)].Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+    dl.PlacedFootprint = burst_fp_;
+    D3D12_TEXTURE_COPY_LOCATION sl{bb, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+    CopyRegion(&dl, 0, 0, &sl, nullptr);
+    burst_taken_++;
+    if (--burst_left_ == 0) burst_done_ = true;
+}
+
+// the burst's last frame sent: waited for once, then each written (PNG encoding on a thread, one after another)
+void D3D12Backend::BurstSave() {
+    burst_done_ = false;
+    WaitFence(fence_value_);
+    std::vector<std::vector<uint8_t>> frames;
+    for (int i = 0; i < burst_taken_; i++) {
+        uint8_t* p = nullptr;
+        if (FAILED(burst_rb_[size_t(i)]->Map(0, nullptr, reinterpret_cast<void**>(&p)))) continue;
+        std::vector<uint8_t> px(size_t(burst_w_) * burst_h_ * 4);
+        for (uint32_t y = 0; y < burst_h_; y++)
+            std::memcpy(&px[size_t(y) * burst_w_ * 4], p + size_t(y) * burst_fp_.Footprint.RowPitch, size_t(burst_w_) * 4);
+        burst_rb_[size_t(i)]->Unmap(0, nullptr);
+        frames.push_back(std::move(px));
+    }
+    LOGR("screenshot: a burst of %zu frames (%ux%u) being written to screenshots\\%s", frames.size(), burst_w_, burst_h_,
+         burst_folder_.c_str());
+    std::thread([frames = std::move(frames), w = burst_w_, h = burst_h_, folder = burst_folder_]() mutable {
+        for (size_t i = 0; i < frames.size(); i++) app::SaveBurstShot(std::move(frames[i]), w, h, folder, int(i + 1));
+        LOGR("screenshot: burst written (%zu frames)", frames.size());
+    }).detach();
+}
+
 bool D3D12Backend::ReadBack(ID3D12Resource* res, uint32_t w, uint32_t h, std::vector<uint8_t>& out) {
     D3D12_RESOURCE_DESC rd = res->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;

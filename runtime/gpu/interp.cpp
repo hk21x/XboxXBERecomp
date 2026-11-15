@@ -10,8 +10,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -198,6 +200,45 @@ private:
     // flickering in every in-between frame (Harry, 2026-11-14). Those are the step's own; what moves smoothly (lights, the
     // bones) changes little in a step and is not a whole sixteenth twice
     static float Between(uint32_t k, float was, float now, float alpha) { return Holds(k, was, now) ? now : was + (now - was) * alpha; }
+    // XBE_INTERP_CONST_LOG=1 (diagnosis): the constants blended past the transform, by program and register, logged every 10 s
+    // with how often each changed, by how much, and the range it took (a flicker's constant: one that jumps about, blended)
+    static bool ConstLog() {
+        static const bool on = std::getenv("XBE_INTERP_CONST_LOG") != nullptr;
+        return on;
+    }
+    struct ConstStat {
+        uint64_t n = 0, back = 0;  // steps it changed in; of them, back to within 1% of the value two steps before
+        double rel = 0;            // summed change over the larger magnitude
+        float lo = 1e30f, hi = -1e30f, last_was = 0;
+    };
+    std::map<std::tuple<uint32_t, int, int>, ConstStat> const_stats_;  // program handle, register, component
+    void NoteBlended(const Rec& r, const Rec& p) {
+        for (const uint16_t e : r.lerp) {
+            const uint32_t k = e >> 2, c = e & 3;
+            if (k < kMatrixRegisters) continue;
+            const float was = p.vsc[k][c], now = r.vsc[k][c];
+            ConstStat& s = const_stats_[{r.s->vs_handle, int((k + Transform()) % kRegisters) - 96, int(c)}];
+            const float m = std::max(std::fabs(was), std::fabs(now));
+            s.back += s.n && std::fabs(now - s.last_was) <= 0.01f * std::max(m, 1e-6f);
+            s.n++;
+            s.rel += m > 0 ? std::fabs(now - was) / m : 0;
+            s.lo = std::min({s.lo, was, now});
+            s.hi = std::max({s.hi, was, now});
+            s.last_was = was;
+        }
+    }
+    void LogConstStats() {
+        std::vector<std::pair<double, std::tuple<uint32_t, int, int>>> v;
+        for (auto& [key, s] : const_stats_) v.push_back({s.rel, key});
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        for (size_t i = 0; i < v.size() && i < 40; i++) {
+            const ConstStat& s = const_stats_[v[i].second];
+            const auto [vs, reg, c] = v[i].second;
+            LOGR("gpu: in-between constants: vs %08X c%d.%c changed %llu times (back %llu), mean change %.3f, range %g to %g", vs, reg,
+                 "xyzw"[c], (unsigned long long)s.n, (unsigned long long)s.back, s.rel / double(s.n), s.lo, s.hi);
+        }
+        const_stats_.clear();
+    }
     // the step's own value taken, not blended
     static bool Holds(uint32_t k, float was, float now) {
         // XBE_INTERP_CONSTANTS=0 (a test): every constant past the transform at the step's value
@@ -961,6 +1002,7 @@ void Interpolating::Replay(float alpha) {
                                     if (p.vsc[k][c] != r.vsc[k][c] && !Holds(k, p.vsc[k][c], r.vsc[k][c])) r.lerp.push_back(uint16_t(k * 4 + c));
                             }
                             r.lerp_step = steps_seen_;
+                            if (ConstLog()) NoteBlended(r, p);
                         }
                         v = r.vsc;
                         for (const uint16_t e : r.lerp) {
@@ -1246,6 +1288,7 @@ void Interpolating::Present(const Surface& front) {
     shown_++;
     steps_++;
     if (t - reported_ > std::chrono::seconds(10)) {
+        if (ConstLog() && reported_ != Clock::time_point{}) LogConstStats();
         if (reported_ != Clock::time_point{} && blended_steps_)
         {
             LOGR("gpu: in-between frames: %u frames for %u steps (%u blended) in the last 10 s%s", shown_, steps_, blended_steps_,

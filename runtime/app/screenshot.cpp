@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <string>
 #include <thread>
 
 #include "app/app.h"
@@ -77,6 +78,19 @@ void SaveScreenshot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h) {
         }
         CoUninitialize();
     }).detach();
+}
+
+// XBE_SCREENSHOT_BURST: frames one after another, numbered, in a folder of their own; written one at a time on a thread
+void SaveBurstShot(std::vector<uint8_t> bgra, uint32_t w, uint32_t h, const std::string& folder, int n) {
+    for (size_t i = 3; i < bgra.size(); i += 4) bgra[i] = 255;
+    std::filesystem::path dir = ExeDir() / "screenshots" / folder;
+    wchar_t name[32];
+    swprintf(name, 32, L"%02d.png", n);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    WritePng(dir / name, bgra, w, h);
+    CoUninitialize();
 }
 
 }  // namespace app
