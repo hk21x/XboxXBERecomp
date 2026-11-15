@@ -633,8 +633,10 @@ bool Builder::BuildPackage(std::string& error) {
                 fs::path to = PlayDir() / e.path().filename();
                 // Windows: a folder just built in (its compiler and work files) or the one it replaces can be held for
                 // a moment after the build's processes end (an antivirus scan, the search indexer), and the move was
-                // refused once and for all ("Could not put compiler in place ... Access is denied", an EoN 1.3.2
-                // update). So the old one's removal and the move are tried again for up to 30 s, each try logged
+                // refused once and for all ("Could not put compiler in place ... Access is denied": an EoN 1.3.2
+                // update, and on the VM a fresh 1.3.1 install's first build, Defender's real-time scan on, the folder
+                // free minutes later). So the old one's removal and the move are tried again for up to 2 minutes, each
+                // try logged
                 std::error_code move;
                 const bool dir = e.is_directory(move);
                 for (int attempt = 1;; attempt++) {
@@ -643,7 +645,7 @@ bool Builder::BuildPackage(std::string& error) {
                     if (!move) fs::rename(e.path(), to, move);
                     if (!move) break;
                     Log("replace: " + U8(e.path().filename()) + ", try " + std::to_string(attempt) + ": " + move.message());
-                    if (attempt >= 30 || cancel) break;
+                    if (attempt >= 120 || cancel) break;
                     Say("Putting the new version in place", "Waiting for Windows to let go of " + U8(e.path().filename()), -1);
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
