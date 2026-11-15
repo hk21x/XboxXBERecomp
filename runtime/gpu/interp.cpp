@@ -1190,13 +1190,13 @@ void Interpolating::Present(const Surface& front) {
         const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
         sum_drawing_ += drawing, sum_planned_ += frames, sum_limit_ += limit_;
         double spacing = std::min(slot, usual / frames);
-        // XBE_INTERP_FILL=1 (a test): the frames closer together when at the rate's spacing the last would not fit before the
-        // title's next step (Juiced at a cap of 240: 4 planned, the title's own drawing 4 ms of the 16.7, 3 shown, the fps stuck
-        // at 180). They are still placed at their own times along the step; the render thread's queue evens them out
+        // GameInfo::interp_fill_frames (XBE_INTERP_FILL=0/1 overrides): the frames closer together when at the rate's spacing
+        // the last would not fit before the title's next step (Juiced at a cap of 240: 4 planned, the title's own drawing 4 ms
+        // of the 16.7, 3 shown, the fps stuck at 180). They are still placed at their own times along the step
         static const bool fill = [] {
             const char* e = std::getenv("XBE_INTERP_FILL");
-            const bool on = e && *e == '1';
-            if (on) LOGR("gpu: in-between frames: a step's frames closer together when they would not all fit (XBE_INTERP_FILL=1)");
+            const bool on = e && *e ? *e == '1' : app::kGame.interp_fill_frames;
+            if (on) LOGR("gpu: in-between frames: a step's frames closer together when they would not all fit");
             return on;
         }();
         if (fill && frames > 1) {

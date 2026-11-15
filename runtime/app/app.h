@@ -265,6 +265,10 @@ struct GameInfo {
     // a target whose draws an in-between frame would repeat exactly (none blended, nothing of this step sampled) is not drawn
     // again: its picture is the step's own (gpu/interp.cpp FindStillTargets). XBE_INTERP_SKIP_STILL=0 or 1 overrides
     bool interp_skip_still_targets = false;
+    // a step's in-between frames closer together than the rate's spacing when they would not all fit before the title's next
+    // step: Juiced's own drawing takes 4 ms of the 16.7, and at a cap of 240 the 4th frame never fit (180, never 240; with it
+    // 230 to 240, Harry 2026-11-15). XBE_INTERP_FILL=0 or 1 overrides
+    bool interp_fill_frames = false;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
