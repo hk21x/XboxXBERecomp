@@ -1189,7 +1189,20 @@ void Interpolating::Present(const Surface& front) {
         }
         const int frames = std::clamp(std::min({int(usual / slot + 0.5), fit, limit_}), 1, kMostFrames);
         sum_drawing_ += drawing, sum_planned_ += frames, sum_limit_ += limit_;
-        const double spacing = std::min(slot, usual / frames);
+        double spacing = std::min(slot, usual / frames);
+        // XBE_INTERP_FILL=1 (a test): the frames closer together when at the rate's spacing the last would not fit before the
+        // title's next step (Juiced at a cap of 240: 4 planned, the title's own drawing 4 ms of the 16.7, 3 shown, the fps stuck
+        // at 180). They are still placed at their own times along the step; the render thread's queue evens them out
+        static const bool fill = [] {
+            const char* e = std::getenv("XBE_INTERP_FILL");
+            const bool on = e && *e == '1';
+            if (on) LOGR("gpu: in-between frames: a step's frames closer together when they would not all fit (XBE_INTERP_FILL=1)");
+            return on;
+        }();
+        if (fill && frames > 1) {
+            const double room = span + replay_seconds_ - frame_seconds_ - kOverrun;  // the last frame begun by then
+            if (room > 0) spacing = std::min(spacing, std::max(room / (frames - 1), frame_seconds_));
+        }
         if (t < rest_until_) {
             overran_ = false;
             inner_->Present(front);
