@@ -111,5 +111,7 @@ inline std::atomic<uint32_t> g_shaders_compiled{0};  // D3DCompile calls (the sh
 
 // F3: save the next frame, every draw and target, under diag::CaptureDir
 inline std::atomic<bool> g_capture{false};
+// F12 with XBE_SCREENSHOT_BURST: the in-between frames' table of how each draw was placed, for the same frames
+inline std::atomic<bool> g_interp_table{false};
 
 }  // namespace gpu

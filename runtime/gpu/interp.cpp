@@ -88,6 +88,7 @@ struct Rec {
     bool stray = false;    // its nearest copy of the step before is not where the camera's move puts it: still scenery come into view
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
+    bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
     // the constants that differ from prev's and are blended (register * 4 + component), worked out once a step for its replays:
     // deciding it for all 768 of every draw in every replay was three quarters of a replay's time
     std::vector<uint16_t> lerp;
@@ -283,6 +284,7 @@ private:
         r.prev = -1;
         r.turning = false;
         r.derived = false;
+        r.rider = false;
         r.stray = false;
         r.peer = -1;
         r.headers.clear();
@@ -750,6 +752,7 @@ bool Interpolating::Match() {
                     r.was[a][b] = float(t);
                 }
             r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+            r.rider = d != camera->d;
         }
     {
         static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
@@ -953,6 +956,7 @@ void Interpolating::Replay(float alpha) {
     // textures) on a pixel that flickers
     static int diag_left = 0, diag_replay = 0;
     diag_replay++;
+    if (!diag_left && gpu::g_interp_table.exchange(false)) diag_left = 16;  // F12's burst: its frames
     if (!diag_left) {
         if (std::FILE* f = std::fopen("interp_table", "rb")) {
             std::fclose(f);
@@ -1031,7 +1035,7 @@ void Interpolating::Replay(float alpha) {
                 const bool at_step = !at_step_matrix.empty() && at_step_matrix.count(matrix_of(r));
                 if (diag_table)
                     LOGR("gpu: in-between table: %d rec %zu %s vs %08X count %u tex %08X %08X %08X %08X rt %08X", diag_replay, i,
-                         alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? "derived" : r.peer >= 0 ? "peer" : "none",
+                         alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived") : r.peer >= 0 ? "peer" : "none",
                          r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header);
                 const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
                 Rec::Constants v;  // turned round as kept (Rec::vsc), put back into d.vsc below

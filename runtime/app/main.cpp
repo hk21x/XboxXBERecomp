@@ -26,6 +26,8 @@
 #include "core/diag.h"
 #include "core/input.h"
 #include "core/log.h"
+#include <cstdlib>
+
 #include "gpu/backend.h"
 #include "image_symbols.h"
 #include "kernel/kernel.h"
@@ -292,7 +294,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 LOGR("F8: experiments set to start now begin");
                 diag::g_f8_pressed = true;
             }
-            if (wp == VK_F12 && !(lp & (1 << 30))) RequestScreenshot();
+            if (wp == VK_F12 && !(lp & (1 << 30))) {
+                RequestScreenshot();
+                if (const char* e = std::getenv("XBE_SCREENSHOT_BURST"); e && std::atoi(e) > 1) gpu::g_interp_table = true;
+            }
             if (wp == VK_F4) {
                 LOGR("F4: frame log requested");
                 diag::g_framelog_request = true;
