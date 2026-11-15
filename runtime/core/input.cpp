@@ -114,9 +114,8 @@ constexpr const char* kLabels[kControls] = {
     "Right stick left", "Right stick right", "Right stick up", "Right stick down"};
 
 // a stick by the settings (Settings::stick_deadzone, stick_sensitivity): a round dead zone, the throw past it stretched
-// to the full, then the sensitivity, each axis kept to -1..1. The defaults leave it as it reads
+// to the full, then the sensitivity, each axis kept to -1..1 (Poll skips a stick left at 0 and 100)
 void TuneStick(float& x, float& y, uint32_t deadzone, uint32_t sensitivity) {
-    if (deadzone == 0 && sensitivity == 100) return;
     float m = std::hypot(x, y), dz = deadzone / 100.0f;
     if (m <= dz) {
         x = y = 0;
@@ -129,7 +128,7 @@ void TuneStick(float& x, float& y, uint32_t deadzone, uint32_t sensitivity) {
 }
 
 // a pad's inputs as 0 to 1 each, in Control order
-void ReadPad(SDL_Gamepad* pad, float* v, const app::Settings& s) {
+void ReadPad(SDL_Gamepad* pad, float* v) {
     constexpr SDL_GamepadButton kButtons[] = {
         SDL_GAMEPAD_BUTTON_DPAD_UP,    SDL_GAMEPAD_BUTTON_DPAD_DOWN, SDL_GAMEPAD_BUTTON_DPAD_LEFT,
         SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_START,     SDL_GAMEPAD_BUTTON_BACK,
@@ -144,8 +143,6 @@ void ReadPad(SDL_Gamepad* pad, float* v, const app::Settings& s) {
     // SDL's sticks have y down
     float lx = axis(SDL_GAMEPAD_AXIS_LEFTX), ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
     float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX), ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
-    TuneStick(lx, ly, s.stick_deadzone[0], s.stick_sensitivity[0]);
-    TuneStick(rx, ry, s.stick_deadzone[1], s.stick_sensitivity[1]);
     v[kLSLeft] = std::max(-lx, 0.0f), v[kLSRight] = std::max(lx, 0.0f);
     v[kLSUp] = std::max(-ly, 0.0f), v[kLSDown] = std::max(ly, 0.0f);
     v[kRSLeft] = std::max(-rx, 0.0f), v[kRSRight] = std::max(rx, 0.0f);
@@ -273,8 +270,16 @@ Pad Poll(int port) {
         UpdatePads();
         if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
             p.connected = true;
-            ReadPad(pad, in, s);
+            ReadPad(pad, in);
         }
+    }
+    // the controller's sticks by the settings, before the remap (the keyboard and the wheel are added after)
+    for (int i = 0; i < 2; i++) {
+        if (s.stick_deadzone[i] == 0 && s.stick_sensitivity[i] == 100) continue;
+        float* v = in + (i ? kRSLeft : kLSLeft);  // left, right, up, down
+        float x = v[1] - v[0], y = v[3] - v[2];
+        TuneStick(x, y, s.stick_deadzone[i], s.stick_sensitivity[i]);
+        v[0] = std::max(-x, 0.0f), v[1] = std::max(x, 0.0f), v[2] = std::max(-y, 0.0f), v[3] = std::max(y, 0.0f);
     }
     // remapped: each console input reads the physical input the settings name for it
     for (int c = 0; c < kControls; c++) {
