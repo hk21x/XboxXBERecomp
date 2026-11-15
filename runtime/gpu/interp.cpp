@@ -13,6 +13,7 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "app/app.h"
@@ -627,11 +628,24 @@ bool Interpolating::Match() {
         if (on) LOGR("gpu: in-between frames: draws take their target's camera move (XBE_INTERP_CAMERA_ONLY=%d)", on);
         return on;
     }();
+    // a still program's draw sharing its matrix with another program's goes with that: a car's brake lights, drawn by the
+    // street lamps' glow program over the car's body (given the camera's move they were left behind the car, unlit in every
+    // in-between frame; Harry, 2026-11-15)
+    std::unordered_set<uint64_t> moving;
+    const auto matrix_hash = [](const Rec& r) {
+        uint64_t h = 0xCBF29CE484222325ull;
+        const auto* p = reinterpret_cast<const uint8_t*>(r.vsc.data());
+        for (size_t b = 0; b < kMatrixRegisters * sizeof(r.vsc[0]); b++) h = (h ^ p[b]) * 0x100000001B3ull;
+        return h;
+    };
+    if (camera_only == 2)
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && !flat(now_[i].vsc) && !still.count(now_[i].s->vs_handle)) moving.insert(matrix_hash(now_[i]));
     if (camera_only)
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             if (r.kind != Rec::Draw || flat(r.vsc)) continue;
-            if (camera_only == 2 && !still.count(r.s->vs_handle)) continue;
+            if (camera_only == 2 && (!still.count(r.s->vs_handle) || moving.count(matrix_hash(r)))) continue;
             if (camera_only == 3 && still.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
