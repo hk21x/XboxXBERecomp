@@ -777,10 +777,18 @@ bool Interpolating::Match() {
             // road and back (Harry's clip of a1979db; all of them given the camera's move, XBE_INTERP_CAMERA_ONLY, it was gone)
             // not one following a matched draw of its own matrix (a peer): a second pass over the same surface (the corner boards'
             // arrows over the board) given the camera's move instead lay a little off the board's own blend and fought with it
-            const bool scenery = all_scenery && r.peer < 0 && still.count(r.s->vs_handle);
+            static const bool with_peers = [] {  // XBE_INTERP_SCENERY_PEERS=1 (a test): peers too
+                const char* e = std::getenv("XBE_INTERP_SCENERY_PEERS");
+                return e && std::atoi(e) != 0;
+            }();
+            static const bool with_sprites = [] {  // XBE_INTERP_SCENERY_SPRITES=1 (a test): sprites too
+                const char* e = std::getenv("XBE_INTERP_SCENERY_SPRITES");
+                return e && std::atoi(e) != 0;
+            }();
+            const bool scenery = all_scenery && (r.peer < 0 || with_peers) && still.count(r.s->vs_handle);
             // and a few vertices are a sprite whatever its program: the corner boards' arrows, small quads, given the camera's move
             // broke again (Harry, 271295c and 40fc432)
-            if (r.c < kLeastVertices && !r.stray) continue;
+            if (r.c < kLeastVertices && !r.stray && !(scenery && with_sprites)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
