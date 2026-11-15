@@ -85,6 +85,10 @@ struct Rec {
     bool stray = false;    // its nearest copy of the step before is not where the camera's move puts it: still scenery come into view
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
+    // the constants that differ from prev's and are blended (register * 4 + component), worked out once a step for its replays:
+    // deciding it for all 768 of every draw in every replay was three quarters of a replay's time
+    std::vector<uint16_t> lerp;
+    uint32_t lerp_step = 0;
 };
 
 uint64_t KeyOf(const Rec& r) {
@@ -192,23 +196,26 @@ private:
     // (c36.y 0.4 and 1) or tint one of many alike (the crowd's c42), and halfway between two of those is neither, the texture seen
     // flickering in every in-between frame (Harry, 2026-11-14). Those are the step's own; what moves smoothly (lights, the
     // bones) changes little in a step and is not a whole sixteenth twice
-    static float Between(uint32_t k, float was, float now, float alpha) {
+    static float Between(uint32_t k, float was, float now, float alpha) { return Holds(k, was, now) ? now : was + (now - was) * alpha; }
+    // the step's own value taken, not blended
+    static bool Holds(uint32_t k, float was, float now) {
         // XBE_INTERP_CONSTANTS=0 (a test): every constant past the transform at the step's value
         static const bool constants = [] {
             const char* e = std::getenv("XBE_INTERP_CONSTANTS");
             return !e || std::atoi(e) != 0;
         }();
-        if (k >= kMatrixRegisters && !constants) return now;
-        if (k >= kMatrixRegisters && app::kGame.interp_blends_constant &&
+        if (k < kMatrixRegisters) return false;
+        if (!constants) return true;
+        if (app::kGame.interp_blends_constant &&
             !app::kGame.interp_blends_constant(int((k + Transform()) % kRegisters) - 96, was, now))
-            return now;
-        if (k >= kMatrixRegisters && was != now) {
+            return true;
+        if (was != now) {
             const float d = std::fabs(now - was);
-            if (d >= kConstantLeap && d >= 0.5f * std::max(std::fabs(was), std::fabs(now))) return now;
+            if (d >= kConstantLeap && d >= 0.5f * std::max(std::fabs(was), std::fabs(now))) return true;
             const auto cell = [](float v) { return std::fabs(v) <= 16 && v * 16 == std::floor(v * 16); };
-            if (cell(was) && cell(now)) return now;
+            if (cell(was) && cell(now)) return true;
         }
-        return was + (now - was) * alpha;
+        return false;
     }
     static void AddHeader(Rec& r, uint32_t va) {
         // a stream still bound to a buffer the title has freed (Juiced, as a race loads): its memory is gone, and no
@@ -261,6 +268,7 @@ private:
     // finds each draw's last self; false when there is nothing to blend or the camera was cut
     bool Match();
     void Replay(float alpha);
+    uint32_t steps_seen_ = 1;  // counts every step, for Rec::lerp_step
 
     std::unique_ptr<Backend> inner_;
     std::vector<Rec> now_, before_;
@@ -933,8 +941,20 @@ void Interpolating::Replay(float alpha) {
                         v = r.vsc;
                         for (uint32_t k = 0; k < kMatrixRegisters; k++) v[k][3] = p.vsc[k][3] + (r.vsc[k][3] - p.vsc[k][3]) * alpha;
                     } else {
-                        for (uint32_t k = 0; k < kRegisters; k++)
-                            for (uint32_t c = 0; c < 4; c++) v[k][c] = Between(k, p.vsc[k][c], r.vsc[k][c], alpha);
+                        if (r.lerp_step != steps_seen_) {
+                            r.lerp.clear();
+                            for (uint32_t k = 0; k < kRegisters; k++) {
+                                if (!std::memcmp(p.vsc[k].data(), r.vsc[k].data(), sizeof r.vsc[k])) continue;
+                                for (uint32_t c = 0; c < 4; c++)
+                                    if (p.vsc[k][c] != r.vsc[k][c] && !Holds(k, p.vsc[k][c], r.vsc[k][c])) r.lerp.push_back(uint16_t(k * 4 + c));
+                            }
+                            r.lerp_step = steps_seen_;
+                        }
+                        v = r.vsc;
+                        for (const uint16_t e : r.lerp) {
+                            const uint32_t k = e >> 2, c = e & 3;
+                            v[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                        }
                     }
                 } else if (r.derived && alpha != 1 && !at_step) {
                     v = r.vsc;
@@ -951,7 +971,11 @@ void Interpolating::Replay(float alpha) {
                 } else {
                     v = r.vsc;
                 }
-                for (uint32_t k = 0; k < kRegisters; k++) d.vsc[(k + Transform()) % kRegisters] = v[k];
+                {  // turned back: v[k] is the title's register Transform() + k
+                    const uint32_t t = Transform();
+                    std::memcpy(&d.vsc[t], &v[0], (kRegisters - t) * sizeof v[0]);
+                    if (t) std::memcpy(&d.vsc[0], &v[kRegisters - t], t * sizeof v[0]);
+                }
                 // a draw without a program takes the fixed function matrices: blended too, or what it draws (a car's light and
                 // shadow cast on the road, EoN) stays at the step's place while what is round it is blended, jumping back and forth
                 constexpr uint32_t kFixed[] = {2, 3, 16, 17, 18, 19, 256, 257, 258, 259};  // view, projection, texture 0-3, world 0-3
@@ -1108,6 +1132,7 @@ void Interpolating::Present(const Surface& front) {
         replays_ = 0;
     }
     now_.swap(before_);
+    steps_seen_++;
     before_count_ = count_;
     count_ = 0;
     kept_bytes_.clear();
