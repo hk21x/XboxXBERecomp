@@ -762,19 +762,28 @@ bool Interpolating::Match() {
         // scenery comes into view a piece at a time among many that are matched. A whole car losing its match for a step comes all at
         // once, and its program has as many new as matched: not scenery
         std::unordered_map<uint32_t, int> fresh;
+        static const bool all_scenery = [] {  // XBE_INTERP_SCENERY=0: only scenery the checks below let through, as before
+            const char* e = std::getenv("XBE_INTERP_SCENERY");
+            return !e || std::atoi(e) != 0;
+        }();
         for (size_t i = 0; i < count_; i++)
             if (now_[i].kind == Rec::Draw && now_[i].prev < 0 && !now_[i].derived) fresh[now_[i].s->vs_handle]++;
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
-            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.derived || (r.c < kLeastVertices && !r.stray) || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.derived || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            // of a program whose matched draws go with the camera (still scenery), any piece without a self: left at the step's
+            // place, ten a step of them off the camera's by 1% of the screen or more near the race, a building slid away from the
+            // road and back (Harry's clip of a1979db; all of them given the camera's move, XBE_INTERP_CAMERA_ONLY, it was gone)
+            const bool scenery = all_scenery && still.count(r.s->vs_handle);
+            if (!scenery && r.c < kLeastVertices && !r.stray) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             const auto seen = program.find(r.s->vs_handle);
-            if (seen == program.end() || seen->second[1] * 2 <= seen->second[0] || seen->second[1] < fresh[r.s->vs_handle] * kFreshShare) continue;
+            if (!scenery && (seen == program.end() || seen->second[1] * 2 <= seen->second[0] || seen->second[1] < fresh[r.s->vs_handle] * kFreshShare)) continue;
             const Rec* near = nullptr;
             float nearest = 1e30f;
-            for (size_t j = 0; j < count_; j++) {
+            for (size_t j = 0; !scenery && j < count_; j++) {
                 const Rec& o = now_[j];
                 if (o.kind != Rec::Draw || o.prev < 0 || o.s->vs_handle != r.s->vs_handle || o.s->rt.data != r.s->rt.data) continue;
                 float distance = 0;
@@ -783,7 +792,7 @@ bool Interpolating::Match() {
                 if (distance < nearest) nearest = distance, near = &o;
             }
             double d[4][4];
-            if (!near || !move_of(*near, d) || !same_move(d, camera->d)) continue;
+            if (!scenery && (!near || !move_of(*near, d) || !same_move(d, camera->d))) continue;
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     double t = 0;
