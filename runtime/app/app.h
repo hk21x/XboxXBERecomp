@@ -283,6 +283,8 @@ struct GameInfo {
     // a fixed-function stage with no texture reads (0,0,0,0) as its texture, as the hardware's stage with texture mode NONE
     // does, not white: True Crime clears its shadow map's border with untextured lines that select the texture
     bool unbound_texture_zero = false;
+    // the game's own dead zone on each stick axis, as a part of full throw: the stick sensitivity scales the throw past it
+    float stick_deadzone = 0;
 };
 extern const GameInfo kGame;
 
