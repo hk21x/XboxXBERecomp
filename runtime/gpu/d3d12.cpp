@@ -1322,32 +1322,40 @@ D3D12Backend::GpuStamp* D3D12Backend::StampFor() {
     if (!diag::Perf() || stamp_state_ < 0) return nullptr;
     if (stamp_state_ == 0) {
         stamp_state_ = -1;
+        auto fail = [](const char* what, HRESULT hr) {
+            LOGR("perf: no GPU timing: %s failed (%08X)", what, unsigned(hr));
+            return nullptr;
+        };
         UINT64 freq = 0;
-        if (FAILED(queue_->GetTimestampFrequency(&freq)) || !freq) return nullptr;
+        if (HRESULT hr = queue_->GetTimestampFrequency(&freq); FAILED(hr) || !freq) return fail("the timestamp frequency", hr);
         stamp_freq_ = double(freq);
         D3D12_QUERY_HEAP_DESC qd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kStamps * 2, 0};
         D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
         D3D12_RESOURCE_DESC bd = BufferDesc(uint64_t(kStamps) * 2 * sizeof(uint64_t));
         void* p = nullptr;
-        if (FAILED(dev_->CreateQueryHeap(&qd, IID_PPV_ARGS(&stamp_heap_))) ||
-            FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                 IID_PPV_ARGS(&stamp_rb_))) ||
-            FAILED(stamp_rb_->Map(0, nullptr, &p)))
-            return nullptr;
+        if (HRESULT hr = dev_->CreateQueryHeap(&qd, IID_PPV_ARGS(&stamp_heap_)); FAILED(hr)) return fail("the query heap", hr);
+        if (HRESULT hr = dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                       IID_PPV_ARGS(&stamp_rb_));
+            FAILED(hr))
+            return fail("the read-back buffer", hr);
+        if (HRESULT hr = stamp_rb_->Map(0, nullptr, &p); FAILED(hr)) return fail("mapping the read-back buffer", hr);
         stamp_map_ = static_cast<const uint64_t*>(p);
         for (int i = 0; i < kStamps; i++) {
             GpuStamp& s = stamps_[i];
-            if (FAILED(dev_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc))) ||
-                FAILED(dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(), nullptr, IID_PPV_ARGS(&s.before))))
-                return nullptr;
+            if (HRESULT hr = dev_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc)); FAILED(hr))
+                return fail("an allocator", hr);
+            if (HRESULT hr = dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(), nullptr, IID_PPV_ARGS(&s.before));
+                FAILED(hr))
+                return fail("a list", hr);
             s.before->EndQuery(stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, UINT(i * 2));
-            s.before->Close();
-            if (FAILED(dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(), nullptr, IID_PPV_ARGS(&s.after))))
-                return nullptr;
+            if (HRESULT hr = s.before->Close(); FAILED(hr)) return fail("closing a list", hr);
+            if (HRESULT hr = dev_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(), nullptr, IID_PPV_ARGS(&s.after));
+                FAILED(hr))
+                return fail("a second list", hr);
             s.after->EndQuery(stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, UINT(i * 2 + 1));
             s.after->ResolveQueryData(stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, UINT(i * 2), 2, stamp_rb_.Get(),
                                       uint64_t(i) * 2 * sizeof(uint64_t));
-            s.after->Close();
+            if (HRESULT hr = s.after->Close(); FAILED(hr)) return fail("closing a second list", hr);
         }
         stamp_state_ = 1;
         g_stamp_on = true;
