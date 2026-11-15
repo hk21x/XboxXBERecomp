@@ -697,6 +697,31 @@ bool Interpolating::Match() {
     if (camera_only == 2)
         for (size_t i = 0; i < count_; i++)
             if (now_[i].kind == Rec::Draw && !flat(now_[i].vsc) && !still.count(now_[i].s->vs_handle)) moving.insert(matrix_hash(now_[i]));
+    // and one whose own match moved as a moving program's draw did, not as the camera: a light or glow on a car drawn with a
+    // matrix of its own (the reversing lights, the neon under the cars; given the camera's move they slid off the car and back
+    // every step, Harry's F12 bursts of b1e011b). It takes that draw's move. XBE_INTERP_RIDERS=0 leaves them the camera's
+    static const bool riders_on = [] {
+        const char* e = std::getenv("XBE_INTERP_RIDERS");
+        return !e || std::atoi(e) != 0;
+    }();
+    struct CarMove {
+        uint32_t rt;
+        double d[4][4];
+    };
+    std::vector<CarMove> car_moves;
+    if (camera_only == 2 && riders_on)
+        for (size_t i = 0; i < count_ && car_moves.size() < 64; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc) || still.count(r.s->vs_handle)) continue;
+            CarMove m{r.s->rt.data, {}};
+            if (!move_of(r, m.d)) continue;
+            const Move* camera = camera_of(m.rt);
+            if (camera && same_move(m.d, camera->d)) continue;
+            bool known = false;
+            for (const CarMove& k : car_moves) known |= k.rt == m.rt && same_move(m.d, k.d);
+            if (!known) car_moves.push_back(m);
+        }
+    uint32_t riders = 0;
     if (camera_only)
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
@@ -705,14 +730,32 @@ bool Interpolating::Match() {
             if (camera_only == 3 && still.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
+            const double (*d)[4] = camera->d;
+            double own[4][4];
+            if (!car_moves.empty() && r.prev >= 0 && !r.turning && move_of(r, own) && !same_move(own, camera->d))
+                for (const CarMove& m : car_moves)
+                    if (m.rt == r.s->rt.data && same_move(own, m.d)) {
+                        d = m.d;
+                        riders++;
+                        break;
+                    }
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     double t = 0;
-                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
                 }
             r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
         }
+    {
+        static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint32_t sum = 0, steps = 0;
+        sum += riders;
+        if (log && ++steps % 600 == 0) {
+            LOGR("gpu: in-between frames: %u still programs' draws took a car's move in 600 steps", sum);
+            sum = 0;
+        }
+    }
     // a still scenery program's draw whose own move puts its in-between place away from where the camera's move does is matched
     // to the wrong self (one of a street's repeated fronts): blended from it, a building slid away from the road and back
     // every step on a corner (Harry's clip of a1979db, 2026-11-15; headless, one in ten of those off the camera's move by 1%
