@@ -631,11 +631,24 @@ bool Builder::BuildPackage(std::string& error) {
                 std::string name = Lower(U8(e.path().filename()));
                 if (name == "logs" || (name.size() > 5 && name.compare(name.size() - 5, 5, ".toml") == 0)) continue;
                 fs::path to = PlayDir() / e.path().filename();
+                // Windows: a folder just built in (its compiler and work files) or the one it replaces can be held for
+                // a moment after the build's processes end (an antivirus scan, the search indexer), and the move was
+                // refused once and for all ("Could not put compiler in place ... Access is denied", an EoN 1.3.2
+                // update). So the old one's removal and the move are tried again for up to 30 s, each try logged
                 std::error_code move;
-                if (e.is_directory(move)) fs::remove_all(to, move);
-                fs::rename(e.path(), to, move);
+                const bool dir = e.is_directory(move);
+                for (int attempt = 1;; attempt++) {
+                    move.clear();
+                    if (dir && fs::exists(to, move)) fs::remove_all(to, move);
+                    if (!move) fs::rename(e.path(), to, move);
+                    if (!move) break;
+                    Log("replace: " + U8(e.path().filename()) + ", try " + std::to_string(attempt) + ": " + move.message());
+                    if (attempt >= 30 || cancel) break;
+                    Say("Putting the new version in place", "Waiting for Windows to let go of " + U8(e.path().filename()), -1);
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
                 if (move) {
-                    error = "Could not put " + U8(e.path().filename()) + " in place (is the game still running?): " + move.message();
+                    error = "Could not put " + U8(e.path().filename()) + " in place (is the game still running, or an antivirus scanning it?): " + move.message() + ". Press Update again to retry; see launcher.log";
                     return false;
                 }
             }
