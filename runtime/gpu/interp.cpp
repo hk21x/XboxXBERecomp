@@ -775,7 +775,9 @@ bool Interpolating::Match() {
             // of a program whose matched draws go with the camera (still scenery), any piece without a self: left at the step's
             // place, ten a step of them off the camera's by 1% of the screen or more near the race, a building slid away from the
             // road and back (Harry's clip of a1979db; all of them given the camera's move, XBE_INTERP_CAMERA_ONLY, it was gone)
-            const bool scenery = all_scenery && still.count(r.s->vs_handle);
+            // not one following a matched draw of its own matrix (a peer): a second pass over the same surface (the corner boards'
+            // arrows over the board) given the camera's move instead lay a little off the board's own blend and fought with it
+            const bool scenery = all_scenery && r.peer < 0 && still.count(r.s->vs_handle);
             if (!scenery && r.c < kLeastVertices && !r.stray) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
