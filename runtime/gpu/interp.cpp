@@ -617,16 +617,19 @@ bool Interpolating::Match() {
     }
     // XBE_INTERP_CAMERA_ONLY=1 (a test): every draw of the 3D takes its target's camera move, none its own match; cars and
     // what turns go wrong, but whatever flickers with matching and blending of the draws' own matrices does not
-    static const bool camera_only = [] {
+    // 2: only the draws of still programs (most of whose matched draws go with the camera); 3: only the others
+    static const int camera_only = [] {
         const char* e = std::getenv("XBE_INTERP_CAMERA_ONLY");
-        const bool on = e && std::atoi(e) != 0;
-        if (on) LOGR("gpu: in-between frames: every draw takes its target's camera move (XBE_INTERP_CAMERA_ONLY)");
+        const int on = e ? std::atoi(e) : 0;
+        if (on) LOGR("gpu: in-between frames: draws take their target's camera move (XBE_INTERP_CAMERA_ONLY=%d)", on);
         return on;
     }();
     if (camera_only)
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             if (r.kind != Rec::Draw || flat(r.vsc)) continue;
+            if (camera_only == 2 && !still.count(r.s->vs_handle)) continue;
+            if (camera_only == 3 && still.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             for (int a = 0; a < 4; a++)
