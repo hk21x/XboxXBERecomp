@@ -1292,7 +1292,12 @@ void Interpolating::Replay(float alpha) {
     FindStillTargets();
     for (size_t i = 0; i < count_; i++) {
         Rec& r = now_[i];
-        if (skip_[i]) continue;
+        if (skip_[i]) {
+            if (diag_table && r.kind == Rec::Draw)
+                LOGR("gpu: in-between table: %d rec %zu skipped vs %08X count %u tex %08X rt %08X", diag_replay, i, r.s->vs_handle, r.c,
+                     r.s->textures[0], r.s->rt.header);
+            continue;
+        }
         for (const Rec::Header& h : r.headers) std::memcpy(kernel::HostPtr(h.va), h.bytes, HeaderSize(h.va));
         switch (r.kind) {
             case Rec::Clear:
@@ -1600,7 +1605,23 @@ void Interpolating::Present(const Surface& front) {
             if (on) LOGR("gpu: in-between frames: a step's frames closer together when they would not all fit");
             return on;
         }();
-        if (fill && frames > 1) {
+        // XBE_INTERP_EVEN=1 (a test): only as many frames as fit at even spacing along the step. The title's own drawing takes
+        // most of a step on a slow machine (Harry's of 2aca20b: 12 of 18 ms in the race's opening fly-by), and the frames
+        // that fit after it came 3 ms apart, then the picture held 15 ms and jumped: thin things (the crowd on the stadium
+        // steps) were seen twice as the eye followed the pan, and flickered (his video, 1 to 2 s)
+        static const bool even = [] {
+            const char* e = std::getenv("XBE_INTERP_EVEN");
+            const bool on = e && *e == '1';
+            if (on) LOGR("gpu: in-between frames: only as many as fit evenly spaced (XBE_INTERP_EVEN=1)");
+            return on;
+        }();
+        int even_frames = frames;
+        if (even && frames > 1) {
+            const double room = span + replay_seconds_ - frame_seconds_ - kOverrun;
+            while (even_frames > 1 && (even_frames - 1) * (usual / even_frames) > room) even_frames--;
+            spacing = usual / even_frames;
+        }
+        if (fill && frames > 1 && !even) {
             const double room = span + replay_seconds_ - frame_seconds_ - kOverrun;  // the last frame begun by then
             if (room > 0) spacing = std::min(spacing, std::max(room / (frames - 1), frame_seconds_));
         }
@@ -1627,8 +1648,8 @@ void Interpolating::Present(const Surface& front) {
             overran_ = false;
             sum_span_ += span;
             sum_frame_ += frame_seconds_;
-            multi_ += frames > 1;
-            for (int i = ahead ? 1 : 0; i < frames; i++) {
+            multi_ += even_frames > 1;
+            for (int i = ahead ? 1 : 0; i < even_frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
                 if ((i || ahead) && at + frame_seconds_ >= span + replay_seconds_) {
