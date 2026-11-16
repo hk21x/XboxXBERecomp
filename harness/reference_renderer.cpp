@@ -515,6 +515,7 @@ struct Material {
 
 struct Trace {
     bool on = false;  // the fragment at the TRACE pixel
+    uint32_t draw = 0;  // its draw's number in the frame (REF_DRAWLOG's)
 };
 Trace g_trace;
 
@@ -783,6 +784,7 @@ struct Combiners {
                 LOGI("  dbg st%u r0 %.3f %.3f %.3f %.3f r1 %.3f %.3f %.3f %.3f", st, r0[0], r0[1], r0[2], r0[3], r1[0], r1[1], r1[2], r1[3]);
         }
         if (g_trace.on) {
+            LOGI("  dbg draw %u", g_trace.draw);
             LOGI("  dbg T0 %.3f %.3f %.3f %.3f T1 %.3f %.3f %.3f %.3f T2 %.3f %.3f %.3f %.3f T3 %.3f %.3f %.3f %.3f", t[0][0], t[0][1], t[0][2],
                  t[0][3], t[1][0], t[1][1], t[1][2], t[1][3], t[2][0], t[2][1], t[2][2], t[2][3], t[3][0], t[3][1], t[3][2], t[3][3]);
             LOGI("  dbg v0 %.3f %.3f %.3f %.3f v1 %.3f %.3f %.3f %.3f r0 %.3f %.3f %.3f %.3f r1 %.3f %.3f %.3f %.3f", v0[0], v0[1], v0[2],
@@ -1621,6 +1623,7 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                     frag.fog[3] = Sat(attr[kFog][0]);
                     for (int t = 0; t < 4; t++) frag.tc[t] = attr[kT0 + t];
                     g_trace.on = watched && x == probes.trace.x && y == probes.trace.y;
+                    g_trace.draw = draw;
                     Vec col;
                     bool keep = mat.key.programmable ? Combiners{mat, frag}.Shade(col) : ShadeStages(mat, frag, col);
                     if (!keep) {

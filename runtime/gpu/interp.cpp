@@ -92,6 +92,7 @@ struct Rec {
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
     bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
+    int own = -1;  // a draw given the camera's move: its own match, whose constants past the transform it still blends from
     // the constants that differ from prev's and are blended (register * 4 + component), worked out once a step for its replays:
     // deciding it for all 768 of every draw in every replay was three quarters of a replay's time
     std::vector<uint16_t> lerp;
@@ -288,6 +289,7 @@ private:
         r.turning = false;
         r.derived = false;
         r.rider = false;
+        r.own = -1;
         r.stray = false;
         r.peer = -1;
         r.headers.clear();
@@ -806,8 +808,16 @@ bool Interpolating::Match() {
                     for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
                 }
-            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+            // its constants past the transform from its own match still: the road under a car draws the neon's light with
+            // the car's place in them (taken at the step's value, the light ran a step ahead of the blended car and lit
+            // the road under it only at the step's end; Harry's burst of 4a240df). Not a rider: its match was the wrong one
+            static const bool own_constants = [] {  // XBE_INTERP_OWN_CONSTANTS=0 (a test): the step's own
+                const char* e = std::getenv("XBE_INTERP_OWN_CONSTANTS");
+                return !e || std::atoi(e) != 0;
+            }();
             r.rider = d != camera->d;
+            r.own = own_constants && !r.rider && !r.turning ? r.prev : -1;
+            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
         }
     {
         static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
@@ -1118,6 +1128,22 @@ void Interpolating::Replay(float alpha) {
                     }
                 } else if (r.derived && alpha != 1 && !at_step) {
                     v = r.vsc;
+                    if (r.own >= 0) {
+                        const Rec& p = before_[size_t(r.own)];
+                        if (r.lerp_step != steps_seen_) {
+                            r.lerp.clear();
+                            for (uint32_t k = kMatrixRegisters; k < kRegisters; k++) {
+                                if (!std::memcmp(p.vsc[k].data(), r.vsc[k].data(), sizeof r.vsc[k])) continue;
+                                for (uint32_t c = 0; c < 4; c++)
+                                    if (p.vsc[k][c] != r.vsc[k][c] && !Holds(k, p.vsc[k][c], r.vsc[k][c])) r.lerp.push_back(uint16_t(k * 4 + c));
+                            }
+                            r.lerp_step = steps_seen_;
+                        }
+                        for (const uint16_t e : r.lerp) {
+                            const uint32_t k = e >> 2, c = e & 3;
+                            v[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                        }
+                    }
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
                         for (uint32_t c = 0; c < 4; c++) v[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
                 } else if (r.peer >= 0 && alpha != 1 && !at_step) {
