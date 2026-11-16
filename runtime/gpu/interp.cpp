@@ -92,6 +92,7 @@ struct Rec {
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
     bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
+    uint8_t why = 0;  // the in-between table: what made it derived (1 the camera's move, 2 laid afresh on a car, 3 off the camera, 4 come into view)
     int own = -1;  // a draw given the camera's move: its own match, whose constants past the transform it still blends from
     // the constants that differ from prev's and are blended (register * 4 + component), worked out once a step for its replays:
     // deciding it for all 768 of every draw in every replay was three quarters of a replay's time
@@ -288,6 +289,7 @@ private:
         r.prev = -1;
         r.turning = false;
         r.derived = false;
+        r.why = 0;
         r.rider = false;
         r.own = -1;
         r.stray = false;
@@ -737,6 +739,46 @@ bool Interpolating::Match() {
             if (!Invert(n, m.inv) || !move_of(r, m.d)) continue;
             car_moves.push_back(m);
         }
+    // the move of the car a draw's matrix sits on, rigid and within a car's length of a car draw's origin (as a rider's), or
+    // none: GameInfo::interp_peers_on_cars keeps such a draw with its car where it would otherwise be given the camera's move or
+    // left at the step's place (Juiced's lit brake lights, now and then without a match or taken for scenery matched wrong)
+    static const bool peers_on_cars = [] {  // XBE_INTERP_PEERS_ON_CARS=0 or 1 overrides
+        const char* e = std::getenv("XBE_INTERP_PEERS_ON_CARS");
+        return e && *e ? std::atoi(e) != 0 : app::kGame.interp_peers_on_cars;
+    }();
+    const auto car_move_of = [&](const Rec& r) -> const double(*)[4] {
+        if (!peers_on_cars || r.c > kOnCarMost) return nullptr;
+        const double(*found)[4] = nullptr;
+        double best = kOnCar;
+        for (const CarMove& m : car_moves) {
+            if (m.rt != r.s->rt.data) continue;
+            double l[4][4];
+            for (int x = 0; x < 4; x++)
+                for (int y = 0; y < 4; y++) {
+                    l[x][y] = 0;
+                    for (int z = 0; z < 4; z++) l[x][y] += m.inv[x][z] * r.vsc[size_t(z)][size_t(y)];
+                }
+            if (std::fabs(l[3][0]) + std::fabs(l[3][1]) + std::fabs(l[3][2]) + std::fabs(l[3][3] - 1) > 0.01) continue;
+            bool rigid = true;
+            for (int y = 0; y < 3 && rigid; y++) {
+                const double len = std::sqrt(l[0][y] * l[0][y] + l[1][y] * l[1][y] + l[2][y] * l[2][y]);
+                rigid = len > 0.5 && len < 2;
+            }
+            const double away = std::sqrt(l[0][3] * l[0][3] + l[1][3] * l[1][3] + l[2][3] * l[2][3]);
+            if (rigid && away < best) best = away, found = m.d;
+        }
+        return found;
+    };
+    const auto ride = [](Rec& r, const double (*d)[4]) {
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) {
+                double t = 0;
+                for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                r.was[a][b] = float(t);
+            }
+        r.rider = true, r.own = -1;
+        r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+    };
     uint32_t riders = 0;
     if (camera_only)
         for (size_t i = 0; i < count_; i++) {
@@ -821,7 +863,7 @@ bool Interpolating::Match() {
             }();
             r.rider = d != camera->d;
             r.own = own_constants && !r.rider && !r.turning ? r.prev : -1;
-            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true, r.why = 1;
         }
     // GameInfo::interp_rebuilt_on_car: a small draw whose matrix is the camera's alone and whose vertices the title laid
     // afresh this step (no match, or its match's differ) where a car is: Juiced's neon and shadow under the cars, put on the
@@ -917,7 +959,7 @@ bool Interpolating::Match() {
                     r.was[a][b] = float(t);
                 }
             r.rider = true, r.own = -1;
-            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true, r.why = 2;
             rebuilt++;
         }
     }
@@ -956,6 +998,9 @@ bool Interpolating::Match() {
             const Move* camera = camera_of(r.s->rt.data);
             double d[4][4];
             if (!camera || camera->votes < kLeastVotes || !move_of(r, d) || same_move(d, camera->d)) continue;
+            // not one on a car: its own move is the car's (a brake light, drawn by the lamps' program, was taken for scenery
+            // matched wrong now and then and given the camera's move)
+            if (car_move_of(r)) continue;
             // its place halfway, on the screen in its own widths (x / w over the projection's scale), both ways
             double was[4][4];
             for (int a = 0; a < 4; a++)
@@ -972,7 +1017,7 @@ bool Interpolating::Match() {
             if (!(std::fabs(ow) > 1 && std::fabs(cw) > 1 && sx > 0) || std::fabs(ox / ow - cx / cw) / sx <= kOffCamera) continue;
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) r.was[a][b] = float(was[a][b]);
-            r.prev = -1, r.derived = true;
+            r.prev = -1, r.derived = true, r.why = 3;
             refit++;
         }
     {
@@ -1074,6 +1119,14 @@ bool Interpolating::Match() {
             Rec& r = now_[i];
             // a few vertices are a sprite, a plate or a car's shadow, on the car and not the street, whatever program draws them
             if (!pieces || r.kind != Rec::Draw || r.prev >= 0 || r.derived || flat(r.vsc) || spinning.count(r.s->vs_handle)) continue;
+            // on a car: the car's move. A brake light lit this step, without a self (or one only now and then), drawn by the
+            // street lamps' program: given the camera's move as scenery, or left at the step's place, it was inside the blended
+            // car's body in the step's first in-between frames (Harry's video of b7b94ea, 17 to 19 s; XBE_INTERP_WATCH)
+            if (const auto d = car_move_of(r)) {
+                ride(r, d);
+                r.why = 5;
+                continue;
+            }
             // of a program whose matched draws go with the camera (still scenery), any piece without a self: left at the step's
             // place, ten a step of them off the camera's by 1% of the screen or more near the race, a building slid away from the
             // road and back (Harry's clip of a1979db; all of them given the camera's move, XBE_INTERP_CAMERA_ONLY, it was gone)
@@ -1113,13 +1166,35 @@ bool Interpolating::Match() {
                     for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
                 }
-            r.derived = true;
+            r.derived = true, r.why = 4;
         }
     }
     camera_targets_.clear();
     for (const Move& m : moves)
         if (m.votes >= kLeastVotes) camera_targets_.insert(m.rt & 0x0FFFFFFF);
     LogJumps();
+    // XBE_INTERP_WATCH=<program handle, hex>: each step, how that program's small draws are to be blended (the table's names,
+    // the why number, the peer and its own move against the camera's), without the reference renderer: for what goes wrong
+    // only now and then (a brake light dark in some steps' in-between frames)
+    static const uint32_t watch = [] {
+        const char* e = std::getenv("XBE_INTERP_WATCH");
+        return e && *e ? uint32_t(std::strtoul(e, nullptr, 16)) : 0u;
+    }();
+    if (watch)
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.s->vs_handle != watch || r.c > kOnCarMost) continue;
+            int peer_cam = -1;
+            if (r.peer >= 0) {
+                const Rec& q = now_[size_t(r.peer)];
+                const Move* camera = camera_of(q.s->rt.data);
+                double pd[4][4];
+                if (camera && q.prev >= 0 && move_of(q, pd)) peer_cam = same_move(pd, camera->d) ? 1 : 0;
+            }
+            LOGR("gpu: in-between watch: step %u rec %zu count %u tex %08X %s why %u peer %d (camera's move %d)", steps_seen_, i, r.c,
+                 r.s->textures[0], r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived") : r.peer >= 0 ? "peer" : "none",
+                 unsigned(r.why), r.peer, peer_cam);
+        }
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
@@ -1210,9 +1285,9 @@ void Interpolating::Replay(float alpha) {
                 }
                 const bool at_step = !at_step_matrix.empty() && at_step_matrix.count(matrix_of(r));
                 if (diag_table)
-                    LOGR("gpu: in-between table: %d rec %zu %s vs %08X count %u tex %08X %08X %08X %08X rt %08X", diag_replay, i,
+                    LOGR("gpu: in-between table: %d rec %zu %s%u vs %08X count %u tex %08X %08X %08X %08X rt %08X peer %d", diag_replay, i,
                          alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived") : r.peer >= 0 ? "peer" : "none",
-                         r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header);
+                         unsigned(r.why), r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header, r.peer);
                 const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
                 Rec::Constants v;  // turned round as kept (Rec::vsc), put back into d.vsc below
                 if (blend) {

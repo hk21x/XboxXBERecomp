@@ -276,6 +276,11 @@ struct GameInfo {
     // place each step, were drawn ahead of the blended car and slid back every step (gpu/interp.cpp). XBE_INTERP_REBUILT=0
     // or 1 overrides
     bool interp_rebuilt_on_car = false;
+    // a draw without a match following one of its matrix (a peer) that moves its own way, not the camera's, stays with that
+    // peer instead of taking the camera's move as scenery come into view does: Juiced's brake lights, lit as the brakes come on,
+    // are drawn by the street lamps' program and were left behind in the car's body (gpu/interp.cpp).
+    // XBE_INTERP_PEERS_ON_CARS=0 or 1 overrides
+    bool interp_peers_on_cars = false;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
