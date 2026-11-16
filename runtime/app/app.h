@@ -281,6 +281,11 @@ struct GameInfo {
     // are drawn by the street lamps' program and were left behind in the car's body (gpu/interp.cpp).
     // XBE_INTERP_PEERS_ON_CARS=0 or 1 overrides
     bool interp_peers_on_cars = false;
+    // a draw given the camera's move without a match of its own blends its constants past the transform that hold the same
+    // values as a matched draw's of its target (the camera's view and projection) as that draw does: Juiced's crowd, placed
+    // through those and not the transform, stood at the step's place in every in-between frame while the steps behind
+    // them moved (gpu/interp.cpp). XBE_INTERP_SHARED=0 or 1 overrides
+    bool interp_shared_constants = false;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)

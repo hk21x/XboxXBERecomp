@@ -94,6 +94,7 @@ struct Rec {
     bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
     uint8_t why = 0;  // the in-between table: what made it derived (1 the camera's move, 2 laid afresh on a car, 3 off the camera, 4 come into view)
     int own = -1;  // a draw given the camera's move: its own match, whose constants past the transform it still blends from
+    int share = -1;  // without one: a draw of its target that has one, whose blend it takes for the constants they share
     // the constants that differ from prev's and are blended (register * 4 + component), worked out once a step for its replays:
     // deciding it for all 768 of every draw in every replay was three quarters of a replay's time
     std::vector<uint16_t> lerp;
@@ -292,6 +293,7 @@ private:
         r.why = 0;
         r.rider = false;
         r.own = -1;
+        r.share = -1;
         r.stray = false;
         r.peer = -1;
         r.headers.clear();
@@ -1188,6 +1190,33 @@ bool Interpolating::Match() {
     for (const Move& m : moves)
         if (m.votes >= kLeastVotes) camera_targets_.insert(m.rt & 0x0FFFFFFF);
     LogJumps();
+    // GameInfo::interp_shared_constants: a draw given the camera's move with no match of its own takes, for each constant past
+    // the transform that holds the same value as a matched one's of its target, that draw's blend (Rec::share; Replay)
+    static const bool shared_constants = [] {
+        const char* e = std::getenv("XBE_INTERP_SHARED");
+        return e && *e ? std::atoi(e) != 0 : app::kGame.interp_shared_constants;
+    }();
+    if (shared_constants) {
+        std::unordered_map<uint32_t, int> sharer;  // a target's first draw given the camera's move that kept its own match
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind == Rec::Draw && r.derived && !r.rider && r.own >= 0 && r.why == 1) sharer.emplace(r.s->rt.data, int(i));
+        }
+        uint32_t shared = 0;
+        for (size_t i = 0; i < count_ && !sharer.empty(); i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || !r.derived || r.rider || r.own >= 0) continue;
+            if (auto it = sharer.find(r.s->rt.data); it != sharer.end()) r.share = it->second, shared++;
+        }
+        static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint64_t sum = 0, steps = 0;
+        sum += shared;
+        if (log && ++steps % 600 == 0) {
+            LOGR("gpu: in-between frames: %llu draws without a match of their own blended the constants they share with one in 600 steps",
+                 (unsigned long long)sum);
+            sum = 0;
+        }
+    }
     // XBE_INTERP_WATCH=<program handle, hex>: each step, how that program's small draws are to be blended (the table's names,
     // the why number, the peer and its own move against the camera's), without the reference renderer: for what goes wrong
     // only now and then (a brake light dark in some steps' in-between frames)
@@ -1320,9 +1349,9 @@ void Interpolating::Replay(float alpha) {
                 }
                 const bool at_step = !at_step_matrix.empty() && at_step_matrix.count(matrix_of(r));
                 if (diag_table)
-                    LOGR("gpu: in-between table: %d rec %zu %s%u vs %08X count %u tex %08X %08X %08X %08X rt %08X peer %d", diag_replay, i,
+                    LOGR("gpu: in-between table: %d rec %zu %s%u vs %08X count %u tex %08X %08X %08X %08X rt %08X peer %d share %d", diag_replay, i,
                          alpha == 1 ? "step" : at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived") : r.peer >= 0 ? "peer" : "none",
-                         unsigned(r.why), r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header, r.peer);
+                         unsigned(r.why), r.s->vs_handle, r.c, r.s->textures[0], r.s->textures[1], r.s->textures[2], r.s->textures[3], r.s->rt.header, r.peer, r.share);
                 const bool blend = r.prev >= 0 && alpha != 1 && !at_step;
                 Rec::Constants v;  // turned round as kept (Rec::vsc), put back into d.vsc below
                 if (blend) {
@@ -1349,20 +1378,23 @@ void Interpolating::Replay(float alpha) {
                     }
                 } else if (r.derived && alpha != 1 && !at_step) {
                     v = r.vsc;
-                    if (r.own >= 0) {
-                        const Rec& p = before_[size_t(r.own)];
+                    // its own match's constants, or those it shares with a draw of its target that has one (Rec::share)
+                    const Rec* q = r.own >= 0 ? &r : r.share >= 0 ? &now_[size_t(r.share)] : nullptr;
+                    if (q) {
+                        const Rec& p = before_[size_t(q->own)];
                         if (r.lerp_step != steps_seen_) {
                             r.lerp.clear();
                             for (uint32_t k = kMatrixRegisters; k < kRegisters; k++) {
-                                if (!std::memcmp(p.vsc[k].data(), r.vsc[k].data(), sizeof r.vsc[k])) continue;
+                                if (q != &r && std::memcmp(q->vsc[k].data(), r.vsc[k].data(), sizeof r.vsc[k])) continue;
+                                if (!std::memcmp(p.vsc[k].data(), q->vsc[k].data(), sizeof r.vsc[k])) continue;
                                 for (uint32_t c = 0; c < 4; c++)
-                                    if (p.vsc[k][c] != r.vsc[k][c] && !Holds(k, p.vsc[k][c], r.vsc[k][c])) r.lerp.push_back(uint16_t(k * 4 + c));
+                                    if (p.vsc[k][c] != q->vsc[k][c] && !Holds(k, p.vsc[k][c], q->vsc[k][c])) r.lerp.push_back(uint16_t(k * 4 + c));
                             }
                             r.lerp_step = steps_seen_;
                         }
                         for (const uint16_t e : r.lerp) {
                             const uint32_t k = e >> 2, c = e & 3;
-                            v[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                            v[k][c] = p.vsc[k][c] + (q->vsc[k][c] - p.vsc[k][c]) * alpha;
                         }
                     }
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
