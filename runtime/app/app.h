@@ -271,6 +271,11 @@ struct GameInfo {
     // step: Juiced's own drawing takes 4 ms of the 16.7, and at a cap of 240 the 4th frame never fit (180, never 240; with it
     // 230 to 240, Harry 2026-11-15). XBE_INTERP_FILL=0 or 1 overrides
     bool interp_fill_frames = false;
+    // a small draw whose vertices the title builds afresh each step in the world (its matrix only the camera's) and whose
+    // vertices lie on a car takes that car's move: Juiced's neon and shadow under the cars, laid on the road at the car's new
+    // place each step, were drawn ahead of the blended car and slid back every step (gpu/interp.cpp). XBE_INTERP_REBUILT=0
+    // or 1 overrides
+    bool interp_rebuilt_on_car = false;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)

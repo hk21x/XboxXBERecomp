@@ -823,6 +823,113 @@ bool Interpolating::Match() {
             r.own = own_constants && !r.rider && !r.turning ? r.prev : -1;
             r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
         }
+    // GameInfo::interp_rebuilt_on_car: a small draw whose matrix is the camera's alone and whose vertices the title laid
+    // afresh this step (no match, or its match's differ) where a car is: Juiced's neon and shadow under the cars, put on the
+    // road at the car's new place each step. Given its own match's or the camera's move it was drawn where the car would
+    // be at the step's end, ahead of the blended car, and slid back every step (headless probes, 2026-11-16: its box
+    // grew from rows 541-714 to 565-878 over a step). Its vertices' middle, taken onto each car, finds the car; it takes
+    // that car's move, as a rider does
+    static const bool rebuilt_on = [] {
+        const char* e = std::getenv("XBE_INTERP_REBUILT");
+        return e && *e ? std::atoi(e) != 0 : app::kGame.interp_rebuilt_on_car;
+    }();
+    uint32_t rebuilt = 0;
+    if (rebuilt_on && !car_moves.empty()) {
+        // the middle of the vertices a draw reads, from its stream as kept this step; false when its place is not a plain
+        // float position (v0 as FLOAT3 or FLOAT4 of a declared program)
+        const auto middle = [&](const Rec& r, double p[3]) {
+            const State& s = *r.s;
+            if (!(s.vs_handle & 1) || !s.vs || s.input_active) return false;
+            const VertexShader::Input& in = s.vs->inputs[0];
+            if (in.stream < 0 || (in.type != 0x32 && in.type != 0x42)) return false;  // D3DVSDT_FLOAT3, D3DVSDT_FLOAT4
+            const uint32_t stride = s.streams[size_t(in.stream)].stride;
+            const Rec::Kept* k = nullptr;
+            for (const Rec::Kept& kk : r.kept)
+                if (kk.stream == uint32_t(in.stream)) k = &kk;
+            if (!k || !stride || size_t(k->offset) + k->bytes > kept_bytes_.size()) return false;
+            const uint8_t* base = kept_bytes_.data() + k->offset;
+            double sum[3] = {};
+            uint32_t n = 0;
+            const auto add = [&](uint32_t v) {
+                const size_t o = size_t(v) * stride + in.offset;
+                if (o + 12 > k->bytes) return;
+                float f[3];
+                std::memcpy(f, base + o, 12);
+                for (int c = 0; c < 3; c++) sum[c] += f[c];
+                n++;
+            };
+            if (r.has_bytes)
+                for (uint32_t i = 0; i < r.c && size_t(i) * 2 + 2 <= r.bytes.size(); i++) {
+                    uint16_t v;
+                    std::memcpy(&v, r.bytes.data() + size_t(i) * 2, 2);
+                    add(uint32_t(v) + s.base_vertex);
+                }
+            else
+                for (uint32_t v = r.b; v < r.b + r.c; v++) add(v);
+            if (!n) return false;
+            for (int c = 0; c < 3; c++) p[c] = sum[c] / n;
+            return true;
+        };
+        // the same vertices as its match's, byte for byte: still scenery (a piece of road under a car), not laid afresh. One
+        // given the camera's move above keeps its match as own
+        const auto same_as_match = [&](const Rec& r) {
+            const int match = r.prev >= 0 ? r.prev : r.own;
+            if (match < 0 || !region_data_[region_]) return false;
+            const Rec& p = before_[size_t(match)];
+            if (p.kept.size() != r.kept.size()) return false;
+            for (size_t i = 0; i < r.kept.size(); i++) {
+                const Rec::Kept &a = r.kept[i], &b = p.kept[i];
+                if (a.bytes != b.bytes || size_t(a.offset) + a.bytes > kept_bytes_.size()) return false;
+                if (std::memcmp(kept_bytes_.data() + a.offset, kernel::HostPtr(region_data_[region_] + b.offset), a.bytes)) return false;
+            }
+            return true;
+        };
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.rider || r.turning || flat(r.vsc) || r.c > kOnCarMost) continue;
+            double p[3];
+            if (!middle(r, p) || same_as_match(r)) continue;
+            const double* best_d = nullptr;
+            double best = kOnCar;
+            for (const CarMove& m : car_moves) {
+                if (m.rt != r.s->rt.data) continue;
+                // the car's world taken back off this draw's matrix: its own place on the car (the matrix's origin) far off,
+                // as a matrix of the camera alone has; the vertices' middle within a car's length
+                double l[4][4];
+                for (int x = 0; x < 4; x++)
+                    for (int y = 0; y < 4; y++) {
+                        l[x][y] = 0;
+                        for (int z = 0; z < 4; z++) l[x][y] += m.inv[x][z] * r.vsc[size_t(z)][size_t(y)];
+                    }
+                if (std::fabs(l[3][0]) + std::fabs(l[3][1]) + std::fabs(l[3][2]) + std::fabs(l[3][3] - 1) > 0.01) continue;
+                if (std::sqrt(l[0][3] * l[0][3] + l[1][3] * l[1][3] + l[2][3] * l[2][3]) < kOnCar) continue;
+                double q[3];
+                for (int x = 0; x < 3; x++) q[x] = l[x][0] * p[0] + l[x][1] * p[1] + l[x][2] * p[2] + l[x][3];
+                const double away = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+                if (away < best) best = away, best_d = &m.d[0][0];
+            }
+            if (!best_d) continue;
+            const double (*d)[4] = reinterpret_cast<const double (*)[4]>(best_d);
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.rider = true, r.own = -1;
+            r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
+            rebuilt++;
+        }
+    }
+    {
+        static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint32_t sum = 0, steps = 0;
+        sum += rebuilt;
+        if (log && ++steps % 600 == 0) {
+            LOGR("gpu: in-between frames: %u draws laid afresh on a car took its move in 600 steps", sum);
+            sum = 0;
+        }
+    }
     {
         static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
         static uint32_t sum = 0, steps = 0;
