@@ -714,6 +714,21 @@ bool Interpolating::Match() {
     if (camera_only == 2)
         for (size_t i = 0; i < count_; i++)
             if (now_[i].kind == Rec::Draw && !flat(now_[i].vsc) && !still.count(now_[i].s->vs_handle)) moving.insert(matrix_hash(now_[i]));
+    // the camera's own matrices: those of matched draws going with their target's camera (the world drawn with the view and
+    // projection alone). A draw of one is scenery whatever its program: the barriers with their green lamps are drawn by a
+    // program that draws moving things too, under half of it going with the camera in a step with few barriers in view
+    // (7 matched, 3 with the camera): not still for that step, they blended from their own matches, out of line for a step
+    // now and then (XBE_INTERP_WATCH=t0069BA60; Harry's video of b7b94ea, 27 to 31 s)
+    std::unordered_set<uint64_t> camera_matrices;
+    if (camera_only == 2)
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.prev < 0 || r.turning || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            double d[4][4];
+            if (!camera || camera->votes < kLeastVotes || !move_of(r, d) || !same_move(d, camera->d)) continue;
+            camera_matrices.insert(matrix_hash(r));
+        }
     // and one whose own match moved as a moving program's draw did, not as the camera: a light or glow on a car drawn with a
     // matrix of its own (the reversing lights, the neon under the cars; given the camera's move they slid off the car and back
     // every step, Harry's F12 bursts of b1e011b). It takes that draw's move. XBE_INTERP_RIDERS=0 leaves them the camera's
@@ -784,7 +799,7 @@ bool Interpolating::Match() {
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
             if (r.kind != Rec::Draw || flat(r.vsc)) continue;
-            if (camera_only == 2 && (!still.count(r.s->vs_handle) || moving.count(matrix_hash(r)))) continue;
+            if (camera_only == 2 && !camera_matrices.count(matrix_hash(r)) && (!still.count(r.s->vs_handle) || moving.count(matrix_hash(r)))) continue;
             if (camera_only == 3 && still.count(r.s->vs_handle)) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
@@ -1176,14 +1191,16 @@ bool Interpolating::Match() {
     // XBE_INTERP_WATCH=<program handle, hex>: each step, how that program's small draws are to be blended (the table's names,
     // the why number, the peer and its own move against the camera's), without the reference renderer: for what goes wrong
     // only now and then (a brake light dark in some steps' in-between frames)
-    static const uint32_t watch = [] {
-        const char* e = std::getenv("XBE_INTERP_WATCH");
-        return e && *e ? uint32_t(std::strtoul(e, nullptr, 16)) : 0u;
-    }();
+    // XBE_INTERP_WATCH=t<texture, hex>: the draws with that stage 0 texture instead, whatever their size (a texture's address
+    // stays from one run to the next; a program's handle does not)
+    static const char* watch_env = std::getenv("XBE_INTERP_WATCH");
+    static const bool watch_tex = watch_env && *watch_env == 't';
+    static const uint32_t watch = watch_env && *watch_env ? uint32_t(std::strtoul(watch_env + (watch_tex ? 1 : 0), nullptr, 16)) : 0u;
     if (watch)
         for (size_t i = 0; i < count_; i++) {
             const Rec& r = now_[i];
-            if (r.kind != Rec::Draw || r.s->vs_handle != watch || r.c > kOnCarMost) continue;
+            if (r.kind != Rec::Draw) continue;
+            if (watch_tex ? r.s->textures[0] != watch : (r.s->vs_handle != watch || r.c > kOnCarMost)) continue;
             int peer_cam = -1;
             if (r.peer >= 0) {
                 const Rec& q = now_[size_t(r.peer)];
@@ -1191,8 +1208,21 @@ bool Interpolating::Match() {
                 double pd[4][4];
                 if (camera && q.prev >= 0 && move_of(q, pd)) peer_cam = same_move(pd, camera->d) ? 1 : 0;
             }
-            LOGR("gpu: in-between watch: step %u rec %zu count %u tex %08X %s why %u peer %d (camera's move %d)", steps_seen_, i, r.c,
-                 r.s->textures[0], r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived") : r.peer >= 0 ? "peer" : "none",
+            const Move* cam = camera_of(r.s->rt.data);
+            int prog_all = 0, prog_cam = 0;  // its program's matched draws now, and those going with the camera
+            for (size_t j = 0; j < count_ && cam; j++) {
+                const Rec& o = now_[j];
+                if (o.kind != Rec::Draw || o.prev < 0 || o.turning || flat(o.vsc) || o.s->vs_handle != r.s->vs_handle) continue;
+                double od[4][4];
+                if (o.s->rt.data != r.s->rt.data || !move_of(o, od)) continue;
+                prog_all++;
+                if (same_move(od, cam->d)) prog_cam++;
+            }
+            if (cam) LOGR("gpu: in-between watch: step %u program %08X matched %d with the camera %d, camera votes %d of %u draws", steps_seen_,
+                          r.s->vs_handle, prog_all, prog_cam, cam->votes, draws);
+            LOGR("gpu: in-between watch: step %u rec %zu rt %08X vs %08X start %u count %u tex %08X still %d moving %d votes %d %s why %u peer %d (camera's move %d)",
+                 steps_seen_, i, r.s->rt.data, r.s->vs_handle, r.b, r.c, r.s->textures[0], int(still.count(r.s->vs_handle)), int(moving.count(matrix_hash(r))),
+                 cam ? cam->votes : -1, r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived") : r.peer >= 0 ? "peer" : "none",
                  unsigned(r.why), r.peer, peer_cam);
         }
     if (!moved || !(matched - jumped)) return false;
