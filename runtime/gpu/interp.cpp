@@ -350,6 +350,10 @@ private:
     // and upload before the replays, the replays, the frames planned and the limit the late steps leave
     double sum_drawing_ = 0, sum_prepare_ = 0, sum_replay_ = 0, sum_planned_ = 0, sum_limit_ = 0;
     uint32_t replays_ = 0;
+    // XBE_INTERP_LOG: why a step's later frames were not shown, over the same 10 s: the time each had (span and a replay), a frame's
+    // time, where the step was when its next frame was cut, and how many were (GPU-VM, 2026-11-16: 1.9 planned, 1 shown at 120 Hz)
+    double sum_span_ = 0, sum_frame_ = 0, sum_cut_at_ = 0;
+    uint32_t cuts_ = 0, multi_ = 0;
 };
 
 void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
@@ -1409,10 +1413,17 @@ void Interpolating::Present(const Surface& front) {
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() + replay_seconds_ - frame_seconds_) * 0.1;
             }
             overran_ = false;
+            sum_span_ += span;
+            sum_frame_ += frame_seconds_;
+            multi_ += frames > 1;
             for (int i = ahead ? 1 : 0; i < frames; i++) {
                 const auto now = Clock::now();
                 const double at = std::chrono::duration<double>(now - t).count();
-                if ((i || ahead) && at + frame_seconds_ >= span + replay_seconds_) break;
+                if ((i || ahead) && at + frame_seconds_ >= span + replay_seconds_) {
+                    cuts_++;
+                    sum_cut_at_ += at;
+                    break;
+                }
                 const double along = std::min(at / usual, 1.0);
                 Replay(float(ahead ? 1.0 + along : along));
                 inner_->Present(front);
@@ -1444,6 +1455,12 @@ void Interpolating::Present(const Surface& front) {
             LOGR("gpu: in-between frames: late steps: %u after our frames ran over, %u the title's own", late_ours_, late_title_);
             if (diag::Perf())
                 LOGR("gpu: in-between frames, a replay: %.2f ms of it handing draws to the renderer", sum_draw_calls_ / std::max(1u, replays_) * 1000);
+            static const bool pace_log = std::getenv("XBE_INTERP_LOG") != nullptr;
+            if (pace_log)
+                LOGR("gpu: in-between frames, pacing: span %.2f ms + a replay %.2f, a frame %.2f ms (replay and present), %u steps with "
+                     "more than one planned, %u frames cut at %.2f ms into their step",
+                     sum_span_ / b * 1000, replay_seconds_ * 1000, sum_frame_ / b * 1000, multi_, cuts_,
+                     sum_cut_at_ / std::max(1u, cuts_) * 1000);
             if (sum_skipped_)
                 LOGR("gpu: in-between frames: %.0f records a step left out of the replays, their targets' pictures the step's own",
                      double(sum_skipped_) / std::max(1u, blended_steps_));
@@ -1455,6 +1472,8 @@ void Interpolating::Present(const Surface& front) {
         late_ours_ = late_title_ = 0;
         sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
         replays_ = 0;
+        sum_span_ = sum_frame_ = sum_cut_at_ = 0;
+        cuts_ = multi_ = 0;
     }
     now_.swap(before_);
     steps_seen_++;
