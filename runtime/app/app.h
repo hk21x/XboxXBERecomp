@@ -255,6 +255,12 @@ struct GameInfo {
     // the vertex shader constant (as the title numbers it, -96 to 95) where its programs' world-view-projection rows start, four
     // of them: in-between frames match a draw to its self of the step before by it, and blend its place. Juiced's are c18 to c21
     int interp_transform = -96;
+    // and where a view-projection of their own starts (four rows, the title's numbering), or -1 for none: a program that
+    // places what it draws through a world (its own constants) and that, not the transform. Moved as the transform is (the
+    // camera's move for a draw given it, its own blend otherwise, never held as a leap): Juiced's crowd (c14 to c17), whose
+    // rows blended one constant at a time and some held at the step's as they crossed zero, shook in the race's opening
+    // fly-by (Harry, 2026-11-16). XBE_INTERP_VP=<register> or -1 overrides
+    int interp_view_projection = -1;
     // which of the other constants (the title's numbering) those frames blend; the rest take the step's own value. Juiced's
     // pick an animation's frame, a tint or a phase among a few values (c36: 1, 0.67, 0.5, 0.4, 0.25), and halfway between
     // two of them is none of them: the corner boards' arrows flickered in every in-between frame (Harry, 2026-11-14). Not

@@ -56,6 +56,19 @@ uint32_t Transform() {
     static const uint32_t t = uint32_t(std::clamp(app::kGame.interp_transform + 96, 0, int(kRegisters - kMatrixRegisters)));
     return t;
 }
+// GameInfo::interp_view_projection as a Rec::vsc index (its first row), or -1
+int ViewProjection() {
+    static const int v = [] {
+        const char* e = std::getenv("XBE_INTERP_VP");
+        const int reg = e && *e ? std::atoi(e) : app::kGame.interp_view_projection;
+        if (reg < -96 || reg > 95 - int(kMatrixRegisters) + 1) return -1;
+        const int k = int((uint32_t(reg + 96) + kRegisters - Transform()) % kRegisters);
+        if (k + int(kMatrixRegisters) > int(kRegisters) || k < int(kMatrixRegisters)) return -1;
+        LOGR("gpu: in-between frames: a view-projection of its own at c%d, moved as the transform is", reg);
+        return k;
+    }();
+    return v;
+}
 constexpr double kOnCar = 300;  // a draw's place on a car, world units (Juiced's look like centimetres: rigid places
                                  // on a car were 0 or 100 to 300 away, scenery 1000 and more) from the car draw's origin
 constexpr uint32_t kOnCarMost = 96;  // and few vertices: a light, a glow, the neon; not a barrier a car brushes past
@@ -90,6 +103,8 @@ struct Rec {
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
     bool stray = false;    // its nearest copy of the step before is not where the camera's move puts it: still scenery come into view
     float was[4][4];
+    float move[4][4];       // a draw given another's move (the camera's, a car's): that move, for its own view-projection
+    bool has_move = false;
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
     bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
     uint8_t why = 0;  // the in-between table: what made it derived (1 the camera's move, 2 laid afresh on a car, 3 off the camera, 4 come into view)
@@ -257,6 +272,7 @@ private:
             return !e || std::atoi(e) != 0;
         }();
         if (k < kMatrixRegisters) return false;
+        if (const int vp = ViewProjection(); vp >= 0 && int(k) >= vp && int(k) < vp + int(kMatrixRegisters)) return false;
         if (!constants) return true;
         if (app::kGame.interp_blends_constant &&
             !app::kGame.interp_blends_constant(int((k + Transform()) % kRegisters) - 96, was, now))
@@ -294,6 +310,7 @@ private:
         r.rider = false;
         r.own = -1;
         r.share = -1;
+        r.has_move = false;
         r.stray = false;
         r.peer = -1;
         r.headers.clear();
@@ -793,6 +810,9 @@ bool Interpolating::Match() {
                 for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                 r.was[a][b] = float(t);
             }
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) r.move[a][b] = float(d[a][b]);
+        r.has_move = true;
         r.rider = true, r.own = -1;
         r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
     };
@@ -870,7 +890,9 @@ bool Interpolating::Match() {
                     double t = 0;
                     for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
+                    r.move[a][b] = float(d[a][b]);
                 }
+            r.has_move = true;
             // its constants past the transform from its own match still: the road under a car draws the neon's light with
             // the car's place in them (taken at the step's value, the light ran a step ahead of the blended car and lit
             // the road under it only at the step's end; Harry's burst of 4a240df). Not a rider: its match was the wrong one
@@ -974,7 +996,9 @@ bool Interpolating::Match() {
                     double t = 0;
                     for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
+                    r.move[a][b] = float(d[a][b]);
                 }
+            r.has_move = true;
             r.rider = true, r.own = -1;
             r.prev = -1, r.peer = -1, r.turning = false, r.derived = true, r.why = 2;
             rebuilt++;
@@ -1033,7 +1057,8 @@ bool Interpolating::Match() {
             const double sx = sw > 0 ? len(r.vsc[0][0], r.vsc[0][1], r.vsc[0][2]) / sw : 0;
             if (!(std::fabs(ow) > 1 && std::fabs(cw) > 1 && sx > 0) || std::fabs(ox / ow - cx / cw) / sx <= kOffCamera) continue;
             for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) r.was[a][b] = float(was[a][b]);
+                for (int b = 0; b < 4; b++) r.was[a][b] = float(was[a][b]), r.move[a][b] = float(camera->d[a][b]);
+            r.has_move = true;
             r.prev = -1, r.derived = true, r.why = 3;
             refit++;
         }
@@ -1182,7 +1207,9 @@ bool Interpolating::Match() {
                     double t = 0;
                     for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
+                    r.move[a][b] = float(camera->d[a][b]);
                 }
+            r.has_move = true;
             r.derived = true, r.why = 4;
         }
     }
@@ -1399,6 +1426,14 @@ void Interpolating::Replay(float alpha) {
                     }
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
                         for (uint32_t c = 0; c < 4; c++) v[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
+                    // its own view-projection (GameInfo::interp_view_projection) by the same move
+                    if (const int vp = ViewProjection(); vp >= 0 && r.has_move)
+                        for (int a = 0; a < 4; a++)
+                            for (int b = 0; b < 4; b++) {
+                                float was = 0;
+                                for (int c = 0; c < 4; c++) was += r.move[a][c] * r.vsc[size_t(vp + c)][size_t(b)];
+                                v[size_t(vp + a)][size_t(b)] = was + (r.vsc[size_t(vp + a)][size_t(b)] - was) * alpha;
+                            }
                 } else if (r.peer >= 0 && alpha != 1 && !at_step) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
