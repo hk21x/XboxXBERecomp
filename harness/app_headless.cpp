@@ -50,10 +50,21 @@ bool FillsNarrow() {
     return kGame.fills_narrow_screens && r > 4.0f / 3.0f + 1e-3f && r < 16.0f / 9.0f - 1e-3f;
 }
 }  // namespace
-bool Widescreen() { return !FillsNarrow() && Desktop().width * 2 >= Desktop().height * 3; }  // as on Windows: 3:2 or wider
+// as on Windows: 3:2 or wider; always for a title whose aspect setting applies at once (GameInfo::aspect_live)
+bool Widescreen() { return kGame.aspect_live || (!FillsNarrow() && Desktop().width * 2 >= Desktop().height * 3); }
 // FRAME_ASPECT_X100=239 (a shape times 100): as the Windows aspect setting "screen" on an ultrawide display
+// a file `frame_aspect` in the run folder holding such a number changes it as the run goes (GameInfo::aspect_live: the
+// setting changed in play)
 float FrameAspect() {
-    static const float forced = float(harness::Env("FRAME_ASPECT_X100")) / 100;
+    static float forced = float(harness::Env("FRAME_ASPECT_X100")) / 100;
+    static uint32_t asked = 0;
+    if (kGame.aspect_live && asked++ % 256 == 0) {
+        if (std::FILE* f = std::fopen("frame_aspect", "r")) {
+            int v = 0;
+            if (std::fscanf(f, "%d", &v) == 1 && v > 0) forced = float(v) / 100;
+            std::fclose(f);
+        }
+    }
     if (forced > 0) return forced;
     if (FillsNarrow()) return float(Desktop().width) / float(Desktop().height);
     return Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
