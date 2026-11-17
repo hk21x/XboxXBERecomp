@@ -317,6 +317,12 @@ struct GameInfo {
     // hooks shape its views to FrameAspect() each frame, 4:3 too (Juiced: its camera's angles are set every frame, and
     // a restart for each change was asked gone; Harry, 2026-11-17). The 2D is laid out for hud_aspect in that mode
     bool aspect_live = false;
+    // with aspect_live: the frame's shape as the title wants it now, given the setting's (Juiced: 4:3 while its menus
+    // show, their bands and movies laid out for that, the setting's own in a race)
+    float (*frame_aspect)(float chosen) = nullptr;
+    // while true, the bars beside a frame narrower than the window show a small, dimmed copy of the frame stretched
+    // across it (blurred by its size) instead of black: Juiced's 4:3 menus on an ultrawide screen (Harry, 2026-11-17)
+    bool (*bars_backdrop)() = nullptr;
     // while frames run late (slower than 120 a second), each face of a cube map the GPU draws (a car's reflections) is
     // drawn at most this often a second and keeps its last picture in between; frames on time draw every face. 0 draws
     // them every frame always. XBE_CUBE_FACE_HZ overrides it

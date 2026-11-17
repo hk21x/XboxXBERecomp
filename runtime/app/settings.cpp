@@ -474,9 +474,10 @@ float FrameAspect() {
         // 3:2 or wider (to 16:9 unless the title fills ultrawide screens), else 4:3
         const uint32_t now = Get().aspect % 4;
         const float r = ScreenAspect();
-        if (now == 1 || (now == 0 && r < 1.5f - 1e-3f)) return 4.0f / 3.0f;
-        if (now == 2 || (now == 0 && !kGame.auto_fills_screen)) return 16.0f / 9.0f;
-        return std::max(16.0f / 9.0f, r);
+        const float chosen = now == 1 || (now == 0 && r < 1.5f - 1e-3f)       ? 4.0f / 3.0f
+                             : now == 2 || (now == 0 && !kGame.auto_fills_screen) ? 16.0f / 9.0f
+                                                                                  : std::max(16.0f / 9.0f, r);
+        return kGame.frame_aspect ? kGame.frame_aspect(chosen) : chosen;
     }
     const uint32_t a = AspectChoice();
     if (!Widescreen()) {
