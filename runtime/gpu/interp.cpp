@@ -1379,6 +1379,21 @@ bool Interpolating::Match() {
                 }
             }
         }
+        // a draw following one of those (a second pass of its matrix) goes as it does now: its match is given up, and a
+        // follower read the record before the step before's first (a crash on Windows; Harry, 2026-11-17)
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.peer < 0) continue;
+            const Rec& q = now_[size_t(r.peer)];
+            if (q.prev >= 0) continue;
+            if (q.derived) {
+                std::memcpy(r.was, q.was, sizeof r.was);
+                std::memcpy(r.vp_was, q.vp_was, sizeof r.vp_was);
+                r.has_vp_was = q.has_vp_was, r.has_move = false;
+                r.derived = true, r.why = q.why, r.own = -1;
+            }
+            r.peer = -1;
+        }
         static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
         static uint64_t sum[4] = {}, steps = 0;
         sum[0] += selves, sum[1] += by_camera, sum[2] += found_still, sum[3] += voted;
@@ -1658,7 +1673,7 @@ void Interpolating::Replay(float alpha) {
                                 for (int c = 0; c < 4; c++) was += r.move[a][c] * r.vsc[size_t(vp + c)][size_t(b)];
                                 v[size_t(vp + a)][size_t(b)] = was + (r.vsc[size_t(vp + a)][size_t(b)] - was) * alpha;
                             }
-                } else if (r.peer >= 0 && alpha != 1 && !at_step) {
+                } else if (r.peer >= 0 && now_[size_t(r.peer)].prev >= 0 && alpha != 1 && !at_step) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
                     for (uint32_t k = 0; k < kRegisters; k++) {
