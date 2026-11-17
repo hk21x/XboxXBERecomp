@@ -458,6 +458,7 @@ bool FillsWide(uint32_t a) { return a == 3 || (a == 0 && kGame.auto_fills_screen
 // kept from the first ask: the title reads its TV setting once, as it boots, so a resolution changed in play (16:10 to
 // 16:9 from the Display page) must not tell the renderers another mode than the title is in
 bool Widescreen() {
+    if (kGame.aspect_live) return true;
     static const bool wide = [] {
         const uint32_t a = AspectChoice();
         if (a == 1 || FillsNarrow()) return false;
@@ -468,6 +469,15 @@ bool Widescreen() {
 }
 
 float FrameAspect() {
+    if (kGame.aspect_live) {
+        // the choice as it is now: 4:3, 16:9, the screen's shape (never under 16:9), or from the screen: its shape when
+        // 3:2 or wider (to 16:9 unless the title fills ultrawide screens), else 4:3
+        const uint32_t now = Get().aspect % 4;
+        const float r = ScreenAspect();
+        if (now == 1 || (now == 0 && r < 1.5f - 1e-3f)) return 4.0f / 3.0f;
+        if (now == 2 || (now == 0 && !kGame.auto_fills_screen)) return 16.0f / 9.0f;
+        return std::max(16.0f / 9.0f, r);
+    }
     const uint32_t a = AspectChoice();
     if (!Widescreen()) {
         // a title widening its 4:3 views fills the screen it is shown on now, as far as the setting reaches (16:10 at

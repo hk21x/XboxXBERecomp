@@ -313,6 +313,10 @@ struct GameInfo {
     // the title's 3D views follow FrameAspect when it changes (PGR2 reshapes its cameras): in a widescreen boot, a choice
     // between 16:9 and filling the screen applies at once; 4:3 against widescreen still waits for the next start
     bool fill_follows_live = false;
+    // the aspect setting applies at once, every choice: the console always reports a widescreen TV, and the title's
+    // hooks shape its views to FrameAspect() each frame, 4:3 too (Juiced: its camera's angles are set every frame, and
+    // a restart for each change was asked gone; Harry, 2026-11-17). The 2D is laid out for hud_aspect in that mode
+    bool aspect_live = false;
     // while frames run late (slower than 120 a second), each face of a cube map the GPU draws (a car's reflections) is
     // drawn at most this often a second and keeps its last picture in between; frames on time draw every face. 0 draws
     // them every frame always. XBE_CUBE_FACE_HZ overrides it
