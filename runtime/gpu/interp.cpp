@@ -103,7 +103,7 @@ struct Rec {
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
     bool stray = false;    // its nearest copy of the step before is not where the camera's move puts it: still scenery come into view
     float was[4][4];
-    float move[4][4];       // a draw given another's move (the camera's, a car's): that move, for its own view-projection
+    float move[4][4];       // a derived draw: its target's camera move, for its own view-projection (GameInfo::interp_view_projection)
     bool has_move = false;
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
     bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
@@ -810,9 +810,6 @@ bool Interpolating::Match() {
                 for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                 r.was[a][b] = float(t);
             }
-        for (int a = 0; a < 4; a++)
-            for (int b = 0; b < 4; b++) r.move[a][b] = float(d[a][b]);
-        r.has_move = true;
         r.rider = true, r.own = -1;
         r.prev = -1, r.peer = -1, r.turning = false, r.derived = true;
     };
@@ -890,9 +887,7 @@ bool Interpolating::Match() {
                     double t = 0;
                     for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
-                    r.move[a][b] = float(d[a][b]);
                 }
-            r.has_move = true;
             // its constants past the transform from its own match still: the road under a car draws the neon's light with
             // the car's place in them (taken at the step's value, the light ran a step ahead of the blended car and lit
             // the road under it only at the step's end; Harry's burst of 4a240df). Not a rider: its match was the wrong one
@@ -996,9 +991,7 @@ bool Interpolating::Match() {
                     double t = 0;
                     for (int c = 0; c < 4; c++) t += d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
-                    r.move[a][b] = float(d[a][b]);
                 }
-            r.has_move = true;
             r.rider = true, r.own = -1;
             r.prev = -1, r.peer = -1, r.turning = false, r.derived = true, r.why = 2;
             rebuilt++;
@@ -1057,8 +1050,7 @@ bool Interpolating::Match() {
             const double sx = sw > 0 ? len(r.vsc[0][0], r.vsc[0][1], r.vsc[0][2]) / sw : 0;
             if (!(std::fabs(ow) > 1 && std::fabs(cw) > 1 && sx > 0) || std::fabs(ox / ow - cx / cw) / sx <= kOffCamera) continue;
             for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) r.was[a][b] = float(was[a][b]), r.move[a][b] = float(camera->d[a][b]);
-            r.has_move = true;
+                for (int b = 0; b < 4; b++) r.was[a][b] = float(was[a][b]);
             r.prev = -1, r.derived = true, r.why = 3;
             refit++;
         }
@@ -1207,9 +1199,7 @@ bool Interpolating::Match() {
                     double t = 0;
                     for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
-                    r.move[a][b] = float(camera->d[a][b]);
                 }
-            r.has_move = true;
             r.derived = true, r.why = 4;
         }
     }
@@ -1217,6 +1207,20 @@ bool Interpolating::Match() {
     for (const Move& m : moves)
         if (m.votes >= kLeastVotes) camera_targets_.insert(m.rt & 0x0FFFFFFF);
     LogJumps();
+    // GameInfo::interp_view_projection: a draw given another's move takes its target's camera move for its own view-projection,
+    // whatever its transform's: a view-projection moves with the camera alone. The crowd's program draws with c0-c2 and c14-c17
+    // and leaves the transform as the draw before left it, now and then a car's, and its people slid with the car (Harry,
+    // 2026-11-17; GPU-VM's tables: 369 of 5172 crowd draws in the fly-by taken for riders)
+    if (ViewProjection() >= 0)
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || !r.derived) continue;
+            if (const Move* camera = camera_of(r.s->rt.data)) {
+                for (int a = 0; a < 4; a++)
+                    for (int b = 0; b < 4; b++) r.move[a][b] = float(camera->d[a][b]);
+                r.has_move = true;
+            }
+        }
     // GameInfo::interp_shared_constants: a draw given the camera's move with no match of its own takes, for each constant past
     // the transform that holds the same value as a matched one's of its target, that draw's blend (Rec::share; Replay)
     static const bool shared_constants = [] {
