@@ -481,7 +481,10 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint
     sd.AddressU = Address(clamp && t[kTssAddressU] == kTaddressWrap ? kTaddressClamp : t[kTssAddressU]);
     sd.AddressV = Address(clamp && t[kTssAddressV] == kTaddressWrap ? kTaddressClamp : t[kTssAddressV]);
     sd.AddressW = Address(t[kTssAddressW]);
-    sd.MipLODBias = Bits(t[kTssMipLodBias]);
+    // within D3D12's -16 to 15.99: a sampler past it is an invalid call that loses the device (Juiced's evening races set
+    // -21.5 on one stage; Harry's AMD and GPU-VM's Arc, 2026-11-17), and the console's levels are long gone by -16 anyway
+    const float bias = Bits(t[kTssMipLodBias]);
+    sd.MipLODBias = std::isnan(bias) ? 0.0f : std::clamp(bias, D3D12_MIP_LOD_BIAS_MIN, D3D12_MIP_LOD_BIAS_MAX);
     sd.MinLOD = float(t[kTssMaxMipLevel]);
     sd.MaxLOD = mip ? D3D12_FLOAT32_MAX : sd.MinLOD;
     if (replaced && lin(min) && an == 1) {
