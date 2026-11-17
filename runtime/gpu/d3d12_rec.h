@@ -10,6 +10,9 @@
 
 namespace gpu {
 
+// XBE_D3D12_CHECK (diagnosis, d3d12.cpp): a view made here checked as one made by the backend
+void CheckSrv(ID3D12Device* dev, ID3D12Resource* res, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc);
+
 class D3D12Rec {
 public:
     enum Op : uint8_t {
@@ -156,6 +159,7 @@ public:
                 case kSrv: {
                     auto a = Get<SrvArgs>(p);
                     dev->CreateShaderResourceView(a.res, &a.desc, a.at);
+                    CheckSrv(dev, a.res, a.desc);
                     break;
                 }
                 case kMark: mark(Get<uint64_t>(p)); break;

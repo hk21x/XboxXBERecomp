@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <bit>
 #include <chrono>
@@ -50,6 +51,46 @@
 #include "kernel/kernel.h"
 
 using Microsoft::WRL::ComPtr;
+
+// XBE_D3D12_CHECK=1 (diagnosis): the device asked after each call that can remove it at once (a view, a resource, a
+// sampler) and the first one after which it is gone logged, with what it was asked for: the evening race's device lost
+// with reason 887A0001 (an invalid call) and DRED's lists all finished, on AMD and Intel alike, without the debug layer
+namespace gpu {
+namespace {
+bool DevCheckOn() {
+    static const bool on = std::getenv("XBE_D3D12_CHECK") != nullptr;
+    return on;
+}
+std::atomic<bool> g_dev_gone_told{false};
+std::string DescribeResource(ID3D12Resource* r) {
+    if (!r) return "null";
+    const D3D12_RESOURCE_DESC d = r->GetDesc();
+    char b[200];
+    snprintf(b, sizeof b, "dimension %u %llux%u depth/array %u mips %u format %u samples %u flags %X", unsigned(d.Dimension),
+             (unsigned long long)d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, unsigned(d.Format), d.SampleDesc.Count,
+             unsigned(d.Flags));
+    return b;
+}
+}  // namespace
+bool DevGone(ID3D12Device* dev, const char* what, int line, const std::string& detail = {}) {
+    if (!DevCheckOn() || g_dev_gone_told.load(std::memory_order_relaxed)) return false;
+    const HRESULT hr = dev->GetDeviceRemovedReason();
+    if (SUCCEEDED(hr)) return false;
+    if (g_dev_gone_told.exchange(true)) return false;
+    LOGR("d3d12 check: the device is gone (%08X) after %s, line %d%s%s", unsigned(hr), what, line, detail.empty() ? "" : ": ",
+         detail.c_str());
+    return true;
+}
+void CheckSrv(ID3D12Device* dev, ID3D12Resource* res, const D3D12_SHADER_RESOURCE_VIEW_DESC& v) {
+    if (!DevCheckOn() || g_dev_gone_told.load(std::memory_order_relaxed)) return;
+    char b[200];
+    snprintf(b, sizeof b, "; view dimension %u format %u mapping %X, mips %u from %u, array %u from %u", unsigned(v.ViewDimension),
+             unsigned(v.Format), v.Shader4ComponentMapping, v.Texture2DArray.MipLevels, v.Texture2DArray.MostDetailedMip,
+             v.Texture2DArray.ArraySize, v.Texture2DArray.FirstArraySlice);
+    DevGone(dev, "a recorded shader resource view", __LINE__, "resource " + DescribeResource(res) + b);
+}
+}  // namespace gpu
+#define DCHK(what) ::gpu::DevGone(dev_.Get(), what, __LINE__)
 
 namespace gpu {
 
@@ -1158,6 +1199,7 @@ void D3D12Backend::CreateBackBufferViews() {
     for (int i = 0; i < kFrames; i++) {
         swap_->GetBuffer(i, IID_PPV_ARGS(&bb_[i]));
         dev_->CreateRenderTargetView(bb_[i].Get(), nullptr, Cpu(rtv_heap_.Get(), kRtvCount + i, rtv_inc_));
+        DCHK("CreateRenderTargetView");
     }
 }
 
@@ -1291,6 +1333,7 @@ void D3D12Backend::Submit(bool wait) {
     } else {
         ID3D12CommandList* lists[] = {cl_.Get()};
         queue_->ExecuteCommandLists(1, lists);
+        DCHK("ExecuteCommandLists");
     }
     lists_++;
     sent_notes_.push_back(std::move(list_notes_));
@@ -1564,11 +1607,13 @@ bool D3D12Backend::CreateTargetView(Target& t) {
         dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
         dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         dev_->CreateDepthStencilView(t.res.Get(), &dv, Cpu(dsv_heap_.Get(), t.view, dsv_inc_));
+        DCHK("CreateDepthStencilView");
         float one = 1;
         CLAt(__func__)->ClearDepthStencilView(Cpu(dsv_heap_.Get(), t.view, dsv_inc_),
                                    D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, one, 0, 0, nullptr);
     } else {
         dev_->CreateRenderTargetView(t.res.Get(), nullptr, Cpu(rtv_heap_.Get(), t.view, rtv_inc_));
+        DCHK("CreateRenderTargetView");
         float black[4] = {0, 0, 0, 0};
         CLAt(__func__)->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
     }
@@ -1786,6 +1831,7 @@ void D3D12Backend::DrawDepthCopy(Target& src, Target& dst, ID3D12PipelineState* 
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     dev_->CreateShaderResourceView(src.res.Get(), &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+    DCHK("CreateShaderResourceView");
     Alloc cb = Upload(256, 256);
     DrawFullScreen(pso, cb.gpu, slot);
     dst.drawn = true;
@@ -1903,6 +1949,7 @@ uint32_t D3D12Backend::EnsureBlitSamplers() {
             sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
             sd.MaxLOD = D3D12_FLOAT32_MAX;
             dev_->CreateSampler(&sd, Cpu(smp_heap_.Get(), si + i, smp_inc_));
+            DCHK("CreateSampler");
         }
         samplers_[key] = si;
     } else {
@@ -1941,9 +1988,11 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     dev_->CreateShaderResourceView(src, &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+    DCHK("CreateShaderResourceView");
     if (o.mix) dev_->CreateShaderResourceView(o.mix, &sv, Cpu(srv_heap_.Get(), slot + 2, srv_inc_));
     sv.Format = kBgra;
     dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + 1, srv_inc_));
+    DCHK("CreateShaderResourceView");
     uint32_t si = EnsureBlitSamplers();
     Alloc cb = Upload(256, 256);
     float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
@@ -2096,6 +2145,7 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Texture2D.MipLevels = 1;
         dev_->CreateShaderResourceView(i < 3 ? src[i] : nullptr, &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+        DCHK("CreateShaderResourceView");
     }
     Alloc cb = Upload(256, 256);
     std::memcpy(cb.cpu, p, 8 * sizeof(float));
@@ -2248,6 +2298,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
         d.CachedPSO = {kept->data(), kept->size()};
         g_perf.psos_kept++;
     }
+    DCHK("everything before a pipeline (none of the calls checked)");
     HRESULT hr = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
     if (FAILED(hr) && kept) {
         // refused: the blob is stale, and d must not point at it once the cache is dropped
@@ -2424,6 +2475,7 @@ bool D3D12Backend::CreatePlacedTexture(D3D12_RESOURCE_DESC& td, ComPtr<ID3D12Res
         return false;
     }
     placed_[res.Get()] = at;
+    DevGone(dev_.Get(), "CreatePlacedResource", __LINE__, DescribeResource(res.Get()));
     // the range may have held a texture released earlier: the new one takes the memory over before it is written
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
@@ -2905,6 +2957,7 @@ uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& s
     uint32_t base = smp_used_;
     smp_used_ += 4;
     for (int i = 0; i < 4; i++) dev_->CreateSampler(&sd[i], Cpu(smp_heap_.Get(), base + i, smp_inc_));
+    DCHK("CreateSampler");
     samplers_[key] = base;
     return samplers_last_slot_ = base;
 }
@@ -3450,6 +3503,7 @@ void D3D12Backend::TakeDecided() {
 
 
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    DCHK("everything before a draw (none of the calls checked)");
     // the top level draw is decided into packet_: its commands go to the packet until it is handed to record, and a
     // draw left out on the way leaves them (barriers already tracked) to record all the same
     struct DecideScope {
@@ -3896,6 +3950,7 @@ float4 ps(float4 p : SV_Position) : SV_Target { return colour; }
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     for (uint32_t i = 0; i < 2; i++) dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
+    DCHK("CreateShaderResourceView");
     Alloc cb = Upload(256, 256);
     std::memcpy(cb.cpu, col, 4 * sizeof(float));
     for (const D3D12_RECT& r : rs) {
@@ -4245,6 +4300,7 @@ bool D3D12Backend::EnsureSmaa(uint32_t w, uint32_t h) {
         p.view = free_rtv_.back();
         free_rtv_.pop_back();
         dev_->CreateRenderTargetView(p.res.Get(), nullptr, Cpu(rtv_heap_.Get(), p.view, rtv_inc_));
+        DCHK("CreateRenderTargetView");
     }
     smaa_w_ = w;
     smaa_h_ = h;
@@ -4279,6 +4335,7 @@ bool D3D12Backend::SmaaFrame(Target& t) {
             sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             sv.Texture2D.MipLevels = 1;
             dev_->CreateShaderResourceView(v.res, &sv, Cpu(srv_heap_.Get(), slot + i++, srv_inc_));
+            DCHK("CreateShaderResourceView");
         }
         Alloc cb = Upload(256, 256);
         std::memcpy(cb.cpu, c, sizeof(c));
@@ -5042,6 +5099,7 @@ void D3D12Backend::RescaleTargets() {
         t.view = old.view;  // the same descriptor slot, now viewing the new resource
         D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), t.view, rtv_inc_);
         dev_->CreateRenderTargetView(t.res.Get(), nullptr, rh);
+        DCHK("CreateRenderTargetView");
         Transition(old.res.Get(), old.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         SetBlitTarget(rh, t.w, t.h);
         float uv[4] = {0, 0, 1, 1};
@@ -5111,11 +5169,13 @@ bool D3D12Backend::EnsureMs(Target& t) {
         dv.Format = fmt;
         dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
         dev_->CreateDepthStencilView(t.ms.Get(), &dv, Cpu(dsv_heap_.Get(), t.ms_view, dsv_inc_));
+        DCHK("CreateDepthStencilView");
     } else {
         D3D12_RENDER_TARGET_VIEW_DESC rv{};
         rv.Format = fmt;
         rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
         dev_->CreateRenderTargetView(t.ms.Get(), &rv, Cpu(rtv_heap_.Get(), t.ms_view, rtv_inc_));
+        DCHK("CreateRenderTargetView");
     }
     t.ms_dirty = false;
     t.ms_stale = true;  // filled from res before its first draw
@@ -5168,6 +5228,7 @@ void D3D12Backend::Settle(Target& t) {
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         dev_->CreateShaderResourceView(t.ms.Get(), &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+        DCHK("CreateShaderResourceView");
         Alloc cb = Upload(256, 256);
         DrawFullScreen(pso, cb.gpu, slot);
     }
@@ -5196,6 +5257,7 @@ void D3D12Backend::Refresh(Target& t) {
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Texture2D.MipLevels = 1;
         dev_->CreateShaderResourceView(t.res.Get(), &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+        DCHK("CreateShaderResourceView");
         Alloc cb = Upload(256, 256);
         DrawFullScreen(pso, cb.gpu, slot);
     }
@@ -5447,6 +5509,7 @@ ComPtr<ID3D12Resource> D3D12Backend::Shrink(ID3D12Resource* src, D3D12_RESOURCE_
     // borrows the next free view without taking it, only for this recording
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), free_rtv_.back(), rtv_inc_);
     dev_->CreateRenderTargetView(down.Get(), nullptr, rh);
+    DCHK("CreateRenderTargetView");
     Transition(src, st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     SetBlitTarget(rh, w, h);
     float uv[4] = {0, 0, 1, 1};
