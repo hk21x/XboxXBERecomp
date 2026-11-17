@@ -1221,6 +1221,48 @@ bool Interpolating::Match() {
                 r.has_move = true;
             }
         }
+    // XBE_INTERP_VPCHECK (diagnosis): each derived draw's view-projection halfway through the step, by its move, against a
+    // matched draw's of its target holding the same one (halfway between its match's and its own), as the largest
+    // difference over the largest entry; by kind, every 600 steps
+    static const bool vp_check = std::getenv("XBE_INTERP_VPCHECK") != nullptr;
+    if (vp_check && ViewProjection() >= 0) {
+        static double worst[2] = {0, 0}, sum[2] = {0, 0};
+        static uint64_t n[2] = {0, 0}, none = 0, steps = 0;
+        const size_t vp = size_t(ViewProjection());
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || !r.derived) continue;
+            const Rec* m = nullptr;
+            for (size_t j = 0; j < count_ && !m; j++) {
+                const Rec& o = now_[j];
+                if (o.kind == Rec::Draw && o.prev >= 0 && !o.turning && o.s->rt.data == r.s->rt.data &&
+                    !std::memcmp(&o.vsc[vp], &r.vsc[vp], 4 * sizeof r.vsc[0]))
+                    m = &o;
+            }
+            if (!m) continue;
+            if (!r.has_move) { none++; continue; }
+            const Rec& p = before_[size_t(m->prev)];
+            double d = 0, big = 0;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double was = 0;
+                    for (int c = 0; c < 4; c++) was += r.move[a][c] * r.vsc[vp + size_t(c)][size_t(b)];
+                    const double mid = 0.5 * (was + r.vsc[vp + size_t(a)][size_t(b)]);
+                    const double ref = 0.5 * (p.vsc[vp + size_t(a)][size_t(b)] + r.vsc[vp + size_t(a)][size_t(b)]);
+                    d = std::max(d, std::fabs(mid - ref));
+                    big = std::max(big, std::fabs(ref));
+                }
+            const double e = big > 0 ? d / big : 0;
+            const int k = r.rider ? 1 : 0;
+            worst[k] = std::max(worst[k], e), sum[k] += e, n[k]++;
+        }
+        if (++steps % 600 == 0) {
+            LOGR("gpu: in-between vp check: camera-moved %llu mean %.5f worst %.5f; riders %llu mean %.5f worst %.5f; without a move %llu",
+                 (unsigned long long)n[0], n[0] ? sum[0] / double(n[0]) : 0.0, worst[0], (unsigned long long)n[1],
+                 n[1] ? sum[1] / double(n[1]) : 0.0, worst[1], (unsigned long long)none);
+            worst[0] = worst[1] = sum[0] = sum[1] = 0, n[0] = n[1] = none = 0;
+        }
+    }
     // GameInfo::interp_shared_constants: a draw given the camera's move with no match of its own takes, for each constant past
     // the transform that holds the same value as a matched one's of its target, that draw's blend (Rec::share; Replay)
     static const bool shared_constants = [] {
