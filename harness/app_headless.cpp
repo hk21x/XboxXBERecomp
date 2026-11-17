@@ -72,7 +72,7 @@ float FrameAspect() {
             std::fclose(f);
         }
     }
-    if (forced > 0) return forced;
+    if (forced > 0) return kGame.aspect_live && kGame.frame_aspect ? kGame.frame_aspect(forced) : forced;
     if (FillsNarrow()) return float(Desktop().width) / float(Desktop().height);
     return Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
 }

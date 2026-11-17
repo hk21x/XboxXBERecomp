@@ -604,6 +604,8 @@ private:
     bool EnsureSmaa(uint32_t w, uint32_t h);
     void HoldFrame(Target& t, const Surface& front);
     // HoldFrame: the last two images of a title blending its frames
+    ComPtr<ID3D12Resource> backdrop_;  // GameInfo::bars_backdrop: the frame, small and dimmed, behind the bars
+    D3D12_RESOURCE_STATES backdrop_state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
     ComPtr<ID3D12Resource> hold_[2];
     D3D12_RESOURCE_STATES hold_state_[2] = {D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST};
     int hold_last_ = 0;
@@ -4275,6 +4277,19 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
         frame_fmt = t->fmt;
         if (app::Get().smaa && SmaaFrame(*t)) frame = smaa_[2].res.Get(), frame_fmt = kBgra;
     }
+    // GameInfo::bars_backdrop: the frame shrunk to a few dozen pixels and dimmed, for the bars beside it
+    bool backdrop = false;
+    if (frame && app::kGame.bars_backdrop && app::kGame.bars_backdrop() && bb_h_ &&
+        app::FrameAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
+        D3D12_RESOURCE_STATES fs = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ComPtr<ID3D12Resource> small = Shrink(frame, fs, frame_fmt, 64, 36, {.taps = 8, .into = backdrop_.Get(), .into_state = backdrop_state_, .mul = 0.45f});
+        if (small) {
+            backdrop_ = small;
+            backdrop_state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            Transition(backdrop_.Get(), backdrop_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            backdrop = true;
+        }
+    }
     D3D12_RESOURCE_STATES bs = D3D12_RESOURCE_STATE_PRESENT;
     Transition(bb_[bi].Get(), bs, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), kRtvCount + bi, rtv_inc_);
@@ -4282,6 +4297,12 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     CLAt(__func__)->ClearRenderTargetView(rh, black, 0, nullptr);
     CLAt(__func__)->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     bound_rt_ = bound_ds_ = nullptr;
+    if (backdrop) {
+        float uv[4] = {0, 0, 1, 1};
+        ForgetDrawState();
+        SetFullViewport(bb_w_, bb_h_);
+        Blit(backdrop_.Get(), kBgra, uv, {.gamma = gamma_});
+    }
     if (frame) BlitFrame(frame, frame_fmt);
     // F12: the frame as shown, before the interface; the read submits, so the target is set again
     if (app::TakeScreenshotRequest()) {
