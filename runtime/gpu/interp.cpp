@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
@@ -69,6 +70,20 @@ int ViewProjection() {
     }();
     return v;
 }
+// GameInfo::interp_world as a Rec::vsc index (its first of three rows), or -1. With the view-projection: transform =
+// view-projection * world
+int World() {
+    static const int w = [] {
+        const char* e = std::getenv("XBE_INTERP_WORLD");
+        const int reg = e && *e ? std::atoi(e) : app::kGame.interp_world;
+        if (reg < -96 || reg > 93 || reg == -1 || ViewProjection() < 0) return -1;
+        const int k = int((uint32_t(reg + 96) + kRegisters - Transform()) % kRegisters);
+        if (k + 3 > int(kRegisters) || k < int(kMatrixRegisters)) return -1;
+        LOGR("gpu: in-between frames: a world at c%d: a draw whose world is the step before's is still, and goes by the view-projections", reg);
+        return k;
+    }();
+    return w;
+}
 constexpr double kOnCar = 300;  // a draw's place on a car, world units (Juiced's look like centimetres: rigid places
                                  // on a car were 0 or 100 to 300 away, scenery 1000 and more) from the car draw's origin
 constexpr uint32_t kOnCarMost = 96;  // and few vertices: a light, a glow, the neon; not a barrier a car brushes past
@@ -105,6 +120,9 @@ struct Rec {
     float was[4][4];
     float move[4][4];       // a derived draw: its target's camera move, for its own view-projection (GameInfo::interp_view_projection)
     bool has_move = false;
+    int same = -1;          // its match holds the very same world (GameInfo::interp_world): a still thing, and this its self
+    float vp_was[4][4];     // its view-projection in the step before, as the title had it
+    bool has_vp_was = false;
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
     bool rider = false;  // a still program's draw given a car's move (the in-between table names it)
     uint8_t why = 0;  // the in-between table: what made it derived (1 the camera's move, 2 laid afresh on a car, 3 off the camera, 4 come into view)
@@ -273,6 +291,7 @@ private:
         }();
         if (k < kMatrixRegisters) return false;
         if (const int vp = ViewProjection(); vp >= 0 && int(k) >= vp && int(k) < vp + int(kMatrixRegisters)) return false;
+        if (const int w = World(); w >= 0 && int(k) >= w && int(k) < w + 3) return false;  // a matrix: all of it or none
         if (!constants) return true;
         if (app::kGame.interp_blends_constant &&
             !app::kGame.interp_blends_constant(int((k + Transform()) % kRegisters) - 96, was, now))
@@ -311,6 +330,8 @@ private:
         r.own = -1;
         r.share = -1;
         r.has_move = false;
+        r.same = -1;
+        r.has_vp_was = false;
         r.stray = false;
         r.peer = -1;
         r.headers.clear();
@@ -338,6 +359,27 @@ private:
         }
         for (uint32_t k = 0; k < kRegisters; k++) r.vsc[k] = s.vsc[(k + Transform()) % kRegisters];
     }
+    // XBE_INTERP_TRUTH=<world register> (diagnosis): each still draw's place in an in-between frame against the
+    // title's own matrices: its world (unchanged since the step before) through the view-projection blended between the two
+    // steps. By program and by how the draw was blended, every 600 steps: path 1 the transform, path 2 world then view-projection
+    static int TruthWorld() {  // XBE_INTERP_TRUTH=<world register>
+        static const int reg = std::atoi(std::getenv("XBE_INTERP_TRUTH"));
+        return reg;
+    }
+    static bool Truth() {
+        static const bool on = std::getenv("XBE_INTERP_TRUTH") != nullptr;
+        return on && ViewProjection() >= 0;
+    }
+    struct TruthStat {
+        uint64_t n = 0, bad_wvp = 0, over1 = 0, over2 = 0;
+        double sum1 = 0, max1 = 0, sum2 = 0, max2 = 0;
+    };
+    std::map<std::pair<uint32_t, std::string>, TruthStat> truth_;
+    std::map<std::string, uint64_t> truth_other_;
+    uint32_t truth_step_ = 0, truth_steps_ = 0;
+    std::unordered_map<uint64_t, std::vector<std::pair<std::array<float, 16>, int>>> truth_vp_;  // target and view-projection now: those before
+    std::unordered_set<uint64_t> truth_worlds_;  // target, program and world of the step before's draws
+    void NoteTruth(const Rec& r, const Rec::Constants& v, float alpha, bool at_step);
     // finds each draw's last self; false when there is nothing to blend or the camera was cut
     bool Match();
     void Replay(float alpha);
@@ -546,6 +588,21 @@ bool Interpolating::Match() {
             }
         return e < std::max(kSameMove * size, kStill);
     };
+    // its transform is its view-projection times its world (GameInfo::interp_world): all three the draw's own. A program
+    // that reads only some leaves the rest as the draw before left them (Juiced's crowd: no transform)
+    const auto composed = [](const Rec& r) {
+        const size_t w = size_t(World()), vp = size_t(ViewProjection());
+        for (size_t a = 0; a < 4; a++) {
+            double off = 0, size = 1e-3;
+            for (size_t b = 0; b < 4; b++) {
+                double t = b == 3 ? r.vsc[vp + a][3] : 0;
+                for (size_t c = 0; c < 3; c++) t += double(r.vsc[vp + a][c]) * r.vsc[w + c][b];
+                off += std::fabs(t - r.vsc[a][b]), size += std::fabs(r.vsc[a][b]);
+            }
+            if (off > 1e-3 * size) return false;
+        }
+        return true;
+    };
     // each draw of the step before where the camera's move would put it now (its target's camera taken back off it), or as it was
     std::vector<std::array<float, 16>> predicted(before_count_);
     for (size_t i = 0; i < before_count_; i++)
@@ -568,6 +625,7 @@ bool Interpolating::Match() {
             r.prev = -1;
             r.turning = false;
             r.stray = false;
+            r.same = -1;
             draws++;
             auto it = found.find(KeyOf(r));
             if (it == found.end() || it->second.empty()) continue;
@@ -577,21 +635,31 @@ bool Interpolating::Match() {
             auto& list = it->second;
             size_t best = list.size() - 1;
             float best_distance = 1e30f, second = 1e30f;
+            // GameInfo::interp_world: of them, one holding the very same world is its self, a still thing, whatever is nearer:
+            // nearness took a neighbour's among a street's repeated fronts, and what was blended from it slid towards the
+            // neighbour and back
+            const bool by_world = World() >= 0 && !flat(r.vsc) && composed(r);
+            size_t same = SIZE_MAX;
+            float same_distance = 1e30f;
             for (size_t l = list.size(); l-- > 0;) {
                 const auto& c = predicted[size_t(list[l])];
                 float distance = 0;
                 for (uint32_t k = 0; k < kMatrixRegisters; k++)
                     for (uint32_t e = 0; e < 4; e++) distance += std::fabs(c[k * 4 + e] - r.vsc[k][e]);
+                if (by_world && distance < same_distance &&
+                    !std::memcmp(&before_[size_t(list[l])].vsc[size_t(World())], &r.vsc[size_t(World())], 3 * sizeof r.vsc[0]))
+                    same_distance = distance, same = l;
                 if (distance < best_distance) second = best_distance, best_distance = distance, best = l;
                 else if (distance < second) second = distance;
             }
+            if (same != SIZE_MAX) best = same;
             const int candidate = list[best];
             // where the camera's move puts it, the right copy is where it is now, but for its own move: one come into view this step
             // took a copy elsewhere, a screen or more away (Juiced's street, 2 to 5 screens in the log). It has no self to blend from
             // only among copies: a draw with one self (a car crossing the screen in the flyover) is that self however it moved
             // and only when another copy is nearly as near: a copy that moves (a car's wheel in the flyover) is still far nearer its
             // self than any other
-            if (predicting && list.size() > 1 && second < 2 * best_distance && !flat(r.vsc) && still.count(r.s->vs_handle)) {
+            if (same == SIZE_MAX && predicting && list.size() > 1 && second < 2 * best_distance && !flat(r.vsc) && still.count(r.s->vs_handle)) {
                 // on the screen in its own widths: x / w over the projection's scale, the row's length against the w row's
                 const auto len = [](float a, float b, float c) { return std::sqrt(a * a + b * b + c * c); };
                 const auto& c = predicted[size_t(candidate)];
@@ -626,6 +694,7 @@ bool Interpolating::Match() {
             }
             r.turning = turned;  // a wheel or a piece of debris turning fast stays with what carries it: only its place is blended
             r.prev = candidate;
+            if (same != SIZE_MAX && !turned) r.same = candidate;
             if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
         }
     };
@@ -827,7 +896,8 @@ bool Interpolating::Match() {
             // times its own world: the camera and projection cancel), rigid and within a car's length. A light, the neon, a
             // glow drawn on the car; scenery's place on a car is far off. The car's move then: its own match is not needed
             // (Harry's bursts of dd0b70f: the reversing lights' glow lost its match one step in three and hung below the lamps)
-            if (!car_moves.empty() && r.c <= kOnCarMost) {
+            // (not one whose world is the step before's, GameInfo::interp_world: it has not moved, whatever car is beside it)
+            if (!car_moves.empty() && r.c <= kOnCarMost && r.same < 0) {
                 // XBE_INTERP_ON_CAR=N (a test): another distance; with XBE_INTERP_LOG the nearest of each still draw is counted
                 static const double on_car = [] {
                     const char* e = std::getenv("XBE_INTERP_ON_CAR");
@@ -1221,6 +1291,104 @@ bool Interpolating::Match() {
                 r.has_move = true;
             }
         }
+    // GameInfo::interp_world: what is still goes by the title's own matrices, not by a move read off other draws. The
+    // view-projection of the step before for each of this step's (per target) is what the draws matched to their very self
+    // (the same world) had. A draw given the camera's move with such a self takes that self's transform and
+    // view-projection; one without (come into view) its world through the view-projection before. And a draw left at the
+    // step's place whose world the step before held too (a small piece, a sprite: rules that guess by size and program)
+    // is still as well. All of them then agree to a float's rounding with each other and with the draws blended from their
+    // own match, where the voted move, a product of inverses, was 0.1% of the screen off (3 pixels at 3440) and the
+    // world rows blended from a neighbour copy's match put the buildings a street's front along and back (Harry,
+    // 2026-11-17; XBE_INTERP_TRUTH: 5000 draws in 10 s of a race more than 0.2% off)
+    if (World() >= 0) {
+        const size_t w = size_t(World()), vp = size_t(ViewProjection());
+        const auto hash = [](uint64_t h, const void* p, size_t n) {
+            const auto* b = static_cast<const uint8_t*>(p);
+            for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001B3ull;
+            return h;
+        };
+        const auto vp_key = [&](const Rec& x) { return hash(0xCBF29CE484222325ull ^ x.s->rt.data, &x.vsc[vp], 16 * sizeof(float)); };
+        const auto world_key = [&](const Rec& x) {
+            return hash(0xCBF29CE484222325ull ^ x.s->rt.data ^ (uint64_t(x.s->vs_handle) << 32), &x.vsc[w], 12 * sizeof(float));
+        };
+        struct Before {
+            int rec, votes;
+        };
+        std::unordered_map<uint64_t, std::vector<Before>> before_vp;
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& r = now_[i];
+            if (r.kind != Rec::Draw || r.same < 0) continue;
+            auto& list = before_vp[vp_key(r)];
+            bool found = false;
+            for (Before& b : list)
+                if (!std::memcmp(&before_[size_t(b.rec)].vsc[vp], &before_[size_t(r.same)].vsc[vp], 16 * sizeof(float))) b.votes++, found = true;
+            if (!found) list.push_back({r.same, 1});
+        }
+        const auto vp_before = [&](const Rec& r) -> const Rec* {
+            const auto it = before_vp.find(vp_key(r));
+            if (it == before_vp.end()) return nullptr;
+            const Before* best = nullptr;
+            for (const Before& b : it->second)
+                if (!best || b.votes > best->votes) best = &b;
+            return best && best->votes >= kLeastVotes ? &before_[size_t(best->rec)] : nullptr;
+        };
+        const auto through = [&](Rec& r, const Rec& p) {  // p's view-projection, r's world
+            for (size_t a = 0; a < 4; a++)
+                for (size_t b = 0; b < 4; b++) {
+                    double t = b == 3 ? p.vsc[vp + a][3] : 0;
+                    for (size_t c = 0; c < 3; c++) t += double(p.vsc[vp + a][c]) * r.vsc[w + c][b];
+                    r.was[a][b] = float(t);
+                    r.vp_was[a][b] = p.vsc[vp + a][b];
+                }
+            r.has_vp_was = true;
+        };
+        std::unordered_set<uint64_t> worlds;
+        for (size_t i = 0; i < before_count_; i++)
+            if (before_[i].kind == Rec::Draw) worlds.insert(world_key(before_[i]));
+        uint32_t selves = 0, by_camera = 0, found_still = 0, voted = 0;
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || flat(r.vsc)) continue;
+            if (r.derived && !r.rider) {
+                const Rec* camera = vp_before(r);
+                // its self's, unless that was drawn through another view-projection than the rest of this one's were
+                if (r.same >= 0 && (!camera || !std::memcmp(&camera->vsc[vp], &before_[size_t(r.same)].vsc[vp], 16 * sizeof(float)))) {
+                    // its self's transform as the title rounded it (an in-between frame at the step before's time is that
+                    // step's picture), unless that was not its own: a program that does not read the transform leaves
+                    // another draw's there
+                    const Rec& p = before_[size_t(r.same)];
+                    through(r, p);
+                    if (composed(p))
+                        for (size_t a = 0; a < 4; a++)
+                            for (size_t b = 0; b < 4; b++) r.was[a][b] = p.vsc[a][b];
+                    selves++;
+                } else if (const Rec* p = vp_before(r)) {
+                    if (composed(r)) through(r, *p);
+                    else std::memcpy(r.vp_was, &p->vsc[vp], sizeof r.vp_was), r.has_vp_was = true;  // only its view-projection is its own
+                    by_camera++;
+                } else {
+                    voted++;
+                }
+            } else if (!r.derived && (r.prev < 0 ? r.peer < 0 : r.same < 0) && worlds.count(world_key(r)) && composed(r)) {
+                // left at the step's place, or matched to another than its self (its self taken by a like draw before it).
+                // Beside a car or not: its world has not changed
+                if (const Rec* p = vp_before(r)) {
+                    through(r, *p);
+                    r.prev = -1, r.turning = false, r.derived = true, r.why = 6;
+                    found_still++;
+                }
+            }
+        }
+        static const bool log = std::getenv("XBE_INTERP_LOG") != nullptr;
+        static uint64_t sum[4] = {}, steps = 0;
+        sum[0] += selves, sum[1] += by_camera, sum[2] += found_still, sum[3] += voted;
+        if (log && ++steps % 600 == 0) {
+            LOGR("gpu: in-between frames: still draws by the title's matrices in 600 steps: %llu their own self's, %llu their world "
+                 "through the view-projection before, %llu left at the step's place found still; %llu by the voted move",
+                 (unsigned long long)sum[0], (unsigned long long)sum[1], (unsigned long long)sum[2], (unsigned long long)sum[3]);
+            sum[0] = sum[1] = sum[2] = sum[3] = 0;
+        }
+    }
     // XBE_INTERP_VPCHECK (diagnosis): each derived draw's view-projection halfway through the step, by its move, against a
     // matched draw's of its target holding the same one (halfway between its match's and its own), as the largest
     // difference over the largest entry; by kind, every 600 steps
@@ -1472,8 +1640,18 @@ void Interpolating::Replay(float alpha) {
                     }
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
                         for (uint32_t c = 0; c < 4; c++) v[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
-                    // its own view-projection (GameInfo::interp_view_projection) by the same move
-                    if (const int vp = ViewProjection(); vp >= 0 && r.has_move)
+                    // its world is the step's: its move is in the transform and the view-projection (GameInfo::interp_world).
+                    // Blended from its own match, a neighbour copy's as often as its self's, what the program places
+                    // through the world slid a copy along and back
+                    if (const int w = World(); w >= 0 && !r.rider)
+                        for (size_t k = size_t(w); k < size_t(w) + 3; k++) v[k] = r.vsc[k];
+                    // its own view-projection (GameInfo::interp_view_projection): the step before's as the title had it, or
+                    // by the same move
+                    if (const int vp = ViewProjection(); vp >= 0 && r.has_vp_was) {
+                        for (int a = 0; a < 4; a++)
+                            for (int b = 0; b < 4; b++)
+                                v[size_t(vp + a)][size_t(b)] = r.vp_was[a][b] + (r.vsc[size_t(vp + a)][size_t(b)] - r.vp_was[a][b]) * alpha;
+                    } else if (vp >= 0 && r.has_move)
                         for (int a = 0; a < 4; a++)
                             for (int b = 0; b < 4; b++) {
                                 float was = 0;
@@ -1491,6 +1669,7 @@ void Interpolating::Replay(float alpha) {
                 } else {
                     v = r.vsc;
                 }
+                if (alpha != 1 && Truth()) NoteTruth(r, v, alpha, at_step);
                 {  // turned back: v[k] is the title's register Transform() + k
                     const uint32_t t = Transform();
                     std::memcpy(&d.vsc[t], &v[0], (kRegisters - t) * sizeof v[0]);
@@ -1528,6 +1707,117 @@ void Interpolating::Replay(float alpha) {
     region_fence_[region_] = inner_->Fence();
     replay_seconds_ = std::chrono::duration<double>(Clock::now() - began).count();
     sum_replay_ += replay_seconds_, replays_++;
+}
+
+void Interpolating::NoteTruth(const Rec& r, const Rec::Constants& v, float alpha, bool at_step) {
+    static const size_t world = size_t((uint32_t(TruthWorld() + 96) + kRegisters - Transform()) % kRegisters);
+    const size_t vp = size_t(ViewProjection());
+    const auto hash = [](uint64_t h, const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001B3ull;
+        return h;
+    };
+    const auto vp_key = [&](const Rec& x) { return hash(0xCBF29CE484222325ull ^ x.s->rt.data, &x.vsc[vp], 16 * sizeof(float)); };
+    const auto world_key = [&](const Rec& x) {
+        return hash(0xCBF29CE484222325ull ^ x.s->rt.data ^ (uint64_t(x.s->vs_handle) << 32), &x.vsc[world], 12 * sizeof(float));
+    };
+    if (truth_step_ != steps_seen_) {
+        truth_step_ = steps_seen_;
+        truth_vp_.clear(), truth_worlds_.clear();
+        for (size_t i = 0; i < before_count_; i++)
+            if (before_[i].kind == Rec::Draw) truth_worlds_.insert(world_key(before_[i]));
+        for (size_t i = 0; i < count_; i++) {
+            const Rec& x = now_[i];
+            const int m = x.kind != Rec::Draw ? -1 : x.prev >= 0 ? x.prev : x.own;
+            if (m < 0) continue;
+            std::array<float, 16> was;
+            std::memcpy(was.data(), &before_[size_t(m)].vsc[vp], sizeof was);
+            auto& list = truth_vp_[vp_key(x)];
+            bool found = false;
+            for (auto& [rows, votes] : list)
+                if (rows == was) votes++, found = true;
+            if (!found) list.push_back({was, 1});
+        }
+        if (++truth_steps_ % 600 == 0) {
+            std::vector<std::pair<double, const std::pair<const std::pair<uint32_t, std::string>, TruthStat>*>> order;
+            for (const auto& e : truth_) order.push_back({std::max(e.second.sum1, e.second.sum2), &e});
+            std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            TruthStat all;
+            for (const auto& e : truth_) {
+                all.n += e.second.n, all.over1 += e.second.over1, all.over2 += e.second.over2;
+                all.sum1 += e.second.sum1, all.sum2 += e.second.sum2;
+            }
+            LOGR("gpu: in-between truth: %llu still draws; path 1 mean %.5f, %llu over 0.002; path 2 mean %.5f, %llu over 0.002",
+                 (unsigned long long)all.n, all.n ? all.sum1 / double(all.n) : 0.0, (unsigned long long)all.over1,
+                 all.n ? all.sum2 / double(all.n) : 0.0, (unsigned long long)all.over2);
+            for (size_t i = 0; i < order.size() && i < 30; i++) {
+                const auto& [key, t] = *order[i].second;
+                LOGR("gpu: in-between truth: vs %08X %-14s n %llu (wvp off %llu) path 1 mean %.5f max %.5f over %llu; path 2 mean %.5f max %.5f over %llu",
+                     key.first, key.second.c_str(), (unsigned long long)t.n, (unsigned long long)t.bad_wvp, t.sum1 / double(t.n), t.max1,
+                     (unsigned long long)t.over1, t.sum2 / double(t.n), t.max2, (unsigned long long)t.over2);
+            }
+            std::string other;
+            for (const auto& [k, n] : truth_other_) other += k + " " + std::to_string(n) + "; ";
+            LOGR("gpu: in-between truth: not judged: %s", other.c_str());
+            truth_.clear(), truth_other_.clear();
+        }
+    }
+    if (std::fabs(r.vsc[3][0]) + std::fabs(r.vsc[3][1]) + std::fabs(r.vsc[3][2]) < 1e-6f) return;
+    if (!camera_targets_.count(r.s->rt.data & 0x0FFFFFFF)) return;
+    char cat[32];
+    std::snprintf(cat, sizeof cat, "%s%u%s", at_step ? "at_step" : r.prev >= 0 ? (r.turning ? "turning" : "blend") : r.derived ? (r.rider ? "rider" : "derived")
+                  : r.peer >= 0 ? "peer" : "none", unsigned(r.why), r.derived ? (r.own >= 0 ? "+own" : r.share >= 0 ? "+share" : "") : "");
+    if (!truth_worlds_.count(world_key(r))) { truth_other_[std::string("new world ") + cat]++; return; }
+    const auto it = truth_vp_.find(vp_key(r));
+    if (it == truth_vp_.end()) { truth_other_["no camera"]++; return; }
+    const std::array<float, 16>* was = nullptr;
+    int votes = 0;
+    for (const auto& [rows, n] : it->second)
+        if (n > votes) votes = n, was = &rows;
+    // a point of it: its first vertex, or its origin
+    double p[4] = {0, 0, 0, 1};
+    const State& s = *r.s;
+    if ((s.vs_handle & 1) && s.vs && !s.input_active) {
+        const VertexShader::Input& in = s.vs->inputs[0];
+        if (in.stream >= 0 && (in.type == 0x32 || in.type == 0x42))
+            for (const Rec::Kept& k : r.kept)
+                if (k.stream == uint32_t(in.stream) && in.offset + 12 <= k.bytes && size_t(k.offset) + k.bytes <= kept_bytes_.size()) {
+                    float f[3];
+                    const uint32_t first = r.has_bytes && r.bytes.size() >= 2 ? uint32_t(r.bytes[0] | (r.bytes[1] << 8)) + s.base_vertex : r.b;
+                    const size_t o = size_t(first) * s.streams[size_t(in.stream)].stride + in.offset;
+                    if (o + 12 > k.bytes) break;
+                    std::memcpy(f, kept_bytes_.data() + k.offset + o, 12);
+                    p[0] = f[0], p[1] = f[1], p[2] = f[2];
+                }
+    }
+    const auto rows4 = [](const std::array<float, 4>* m, const double* q, double* o, int n) {
+        for (int a = 0; a < n; a++) o[a] = m[a][0] * q[0] + m[a][1] * q[1] + m[a][2] * q[2] + m[a][3] * q[3];
+    };
+    double wp[4] = {0, 0, 0, 1}, wu[4] = {0, 0, 0, 1}, direct[4], through[4], truth[4], used1[4], used2[4];
+    rows4(&r.vsc[world], p, wp, 3);
+    rows4(&r.vsc[0], p, direct, 4);
+    rows4(&r.vsc[vp], wp, through, 4);
+    std::array<std::array<float, 4>, 4> vpa;
+    for (size_t a = 0; a < 4; a++)
+        for (size_t b = 0; b < 4; b++) vpa[a][b] = (*was)[a * 4 + b] + (r.vsc[vp + a][b] - (*was)[a * 4 + b]) * alpha;
+    rows4(vpa.data(), wp, truth, 4);
+    rows4(&v[0], p, used1, 4);
+    rows4(&v[world], p, wu, 3);
+    rows4(&v[vp], wu, used2, 4);
+    const auto len = [](const std::array<float, 4>& m) { return std::sqrt(double(m[0]) * m[0] + double(m[1]) * m[1] + double(m[2]) * m[2]); };
+    const double sw = len(r.vsc[vp + 3]), sx = len(r.vsc[vp]) / sw, sy = len(r.vsc[vp + 1]) / sw;
+    if (!(truth[3] > 1 && sx > 0 && sy > 0)) { truth_other_["behind"]++; return; }
+    const auto off = [&](const double* u) {
+        if (!(u[3] > 0.5)) return 9.0;
+        return std::max(std::fabs(u[0] / u[3] - truth[0] / truth[3]) / sx, std::fabs(u[1] / u[3] - truth[1] / truth[3]) / sy);
+    };
+    TruthStat& t = truth_[{r.s->vs_handle, cat}];
+    t.n++;
+    const double tol = 1e-3 * std::max(1.0, std::fabs(direct[3]));
+    if (std::fabs(direct[0] - through[0]) + std::fabs(direct[1] - through[1]) + std::fabs(direct[3] - through[3]) > 3 * tol) t.bad_wvp++;
+    const double e1 = off(used1), e2 = off(used2);
+    t.sum1 += e1, t.max1 = std::max(t.max1, e1), t.over1 += e1 > 0.002;
+    t.sum2 += e2, t.max2 = std::max(t.max2, e2), t.over2 += e2 > 0.002;
 }
 
 // GameInfo::interp_skip_still_targets: a target whose draws a replay would repeat exactly holds the step's picture already, from

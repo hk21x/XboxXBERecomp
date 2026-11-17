@@ -261,6 +261,13 @@ struct GameInfo {
     // rows blended one constant at a time and some held at the step's as they crossed zero, shook in the race's opening
     // fly-by (Harry, 2026-11-16). XBE_INTERP_VP=<register> or -1 overrides
     int interp_view_projection = -1;
+    // and their world (three rows, the title's numbering; -1 for none), where transform = view-projection * world holds for
+    // a draw. A draw whose world the step before held too is still: matched to that self among copies whatever is nearer,
+    // and moved by the title's own view-projections of the two steps, not by a move voted from other draws; a draw given
+    // another's move keeps its world at the step's. Juiced's buildings shifted a front along and back (five of its
+    // programs place through c0 to c2 and c14 to c17, and the world was blended from a neighbour's match; Harry,
+    // 2026-11-17). Needs interp_view_projection. XBE_INTERP_WORLD=<register>, or -1 for the old way
+    int interp_world = -1;
     // which of the other constants (the title's numbering) those frames blend; the rest take the step's own value. Juiced's
     // pick an animation's frame, a tint or a phase among a few values (c36: 1, 0.67, 0.5, 0.4, 0.25), and halfway between
     // two of them is none of them: the corner boards' arrows flickered in every in-between frame (Harry, 2026-11-14). Not
