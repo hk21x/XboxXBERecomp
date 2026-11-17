@@ -2235,7 +2235,12 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     uint64_t gs = 0;
     if (k.topo == uint32_t(Topology::Points)) gs = ExpandPoints(d);
     if (k.topo == uint32_t(Topology::Lines)) gs = ExpandLines(d);
-    const uint64_t cache_key = h ^ (gs * 0x9E3779B97F4A7C15ull);
+    // and the shaders' own bytecode: a program's hash is the console's, and what it is translated to changes from one build
+    // to the next; a blob built from other bytecode is not always refused, Harry's AMD lost the device on one (an evening
+    // race, 2026-11-17: reason 887A0001 making a pipeline, just after a kept one was refused)
+    uint64_t cache_key = h ^ (gs * 0x9E3779B97F4A7C15ull);
+    for (const D3D12_SHADER_BYTECODE& b : {d.VS, d.PS, d.GS})
+        if (b.pShaderBytecode && b.BytecodeLength) cache_key = (cache_key * 0x100000001B3ull) ^ Hash(b.pShaderBytecode, b.BytecodeLength);
     ComPtr<ID3D12PipelineState> pso;
     g_perf.psos++;
     const std::string* kept = CachedPipeline(cache_key);
