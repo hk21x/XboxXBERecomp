@@ -284,6 +284,11 @@ struct GameInfo {
     // step: Juiced's own drawing takes 4 ms of the 16.7, and at a cap of 240 the 4th frame never fit (180, never 240; with it
     // 230 to 240, Harry 2026-11-15). XBE_INTERP_FILL=0 or 1 overrides
     bool interp_fill_frames = false;
+    // each in-between frame, once shown, copied into the step before's front buffer: a title that blends the frame before over
+    // each new one (Juiced's Showoff trail) samples that buffer, and every in-between frame of a step blended the same older
+    // picture, the trail moving at the step's rate under a smooth scene (choppy, Harry 2026-11-18). The title must draw
+    // all of its next back buffer anew. XBE_INTERP_FRAME_BEFORE=0 or 1 overrides
+    bool interp_frame_before = false;
     // a small draw whose vertices the title builds afresh each step in the world (its matrix only the camera's) and whose
     // vertices lie on a car takes that car's move: Juiced's neon and shadow under the cars, laid on the road at the car's new
     // place each step, were drawn ahead of the blended car and slid back every step (gpu/interp.cpp). XBE_INTERP_REBUILT=0

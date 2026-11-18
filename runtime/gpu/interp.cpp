@@ -388,6 +388,21 @@ private:
     void FindStillTargets();
     std::vector<uint8_t> skip_;  // records left out of the replays (FindStillTargets), for skip_step_
     uint32_t skip_step_ = 0, front_data_ = 0;
+    Surface front_before_{};  // the step before's front buffer (GameInfo::interp_frame_before)
+    // GameInfo::interp_frame_before: an in-between frame just shown copied into the step before's front buffer, the
+    // picture the title takes for the frame before
+    void ShownBefore(const Surface& front) {
+        static const bool on = [] {
+            const char* e = std::getenv("XBE_INTERP_FRAME_BEFORE");
+            const bool v = e && *e ? *e == '1' : app::kGame.interp_frame_before;
+            if (v) LOGR("gpu: in-between frames: each one shown copied into the frame buffer before (the title's frame before)");
+            return v;
+        }();
+        if (on && front_before_.header && front_before_.data &&
+            (front_before_.data & 0x0FFFFFFF) != (front.data & 0x0FFFFFFF) && front_before_.format == front.format &&
+            front_before_.size == front.size)
+            inner_->Copy(front, front_before_, 0, 0, 0);
+    }
     std::unordered_set<uint32_t> camera_targets_;  // the targets with a camera move this step (Match)
     uint64_t sum_skipped_ = 0;
     double sum_draw_calls_ = 0;  // XBE_PERF: replays' time in the renderer's Draw
@@ -1961,14 +1976,17 @@ void Interpolating::Present(const Surface& front) {
         for (int i = 0; i < Test(); i++) {
             Replay(float(i) / float(Test()));
             inner_->Present(front);
+            ShownBefore(front);
         }
     } else if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
             inner_->Present(front);
+            ShownBefore(front);
         }
         Replay(1);
         inner_->Present(front);
+        ShownBefore(front);
     } else if (!blend || step > kLongestStep || step < kShortestStep) {
         overran_ = false;
         inner_->Present(front);
@@ -2078,6 +2096,7 @@ void Interpolating::Present(const Surface& front) {
                 const double along = std::min(at / usual, 1.0);
                 Replay(float(ahead ? 1.0 + along : along));
                 inner_->Present(front);
+                ShownBefore(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() - frame_seconds_) * 0.1;
                 if (i) shown_++;
                 // not past the time the title needs for its next step, and the next frame begun early enough to be done by it: the
@@ -2090,6 +2109,7 @@ void Interpolating::Present(const Surface& front) {
             overran_ = std::chrono::duration<double>(Clock::now() - t).count() > span + replay_seconds_ + kOverrun;
         }
     }
+    front_before_ = front;
     shown_++;
     steps_++;
     if (t - reported_ > std::chrono::seconds(10)) {
