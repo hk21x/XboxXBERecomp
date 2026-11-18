@@ -323,6 +323,10 @@ struct GameInfo {
     // while true, the bars beside a frame narrower than the window show a small, dimmed copy of the frame stretched
     // across it (blurred by its size) instead of black: Juiced's 4:3 menus on an ultrawide screen (Harry, 2026-11-17)
     bool (*bars_backdrop)() = nullptr;
+    // with no sound device (XAudio2 cannot start), the mixer is still pulled at its rate and the output dropped, so the
+    // title's sound clock runs: off, it stands still, and Juiced held the player's car at the start for good, waiting
+    // on a sound to end (GPU-VM, which has no audio device, 2026-11-18)
+    bool silent_clock = false;
     // while frames run late (slower than 120 a second), each face of a cube map the GPU draws (a car's reflections) is
     // drawn at most this often a second and keeps its last picture in between; frames on time draw every face. 0 draws
     // them every frame always. XBE_CUBE_FACE_HZ overrides it

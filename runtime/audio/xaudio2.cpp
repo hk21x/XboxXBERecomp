@@ -33,7 +33,31 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         if (FAILED(XAudio2Create(&xa, 0, XAUDIO2_DEFAULT_PROCESSOR)) || FAILED(xa->CreateMasteringVoice(&master)) ||
             FAILED(xa->CreateSourceVoice(&voice, &wf))) {
             LOGE("audio: XAudio2 unavailable, no sound");
-            return;
+            if (!app::kGame.silent_clock) return;
+            // GameInfo::silent_clock: the mixer pulled as a device would, 10 ms a time on the clock, and dropped
+            LOGR("audio: the mixer runs without output (GameInfo::silent_clock)");
+            constexpr uint32_t kFrames = kRate / 100;
+            std::vector<float> buf(kFrames * 2);
+            LARGE_INTEGER freq, now;
+            QueryPerformanceFrequency(&freq);
+            QueryPerformanceCounter(&now);
+            const double tick = double(freq.QuadPart) / 100.0;
+            double next = double(now.QuadPart);
+            for (;;) {
+                QueryPerformanceCounter(&now);
+                if (app::Paused()) {
+                    next = double(now.QuadPart);
+                    Sleep(2);
+                    continue;
+                }
+                if (double(now.QuadPart) < next) {
+                    Sleep(1);
+                    continue;
+                }
+                render(buf.data(), kFrames);
+                next += tick;
+                if (double(now.QuadPart) - next > tick * 10) next = double(now.QuadPart);  // after a stall: no catching up
+            }
         }
         voice->Start();
         constexpr uint32_t kFrames = kRate / 100, kSlots = 4;
