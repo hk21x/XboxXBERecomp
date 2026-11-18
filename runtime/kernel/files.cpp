@@ -397,7 +397,7 @@ bool ReadGameFile(const std::string& xbox_path, std::vector<uint8_t>& out) {
     return true;
 }
 
-// a file the title hides (GameInfo::hide_file): opened, it is missing
+// a file the title hides (GameInfo::hide_file): opened, it is missing; created, refused
 static bool Hidden(const std::string& name) {
     if (!app::kGame.hide_file || !app::kGame.hide_file(name)) return false;
     FILE_LOG(200, "hidden %s", name.c_str());
@@ -411,9 +411,10 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     (void)access;
     uint32_t root;
     std::string name = ObjectName(attrs, &root);
-    if (disposition == 1 && Hidden(name)) {
-        IoStatus(iosb, kObjectNameNotFound, 5);
-        return kObjectNameNotFound;
+    if (Hidden(name)) {  // opened, it is missing; created, it is refused as on the read-only disc
+        const uint32_t status = disposition == 1 ? kObjectNameNotFound : kAccessDenied;
+        IoStatus(iosb, status, disposition == 1 ? 5 : 0);
+        return status;
     }
     Target t = Resolve(name, root);
     if (t.disc) return OpenOnDisc(t.entry, name, handle_out, iosb, disposition, options);
