@@ -17,7 +17,7 @@ class D3D12Rec {
 public:
     enum Op : uint8_t {
         kPso, kRootCbv, kRootTable, kTopology, kVertexBuffers, kIndexBuffer, kDraw, kDrawIndexed, kViewport, kScissor,
-        kBlendFactor, kStencilRef, kTargets, kBarrier, kSrv, kMark, kClearRtv, kClearDsv, kBeginQuery, kEndQuery,
+        kBlendFactor, kStencilRef, kTargets, kBarrier, kSrv, kMark, kClearRtv, kClearDsv, kBeginQuery, kEndQuery, kStamp,
     };
 
     bool Empty() const { return bytes_.empty(); }
@@ -70,6 +70,8 @@ public:
     // an occlusion query; its end resolves its count into the read-back buffer at its index
     void BeginQuery(ID3D12QueryHeap* h, uint32_t i) { Put(kBeginQuery, QueryArgs{h, nullptr, i}); }
     void EndQuery(ID3D12QueryHeap* h, ID3D12Resource* rb, uint32_t i) { Put(kEndQuery, QueryArgs{h, rb, i}); }
+    // a GPU timestamp into the heap at i (a capture's time per draw)
+    void Stamp(ID3D12QueryHeap* h, uint32_t i) { Put(kStamp, QueryArgs{h, nullptr, i}); }
     void ClearRtv(D3D12_CPU_DESCRIPTOR_HANDLE h, const float* col, uint32_t n, const D3D12_RECT* r) {
         Head(kClearRtv);
         Raw(&h, sizeof h);
@@ -172,6 +174,11 @@ public:
                     auto q = Get<QueryArgs>(p);
                     cl->EndQuery(q.heap, D3D12_QUERY_TYPE_OCCLUSION, q.i);
                     cl->ResolveQueryData(q.heap, D3D12_QUERY_TYPE_OCCLUSION, q.i, 1, q.rb, uint64_t(q.i) * sizeof(uint64_t));
+                    break;
+                }
+                case kStamp: {
+                    auto q = Get<QueryArgs>(p);
+                    cl->EndQuery(q.heap, D3D12_QUERY_TYPE_TIMESTAMP, q.i);
                     break;
                 }
                 case kClearRtv: {

@@ -906,6 +906,13 @@ private:
     FILE* cap_ = nullptr;
     std::filesystem::path cap_dir_;
     uint32_t cap_i_ = 0;
+    // a capture's GPU time per operation: a timestamp before each (its number) and before each save (-1), written
+    // into frame.txt's "gpu" lines at its end
+    static constexpr uint32_t kCapStamps = 16384;
+    ComPtr<ID3D12QueryHeap> cap_stamp_heap_;
+    std::vector<int> cap_stamps_;
+    void CapStamp(int op);
+    void CapTimes();
     int cap_aa_left_ = 0;  // XBE_CAPTURE_DRAWS=aa: draws still to save after a stretched one
     uint32_t cap_rt_ = 0;
     Surface cap_zs_;     // the depth target drawn with, saved when the frame moves on from it
@@ -1817,7 +1824,10 @@ ID3D12PipelineState* D3D12Backend::EnsureDepthCopyPipeline(uint32_t samples) {
 
 // src's depth drawn into dst's depth buffer
 void D3D12Backend::DrawDepthCopy(Target& src, Target& dst, ID3D12PipelineState* pso) {
-    if (cap_) fprintf(cap_, "%04u depth copy %08X to %08X\n", cap_i_++, src.data, dst.data);
+    if (cap_) {
+        CapStamp(int(cap_i_));
+        fprintf(cap_, "%04u depth copy %08X to %08X\n", cap_i_++, src.data, dst.data);
+    }
     Settle(src);
     Settle(dst);
     Wrote(dst);
@@ -3538,7 +3548,10 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         }
     } post_time{perf_post};
     g_perf.draws++;
-    if (cap_) CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
+    if (cap_) {
+        CapStep(s.rt, s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? s.zs : Surface{});
+        CapStamp(int(cap_i_));
+    }
     // XBE_CAPTURE_DRAWS=vs:...: the target once before the first draw with that shader, before this draw binds anything
     if (cap_ && !cap_vs_before_ && diag::CaptureDraws().vs && s.vs_handle == diag::CaptureDraws().vs) {
         cap_vs_before_ = true;
@@ -4029,6 +4042,7 @@ void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
     PerfScope perf_clear{g_perf.clear};
     if (cap_) {
         CapStep(s.rt, s.zs);
+        CapStamp(int(cap_i_));
         fprintf(cap_, "%04u clear rt %08X ds %08X flags %X color %08X z %.3f\n", cap_i_++, s.rt.data, s.zs.data, flags,
                 color, z);
     }
@@ -4130,6 +4144,7 @@ void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
     if (cap_) {
         const char* from = "memory";
         if (src_t) from = src_t->drawn ? "target" : "idle target";
+        CapStamp(int(cap_i_));
         fprintf(cap_, "%04u copy %08X %s to %08X\n", cap_i_++, src.data, from, dst.data);
     }
     // pixels the CPU made: the copy happens in memory, textures and targets pick it up from there
@@ -4178,6 +4193,8 @@ void D3D12Backend::ResizeSwap() {
 }
 
 void D3D12Backend::FinishCapture(const Surface& front) {
+    CapStamp(-1);
+    CapTimes();
     CapStep(Surface{});
     if (Target* f = FindTarget(front, false)) CapSave(*f, "final");
     for (auto& t : cap_tex_) {
@@ -4213,6 +4230,7 @@ void D3D12Backend::StartCapture() {
     for (auto& [key, t] : targets_)
         fprintf(cap_, "target %08X %s guest %ux%u host %ux%u\n", t.data, t.depth ? "depth" : "colour", t.gw, t.gh, t.w, t.h);
     cap_i_ = cap_rt_ = cap_vs_ = 0;
+    cap_stamps_.clear();
     cap_vs_before_ = false;
     cap_zs_ = {};
     cap_seen_.clear();
@@ -5643,6 +5661,53 @@ constexpr int kBmpBitCount = 28;
 constexpr int kBmpImageSize = 34;
 constexpr uint32_t kBmpInfoBytes = 40;
 
+void D3D12Backend::CapStamp(int op) {
+    if (!cap_ || cap_stamps_.size() >= kCapStamps) return;
+    if (!cap_stamp_heap_) {
+        D3D12_QUERY_HEAP_DESC qd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kCapStamps, 0};
+        if (FAILED(dev_->CreateQueryHeap(&qd, IID_PPV_ARGS(&cap_stamp_heap_)))) return;
+    }
+    rec_.Stamp(cap_stamp_heap_.Get(), uint32_t(cap_stamps_.size()));
+    cap_stamps_.push_back(op);
+}
+
+// each operation's GPU time, to the next timestamp: "gpu NNNN ms", then the slowest
+void D3D12Backend::CapTimes() {
+    uint32_t n = uint32_t(cap_stamps_.size());
+    UINT64 freq = 0;
+    if (n < 2 || FAILED(queue_->GetTimestampFrequency(&freq)) || !freq) return;
+    ComPtr<ID3D12Resource> rb;
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC bd = BufferDesc(uint64_t(n) * sizeof(uint64_t));
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&rb))))
+        return;
+    FlushRec();
+    cl_->ResolveQueryData(cap_stamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, n, rb.Get(), 0);
+    Flush();
+    const uint64_t* t = nullptr;
+    if (FAILED(rb->Map(0, nullptr, (void**)&t)) || !t) return;
+    std::map<int, double> ms;  // by operation, summed (a draw left out shares the next one's number)
+    for (uint32_t i = 0; i + 1 < n; i++) {
+        if (cap_stamps_[i] < 0 || t[i + 1] < t[i]) continue;
+        ms[cap_stamps_[i]] += double(t[i + 1] - t[i]) * 1000.0 / double(freq);
+    }
+    rb->Unmap(0, nullptr);
+    double total = 0;
+    std::vector<std::pair<double, int>> top;
+    for (auto& [op, v] : ms) {
+        fprintf(cap_, "gpu %04d %.3f ms\n", op, v);
+        total += v;
+        top.push_back({v, op});
+    }
+    std::sort(top.rbegin(), top.rend());
+    fprintf(cap_, "gpu total %.3f ms over %zu operations; slowest:", total, ms.size());
+    for (size_t i = 0; i < top.size() && i < 12; i++) fprintf(cap_, " %04d %.3f", top[i].second, top[i].first);
+    fputc('\n', cap_);
+    LOGR("d3d12: capture GPU time %.2f ms over %zu operations, the slowest %04d at %.2f ms", total, ms.size(),
+         top.empty() ? -1 : top[0].second, top.empty() ? 0.0 : top[0].first);
+}
+
 void D3D12Backend::CapSave(const CapImage& img, const char* name) {
     ComPtr<ID3D12Resource> down = Shrink(img.res, *img.state, img.fmt, img.w, img.h, {.mul = img.mul});
     std::vector<uint8_t> px;
@@ -5681,6 +5746,7 @@ void D3D12Backend::CapStep(const Surface& rt, const Surface& zs) {
     uint32_t z = zs.header ? mem::VirtualFromPhysical(zs.data) : 0;
     uint32_t cz = cap_zs_.header ? mem::VirtualFromPhysical(cap_zs_.data) : 0;
     if (d == cap_rt_ && z == cz) return;
+    CapStamp(-1);  // the saves below are not the operation's time
     auto it = targets_.find(TargetMapKey(cap_rt_, false));
     if (cap_rt_ && d != cap_rt_ && it != targets_.end()) {
         char name[32];
