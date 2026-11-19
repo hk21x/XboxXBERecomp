@@ -258,13 +258,20 @@ bool Changed(const Target& t) {
     return false;
 }
 
-// a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it
+// a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it. The render thread runs behind
+// the title, so it can look between a lock and the writes after it (CRI Sofdec locks its movie frame, a target the
+// title also draws on, and decodes into it on its own thread: 50 Cent: Bulletproof's cutscenes showed the frame
+// before for two frames); unchanged bytes keep the lock pending for kLockChecks more looks before it counts as a read
 bool LatchCpuWrite(Target& t) {
+    constexpr uint32_t kLockChecks = 16;
     uint64_t e = DirtyEpoch(t.data);
     if (e <= t.epoch) return false;
-    t.epoch = e;
     uint64_t sig = MemSig(t.data, t.bytes);
-    if (sig == t.sig && !Changed(t)) return false;
+    if (sig == t.sig && !Changed(t)) {
+        if (++t.lock_checks >= kLockChecks) t.epoch = e, t.lock_checks = 0;
+        return false;
+    }
+    t.epoch = e, t.lock_checks = 0;
     t.sig = sig;
     return true;
 }
