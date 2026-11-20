@@ -1,5 +1,6 @@
 // What the Direct3D 12 and Direct3D 11 renderers share (d3d_common.h)
 #include "gpu/d3d_common.h"
+#include "gpu/vertex_program.h"
 
 #include <d3dcompiler.h>
 
@@ -992,7 +993,7 @@ bool ScreenDraw(const State& s) {
 // the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
 // cannot be read. xs: each vertex's screen x too (the first 4096)
 bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom,
-                  std::vector<float>* xs = nullptr) {
+                  std::vector<float>* xs) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
@@ -1029,6 +1030,41 @@ bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, floa
         hi = std::max(hi, x);
         top = std::min(top, p[1]);
         bottom = std::max(bottom, p[1]);
+    }
+    return true;
+}
+
+bool ProgramExtent(const State& s, const Assembled& a, float& lo, float& hi) {
+    if (!(s.vs_handle & 1) || !s.vs || s.vs->program.empty() || !(a.regs & 1)) return false;
+    const bool converted = !a.vertices.empty();
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& b = a.buffers[e.buffer];
+    uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
+    if (!count) return false;
+    if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
+                                  e.format != DXGI_FORMAT_R32G32_FLOAT)))
+        return false;
+    int regs = 0, slot[16];
+    for (int r = 0; r < 16; r++) slot[r] = (a.regs >> r) & 1 ? regs++ : -1;
+    lo = 1e30f, hi = -1e30f;
+    count = std::min<uint32_t>(count, 1024);
+    for (uint32_t i = 0; i < count; i++) {
+        vp::VertexProgram p{s};
+        for (int r = 0; r < 16; r++) {
+            float v[4] = {0, 0, 0, 1};
+            if (slot[r] >= 0 && converted) {
+                std::memcpy(v, &a.vertices[(size_t(i) * size_t(regs) + size_t(slot[r])) * 4], sizeof v);
+            } else if (r == 0 && !converted) {
+                const size_t n = e.format == DXGI_FORMAT_R32G32_FLOAT ? 2 : e.format == DXGI_FORMAT_R32G32B32_FLOAT ? 3 : 4;
+                std::memcpy(v, b.src + size_t(i) * b.stride + e.offset, n * 4);
+            } else {
+                std::memcpy(v, s.vattr[size_t(r)].data(), sizeof v);
+            }
+            p.in[r] = vp::V(v[0], v[1], v[2], v[3]);
+        }
+        p.Run(s.vs->program);
+        lo = std::min(lo, p.out[0][0]);
+        hi = std::max(hi, p.out[0][0]);
     }
     return true;
 }
@@ -1084,11 +1120,24 @@ void SqueezeBeyond(const State& s, float hud[4]) {
 }
 
 void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4], float zoom[2], float gh) {
-    if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1 || aspect <= s.pillar_aspect + 1e-3f) return;
+    if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1) return;
+    const bool wider = aspect > s.pillar_aspect + 1e-3f;
+    if (!wider && !s.pillar_fit) return;
     if (s.pillar_format && (!s.textures[0] || (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) != s.pillar_format)) return;
     // only a picture spanning the frame, into a centred box: a panel narrowed in place showed hard edges inside the
     // vignette drawn over it at its old size (PGR2's title movie)
     if (DrawSpan(s, a, hud[1] * 2) != kSpanFrame) return;
+    if (s.pillar_fit && gh > 0) {
+        // y' = c + (y - c) z takes the picture's top to 0 and its bottom to gh
+        float lo, hi, top, bottom;
+        if (ScreenExtent(s, a, lo, hi, top, bottom) && bottom - top > gh + 0.5f) {
+            const float z = gh / (bottom - top);
+            zoom[0] = z;
+            zoom[1] = -top * z / (1 - z);
+        }
+        if (wider) hud[0] = -(s.pillar_aspect / aspect);
+        return;
+    }
     if (s.pillar_fill && gh > 0) {
         // the frame's width kept, the picture's height enlarged to its shape about the centre (top and bottom cropped)
         hud[0] = 1;

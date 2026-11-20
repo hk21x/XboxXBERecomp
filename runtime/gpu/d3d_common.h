@@ -192,13 +192,21 @@ float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch
 // into a 320x240 corner): not squeezed; kSpanNone (EoN's driving radar: big tiles past the left edge only): squeezed
 // whole
 enum Span { kSpanNone, kSpanFrame, kSpanViewport };
+// the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
+// cannot be read. xs: each vertex's screen x too (the first 4096)
+bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom,
+                  std::vector<float>* xs = nullptr);
+// the screen x a vertex program puts a draw's vertices at (lo to hi; the first 1024), run on the CPU; false where it
+// cannot (not a program, positions not readable)
+bool ProgramExtent(const State& s, const Assembled& a, float& lo, float& hi);
 Span DrawSpan(const State& s, const Assembled& a, float width);
 // State::squeeze_beyond: hud[0] negative (the shader keeps no corner on an edge) and the pivot hud[1] moved so the
 // squeeze also moves the draw by squeeze_shift
 void SqueezeBeyond(const State& s, float hud[4]);
 // State::pillar_aspect: a screen space draw spanning a screen shaped target squeezed whole to that shape (hud[0]
 // negative), after hud[1] is set
-// zoom: the draw constants' zclip[2] and [3], a vertical scale and its centre (State::pillar_fill); left 0 otherwise
+// zoom: the draw constants' zclip[2] and [3], a vertical scale and its centre (State::pillar_fill, pillar_fit); left 0
+// otherwise
 void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4], float zoom[2], float gh);
 // a depth target sampled as format: through a depth format the console compares (a shadow map), through a 32 bit
 // colour format it reads the word's bytes (PGR2's depth of field weighs its blur by them)

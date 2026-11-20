@@ -1923,6 +1923,10 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
+    if (s.hud_layout > 0) {
+        float lo, hi;
+        if (ProgramExtent(s, a, lo, hi)) c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi);
+    }
     SqueezeBeyond(s, c.hud);
     Pillarbox(s, a, aspect_, stretch, c.hud, c.zclip + 2, float(bound_rt_ ? bound_rt_->gh : guest_h_) / s.aa_y);
     UploadConstants(s, sh, k, stages, size, c);

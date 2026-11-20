@@ -247,6 +247,15 @@ struct State {
     // set with pillar_aspect: such a picture is enlarged about the centre until it fills the frame's width (its top and
     // bottom cropped) instead of pillarboxed: not stretched, and nothing left uncovered at the sides
     bool pillar_fill = false;
+    // set with pillar_aspect instead: such a picture drawn past the frame's top and bottom (a movie cropped to fill a
+    // wider TV) is scaled down about its own extent until all of it is inside the frame, then squeezed to the shape;
+    // on a frame of that shape or narrower too (50 Cent: Bulletproof's cutscenes, 720x600 from y -64, kept 4:3)
+    bool pillar_fit = false;
+    // a game hook draws a HUD through a camera of the frame's shape, laid out for a screen of this shape (50 Cent:
+    // Bulletproof's, 16:9; 0 none): each piece (a vertex program's flat 2D matrix, depth testing off) placed to one side
+    // of the middle is moved sideways to keep its distance from that edge of the frame as it had at that shape, its own
+    // shape left as drawn (gpu::HudMove); one about the middle stays there
+    float hud_layout = 0;
     // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
     // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
     int squeeze_margin = 0;

@@ -66,6 +66,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 pts;  // point sprites on, size min, size max, D3DRS_POINTSIZE
     float4 vattr[16];  // the v registers a draw gives no stream
     float4 zclip;  // the depth clip planes
+    float4 hud_move;  // State::hud_layout: x guest pixels a matrix program's position moves
 };
 )";
 
@@ -709,6 +710,25 @@ int MatrixProgram(const std::vector<uint32_t>& prog) {
     return k >= 0 && k + 3 < 192 ? k : -1;
 }
 
+float HudMove(const State& s, float aspect, float half_width, float lo, float hi) {
+    if (s.hud_layout <= 0 || aspect <= 0 || s.rs[kRsZEnable] || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return 0;
+    // a matrix program's only where its matrix is flat (x from the piece's own x and y, w 1 at its z 0): not something
+    // out in the world drawn without depth testing (a glow)
+    if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
+    if (const int k = s.vs->matrix; k >= 0) {
+        auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        const auto &x = s.vsc[size_t(k)], &w = s.vsc[size_t(k) + 3];
+        if (!near(x[2], 0) || !near(w[0], 0) || !near(w[1], 0) || !near(w[3], 1)) return 0;
+    }
+    // a piece, not something across the frame, and to one side: the middle quarter's stay (the crosshair, the messages)
+    const float mid = (lo + hi) * 0.5f - half_width;
+    if (!(hi - lo < half_width) || std::fabs(mid) < half_width * 0.25f) return 0;
+    // its distance from the edge, kept as it is at the layout's shape: as wide a frame is layout / aspect as many of
+    // those half widths
+    const float move = (s.hud_layout / aspect - 1) * half_width;
+    return mid < 0 ? move : -move;
+}
+
 bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k) {
     auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
     const auto &x = c[size_t(k)], &y = c[size_t(k) + 1], &w = c[size_t(k) + 3];
@@ -761,6 +781,10 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     if (app::kGame.squeeze_screen_programs && (ScreenProgram(prog) || MatrixProgram(prog) >= 0))
         s += "    if ((hud.x < 0 || (oPos.x > 1.5 && oPos.x < hud.y * 2 - 1.5)) && (hud.z == 0 || oPos.w <= 4))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
+    // State::pillar_fit on a screen program (50 Cent: Bulletproof's movie quad): the picture's height scaled into the frame
+    if (app::kGame.squeeze_screen_programs && ScreenProgram(prog)) s += "    if (zclip.z > 0) oPos.y = zclip.w + (oPos.y - zclip.w) * zclip.z;\n";
+    // State::hud_layout: a HUD piece moved sideways (gpu::HudMove)
+    s += "    oPos.x += hud_move.x;\n";
     s += kVsEpilogue;
     return s;
 }
