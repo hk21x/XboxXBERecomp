@@ -280,6 +280,15 @@ inline const State* PointSpriteStages(const State& s, uint32_t prim) {
     return t.get();
 }
 
+// a fixed function draw (no pixel shader) stops at its first stage with D3DTOP_DISABLE (or none set): that stage and
+// those after it are not read (MakePixelKey, the fixed function shader)
+inline bool FfStageUnused(const State& s, int stage) {
+    if (s.ps) return false;
+    for (int i = 0; i <= stage; i++)
+        if (s.tss[size_t(i)][kTssColorOp] <= 1) return true;
+    return false;
+}
+
 // what a title's code may change about one draw: g_draw_filter, set before the first frame, sees each draw's state
 // (on the render thread when there is one) and may drop its depth test or the draw
 struct DrawAdjust {

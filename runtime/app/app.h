@@ -219,6 +219,10 @@ struct GameInfo {
     // programs (c-38, c-37), so the draw lands where the others do. True applies that (Juiced's glow materials set
     // D3DRS_MULTISAMPLERENDERTARGETMODE 4X on its 640x960 scene target around their draws)
     bool sample_scaled_viewport = false;
+    // a fixed function draw reads its stages up to the first with D3DTOP_DISABLE; true leaves the textures still set on
+    // the later ones unbound (gpu::FfStageUnused). Juiced's results screen leaves its 640x480 scene target on stages 1
+    // to 3 under 300 text draws into that target: each was a copy of the whole target (205 ms a frame at render 200%)
+    bool ff_unused_stages_unbound = false;
     // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)

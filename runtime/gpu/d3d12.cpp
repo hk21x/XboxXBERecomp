@@ -2817,6 +2817,9 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     sv.Texture2D.MipLevels = 1;
     uint32_t header = s.textures[size_t(stage)];
     if (!header) return nullptr;
+    // GameInfo::ff_unused_stages_unbound: a stage the fixed function shader never reads binds nothing (a target left on
+    // it was copied for every draw into that target)
+    if (app::kGame.ff_unused_stages_unbound && FfStageUnused(s, stage)) return nullptr;
     // a guest texture bound earlier this frame: the same binding (its change check runs once a frame anyway)
     uint64_t memo_now = presents_ << 24 ^ targets_gen_;
     if (stage_memo_key_ != memo_now) {

@@ -1532,6 +1532,8 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
     stages.levels[stage] = 1;
     stages.replaced[stage] = false;
     uint32_t header = s.textures[size_t(stage)];
+    // GameInfo::ff_unused_stages_unbound: a stage the fixed function shader never reads binds nothing
+    if (app::kGame.ff_unused_stages_unbound && FfStageUnused(s, stage)) return nullptr;
     TextureDesc d;
     if (!header || !Describe(header, d)) return nullptr;
     const FormatInfo& fi = Format(d.format);
