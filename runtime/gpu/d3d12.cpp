@@ -1577,7 +1577,7 @@ void D3D12Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator 
 
 // the host texture of a new target, at render scale or the extension's
 bool D3D12Backend::CreateTargetResource(Target& t, const Surface& s) {
-    float sc = scale_;
+    float sc = TargetScale(scale_, t.depth, t.gw, t.gh);
     if (ext_) ext_->MakeTarget(s, t.depth, t.gw, t.gh, sc, t.fmt);
     t.w = std::max(1u, uint32_t(std::lround(t.gw * sc * XStretch(t.gw, t.gh))));
     t.h = std::max(1u, uint32_t(std::lround(t.gh * sc)));
@@ -5122,8 +5122,9 @@ void D3D12Backend::RescaleTargets() {
         t.fmt = old.fmt;
         t.gw = old.gw;
         t.gh = old.gh;
-        t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_ * XStretch(t.gw, t.gh))));
-        t.h = std::max(1u, uint32_t(std::lround(t.gh * scale_)));
+        const float sc = TargetScale(scale_, false, t.gw, t.gh);
+        t.w = std::max(1u, uint32_t(std::lround(t.gw * sc * XStretch(t.gw, t.gh))));
+        t.h = std::max(1u, uint32_t(std::lround(t.gh * sc)));
         D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
         D3D12_RESOURCE_DESC td = Texture2DDesc(t.fmt, t.w, t.h);
         td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;

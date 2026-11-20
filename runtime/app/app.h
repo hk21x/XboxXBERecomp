@@ -223,6 +223,11 @@ struct GameInfo {
     // the later ones unbound (gpu::FfStageUnused). Juiced's results screen leaves its 640x480 scene target on stages 1
     // to 3 under 300 text draws into that target: each was a copy of the whole target (205 ms a frame at render 200%)
     bool ff_unused_stages_unbound = false;
+    // colour targets of these guest sizes are made at the console's own size, whatever the render scale (gpu::
+    // TargetScale): a small blur source the title reads with a few spread taps, which at render scale keeps detail the
+    // console's never had, so each tap shows as its own copy (Juiced's 160x120 depth of field and speed blur source:
+    // replay cars in four copies a console texel apart)
+    std::vector<std::pair<uint32_t, uint32_t>> console_size_targets;
     // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)

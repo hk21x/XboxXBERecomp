@@ -596,8 +596,9 @@ Target* D3D11Backend::FindTarget(const Surface& s, bool depth) {
 
 // the host texture and views of a new target, at render scale
 bool D3D11Backend::CreateTarget(Target& t) {
-    t.w = std::max(1u, uint32_t(std::lround(t.gw * scale_ * XStretch(aspect_, guest_h_, t.gw, t.gh))));
-    t.h = std::max(1u, uint32_t(std::lround(t.gh * scale_)));
+    const float sc = TargetScale(scale_, t.depth, t.gw, t.gh);
+    t.w = std::max(1u, uint32_t(std::lround(t.gw * sc * XStretch(aspect_, guest_h_, t.gw, t.gh))));
+    t.h = std::max(1u, uint32_t(std::lround(t.gh * sc)));
     if (t.depth) {
         D3D11_TEXTURE2D_DESC td = Texture2DDesc(DXGI_FORMAT_R24G8_TYPELESS, t.w, t.h,
                                                 D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);

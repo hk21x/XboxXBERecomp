@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <string>
 
+#include "app/app.h"
 #include "gpu/shaders.h"
 #include "gpu/state.h"
 #include "gpu/texture.h"
@@ -169,6 +170,14 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c);
 
 bool UnitTexcoords(const Assembled& a);
 D3D_PRIMITIVE_TOPOLOGY PrimitiveTopology(const Assembled& a);
+
+// the scale of a new target: the render scale, or 1 for a colour target of a GameInfo::console_size_targets size
+inline float TargetScale(float scale, bool depth, uint32_t gw, uint32_t gh) {
+    if (!depth)
+        for (const auto& [w, h] : app::kGame.console_size_targets)
+            if (w == gw && h == gh) return 1.0f;
+    return scale;
+}
 
 // Ultrawide: a screen shaped target shown wider than its guest shape gets more pixels across than down
 // A frame drawn at twice the height and resolved into the frame buffer (Juiced's race: 640x960 into 640x480) is screen
