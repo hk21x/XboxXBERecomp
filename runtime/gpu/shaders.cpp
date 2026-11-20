@@ -710,16 +710,21 @@ int MatrixProgram(const std::vector<uint32_t>& prog) {
     return k >= 0 && k + 3 < 192 ? k : -1;
 }
 
-float HudMove(const State& s, float aspect, float half_width, float lo, float hi) {
-    if (s.hud_layout <= 0 || aspect <= 0 || s.rs[kRsZEnable] || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return 0;
+bool HudPiece(const State& s) {
+    if (s.hud_layout <= 0 || s.rs[kRsZEnable] || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
     // a matrix program's only where its matrix is flat (x from the piece's own x and y, w 1 at its z 0): not something
     // out in the world drawn without depth testing (a glow)
     if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
     if (const int k = s.vs->matrix; k >= 0) {
         auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
         const auto &x = s.vsc[size_t(k)], &w = s.vsc[size_t(k) + 3];
-        if (!near(x[2], 0) || !near(w[0], 0) || !near(w[1], 0) || !near(w[3], 1)) return 0;
+        if (!near(x[2], 0) || !near(w[0], 0) || !near(w[1], 0) || !near(w[3], 1)) return false;
     }
+    return true;
+}
+
+float HudMove(const State& s, float aspect, float half_width, float lo, float hi) {
+    if (aspect <= 0 || !HudPiece(s)) return 0;
     // a piece, not something across the frame, and to one side: the middle quarter's stay (the crosshair, the messages)
     const float mid = (lo + hi) * 0.5f - half_width;
     if (!(hi - lo < half_width) || std::fabs(mid) < half_width * 0.25f) return 0;

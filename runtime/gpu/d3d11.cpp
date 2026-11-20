@@ -1923,7 +1923,7 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
-    if (s.hud_layout > 0) {
+    if (HudPiece(s)) {
         float lo, hi;
         if (ProgramExtent(s, a, lo, hi)) c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi);
     }
