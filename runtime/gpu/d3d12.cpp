@@ -4790,6 +4790,9 @@ void D3D12Backend::ReportRemoved(const char* where) {
     uint64_t marker = nvmark::Report();
     LOGR("d3d12: the GPU device was lost (seen %s): reason %08X, %llu command lists, %u draws in the current one, "
          "present %llu", where, unsigned(reason), (unsigned long long)lists_, list_draws_, (unsigned long long)presents_);
+    struct Tell {  // the player told once this report is written (GameInfo::device_lost_message)
+        ~Tell() { logx::Flush(); app::DeviceLost(); }
+    } tell;
     ComPtr<dred::Data> data;
     if (FAILED(dev_->QueryInterface(dred::kIid, reinterpret_cast<void**>(data.GetAddressOf())))) {
         LOGR("d3d12:   no DRED");
@@ -5021,6 +5024,15 @@ void D3D12Backend::Present(const Surface& front) {
     if (vsync && tearing_ && PresentUnsynced()) vsync = false;
     if (FAILED(swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)))
         ReportRemoved("presenting");
+    // XBE_TEST_DEVICE_LOST=N (a test): at present N, as a lost device tells the player (app::DeviceLost)
+    static const uint64_t test_lost = [] {
+        const char* e = std::getenv("XBE_TEST_DEVICE_LOST");
+        return e ? std::strtoull(e, nullptr, 10) : 0ull;
+    }();
+    if (test_lost && presents_ == test_lost) {
+        LOGR("d3d12: XBE_TEST_DEVICE_LOST at present %llu", (unsigned long long)presents_);
+        app::DeviceLost();
+    }
     g_perf.swap += PerfMs(perf_swap);
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
     if (burst_done_) BurstSave();

@@ -145,6 +145,9 @@ int Instance();  // --instance N on the command line, 0 without: a second copy o
 void* Window();  // HWND
 // leave the game as closing its window does (the settings window's Quit, a title's own quit item); from any thread
 void Quit();
+// the GPU device was lost (the renderer, once it has logged why): with GameInfo::device_lost_message the player is told
+// and the game closes; without it, nothing (the game stays up on a dead device, as before)
+void DeviceLost();
 // boot splash: GameInfo::splash .bmp or .png beside the exe, up before the game window
 bool OpenSplash();        // window thread, at launch; false without one, and the game window opens at once
 void SplashFirstFrame();  // the game's first Swap: waits out the splash's minimum, then opens the game window
@@ -228,6 +231,9 @@ struct GameInfo {
     // console's never had, so each tap shows as its own copy (Juiced's 160x120 depth of field and speed blur source:
     // replay cars in four copies a console texel apart)
     std::vector<std::pair<uint32_t, uint32_t>> console_size_targets;
+    // the GPU device lost (TDR, a driver reset): the player is told in a message and the game closes (app::DeviceLost);
+    // false keeps it running on the dead device, a frozen or black window
+    bool device_lost_message = false;
     // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)

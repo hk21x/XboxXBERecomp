@@ -40,7 +40,7 @@ namespace app {
 namespace {
 
 HWND g_hwnd = nullptr;
-constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2;
+constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2, kDeviceLost = WM_APP + 3;
 bool g_mode_changed = false;
 bool g_apply_posted = false;  // a display apply is waiting in the queue or running
 std::atomic<bool> g_active{true};  // the game window is in front (WM_ACTIVATE)
@@ -330,6 +330,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ApplyNow();
             g_apply_posted = false;
             return 0;
+        case kDeviceLost: {
+            // GameInfo::device_lost_message: the GPU stopped (app::DeviceLost). The screen back to the desktop's mode, the
+            // window out of the way, the player told, and the game closed as its window's close does
+            if (g_mode_changed) {
+                ChangeDisplaySettingsW(nullptr, 0);
+                g_mode_changed = false;
+            }
+            ShowWindow(hwnd, SW_HIDE);
+            MessageBoxW(nullptr,
+                        L"The graphics card stopped responding (Windows reset the GPU), so the game has to close.\n\n"
+                        L"Progress the game had saved is kept. If this happens again: update the graphics driver, or "
+                        L"lower Render scale or MSAA in the settings window (F1), or choose the Direct3D 11 renderer "
+                        L"there. The logs folder beside the game has the details.",
+                        kGame.short_title, MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+            LOGR("window: closing after the GPU device was lost");
+            DestroyWindow(hwnd);
+            return 0;
+        }
         case kOpenWindow:
             CloseSplash();
             if (wp) ApplyNow();
@@ -374,6 +392,11 @@ std::recursive_mutex& UiLock() {
 }
 
 void ApplyDisplay() { PostMessageW(g_hwnd, kApplyDisplay, 0, 0); }
+void DeviceLost() {
+    static std::atomic<bool> told{false};
+    if (!kGame.device_lost_message || told.exchange(true) || !g_hwnd) return;
+    PostMessageW(g_hwnd, kDeviceLost, 0, 0);
+}
 void Quit() {
     LOGR("quit asked for");
     PostMessageW(g_hwnd, WM_CLOSE, 0, 0);

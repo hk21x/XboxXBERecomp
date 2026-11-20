@@ -2148,6 +2148,8 @@ void D3D11Backend::Present(const Surface& front) {
             told = true;
             LOGR("d3d11: the GPU device was lost: reason %08X (present %llu)", unsigned(dev_->GetDeviceRemovedReason()),
                  (unsigned long long)presents_);
+            logx::Flush();
+            app::DeviceLost();  // GameInfo::device_lost_message: the player told, the game closed
         }
     }
     if (latency_wait_) WaitForSingleObjectEx(latency_wait_, 1000, FALSE);
