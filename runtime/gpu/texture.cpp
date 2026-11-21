@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "app/app.h"
 #include "core/log.h"
@@ -545,7 +547,8 @@ bool ReplacementHolds(const Replacement& r) {
     if (it != g_replace.end() && it->second->version == r.version) {
         g_replace.erase(it);
         g_replace_count = g_replace.size();
-        LOGR("gpu: the picture for texture %08X dropped, the game's bytes there changed", r.data);
+        LOGR("gpu: the picture for texture %08X dropped, the game's bytes there changed (v%llu, %ux%u from %ux%u format %X)",
+             r.data, (unsigned long long)r.version, r.width, r.height, r.src_width, r.src_height, r.format);
     }
     return false;
 }
@@ -757,6 +760,7 @@ struct SharpJob {
     TextureDesc d;
     std::vector<uint8_t> bytes;  // level 0 as the game had it
     bool world = false, wrap_u = false, wrap_v = false;  // SharpenWorld's
+    std::chrono::steady_clock::time_point queued = std::chrono::steady_clock::now();  // PGR2 issue 40 diagnostics
 };
 std::condition_variable g_sharp_cv;
 std::deque<SharpJob> g_sharp_jobs;
@@ -836,11 +840,30 @@ void SharpWorker() {
                 whole = DecodeBgra(job.d, l, job.bytes.data(), level);
                 r->mips.push_back(std::move(level));
             }
-            if (!whole) continue;
+            if (!whole) {
+                LOGR("world: %08X %ux%u format %X: a level would not decode, no picture", job.d.data, job.d.width,
+                     job.d.height, job.d.format);
+                continue;
+            }
         } else {
             r->mips = MakeMips(r->bgra, r->width, r->height);
         }
-        RegisterReplacement(std::move(r));
+        // PGR2 issue 40 diagnostics: each world picture as it is made, and whether the game's bytes moved on meanwhile
+        const bool world = job.world;
+        const uint64_t snap_hash = r->guest_hash;
+        const uint32_t hashed = r->guest_bytes;
+        RegisterReplacement(r);
+        if (world) {
+            const uint8_t* live = static_cast<const uint8_t*>(kernel::HostPtr(job.d.data));
+            const bool moved = SampledHash(live, hashed) != snap_hash;
+            const uint64_t whole_snap = Hash(job.bytes.data(), job.bytes.size());
+            const bool moved_all = Hash(live, uint32_t(job.bytes.size())) != whole_snap;
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - job.queued).count();
+            LOGR("world: %08X %ux%u format %X %u levels, wrap %d%d: picture v%llu made in %.0f ms%s%s", job.d.data,
+                 job.d.width, job.d.height, job.d.format, job.d.levels, job.wrap_u, job.wrap_v,
+                 (unsigned long long)r->version, ms, moved ? ", the game's level 0 changed meanwhile (sampled)" : "",
+                 !moved && moved_all ? ", ITS BYTES CHANGED MEANWHILE UNSEEN BY THE SAMPLED CHECK" : "");
+        }
         static std::atomic<int> told{0};
         if (told++ < 8)
             LOGI("gpu: texture %08X (%s %ux%u) sharpened %u times for 2D", job.d.data, Format(job.d.format).name,
@@ -883,11 +906,18 @@ void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v) {
     const uint64_t cost = uint64_t(d.width) * d.height * 4 * 4 * 4 / 3;
     std::lock_guard<std::mutex> lock(g_sharp_lock);
     int drops = g_sharp_drops[d.data];
-    if (drops >= 2) return;
+    if (drops >= 2) {
+        static std::unordered_set<uint32_t> told;  // PGR2 issue 40 diagnostics
+        if (told.insert(d.data).second) LOGR("world: %08X given up, its bytes changed twice", d.data);
+        return;
+    }
     auto [it, fresh] = g_sharp_queued.emplace(d.data, drops);
     if (!fresh && it->second == drops) return;
     if (used + cost > kBudget) {
         g_sharp_queued.erase(it);
+        static bool told = false;
+        if (!told) LOGR("world: the pictures' memory budget is spent (%llu MB)", (unsigned long long)(used >> 20));
+        told = true;
         return;
     }
     used += cost;

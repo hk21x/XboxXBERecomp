@@ -915,6 +915,7 @@ private:
         uint32_t data;
         uint32_t w;
         uint32_t h;
+        bool replaced = false;  // a replaced stage's picture, at its own size
     };
     std::vector<CapTex> cap_tex_;
     ComPtr<ID3D12Resource> lut_;
@@ -2465,9 +2466,29 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
+        // PGR2 issue 40 diagnostics: a world picture that does not fit the texture drawn, and each one's first draw
+        // with the stage's sampler state, once per picture
+        static std::mutex told_lock;
+        static std::unordered_set<uint64_t> told;
+        auto once = [&](uint64_t v, uint64_t kind) {
+            std::lock_guard<std::mutex> lock(told_lock);
+            return told.size() < 200000 && told.insert(v << 2 | kind).second;
+        };
+        if (r && r->world && app::Get().world_textures && !ReplacementFits(*r, d) && once(r->version, 0))
+            LOGR("world: %08X picture v%llu (from %ux%u format %X, %u levels) not used: the texture drawn is %ux%u format %X, %u levels",
+                 d.data, (unsigned long long)r->version, r->src_width, r->src_height, r->format, r->src_levels, d.width,
+                 d.height, d.format, d.levels);
         if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = r->world ? 2 : 1;
+            if (r->world && once(r->version, 1)) {
+                const auto& t = s.tss[size_t(stage)];
+                LOGR("world: %08X picture v%llu first drawn at present %llu, stage %d: min %u mag %u mip %u, max mip level %u, "
+                     "lod bias %08X, address %u %u, anisotropy %u (forced %u), vertex shader %08X, pixel shader %s",
+                     d.data, (unsigned long long)r->version, (unsigned long long)presents_, stage, t[kTssMinFilter],
+                     t[kTssMagFilter], t[kTssMipFilter], t[kTssMaxMipLevel], t[kTssMipLodBias], t[kTssAddressU],
+                     t[kTssAddressV], t[kTssMaxAnisotropy], app::Get().aniso, s.vs_handle, s.ps ? "program" : "fixed");
+            }
             return res;
         }
     }
@@ -2958,10 +2979,13 @@ void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
         TextureDesc d;
         if (!s.textures[size_t(i)] || !Describe(s.textures[size_t(i)], d)) continue;
         bool tg = targets_.count(SizedTargetKey(d.data, Format(d.format).depth, d.width, d.height));
-        fprintf(cap_, " | t%d %08X fmt %X %ux%u%s%s", i, d.data, d.format, d.width, d.height, tg ? " target" : "",
-                res ? "" : " unbound");
-        if (res && !tg && stages.info[i].kind == kTex2D && cap_seen_.insert(d.data).second) {
-            cap_tex_.push_back({res, stages.sv[i].Format, d.data, d.width, d.height});
+        const bool rep = stages.replaced[i] != 0;
+        fprintf(cap_, " | t%d %08X fmt %X %ux%u%s%s%s", i, d.data, d.format, d.width, d.height, tg ? " target" : "",
+                res ? "" : " unbound", stages.replaced[i] == 2 ? " world-picture" : rep ? " picture" : "");
+        // a replaced stage's picture saved whole, at its own size (tex_<data>_r), apart from the texture's own
+        if (res && !tg && stages.info[i].kind == kTex2D && cap_seen_.insert(rep ? d.data ^ 0x80000000u : d.data).second) {
+            D3D12_RESOURCE_DESC rd = res->GetDesc();
+            cap_tex_.push_back({res, stages.sv[i].Format, d.data, rep ? uint32_t(rd.Width) : d.width, rep ? uint32_t(rd.Height) : d.height, rep});
         }
     }
 }
@@ -4018,7 +4042,7 @@ void D3D12Backend::FinishCapture(const Surface& front) {
     if (Target* f = FindTarget(front, false)) CapSave(*f, "final");
     for (auto& t : cap_tex_) {
         char name[32];
-        snprintf(name, sizeof(name), "tex_%08X", t.data);
+        snprintf(name, sizeof(name), t.replaced ? "tex_%08X_r" : "tex_%08X", t.data);
         D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         CapSave({.res = t.res.Get(), .state = &st, .fmt = t.fmt, .w = t.w, .h = t.h}, name);
     }
