@@ -24,9 +24,11 @@
 
 namespace gpu {
 
-// full screen passes: Blit (b1 uvrect, opts; t0 image, t1 gamma lookup; s0 linear, s1 point), a depth copy and an
+// full screen passes: Blit (b1 uvrect, opts, crt; t0 image, t1 gamma lookup; s0 linear, s1 point), a depth copy and an
 // MSAA depth resolve (t0 depth)
 extern const char* kBlitHlsl;
+// the CRT look's lines down the frame: a TV's visible lines of the console's 480 line output
+constexpr float kCrtLines = 480;
 extern const char* kDepthHlsl;
 extern const char* kDepthResolveHlsl;
 
