@@ -65,6 +65,8 @@ bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string
     for (auto& [sha, name] : releases.items()) game.releases[Lower(sha)] = name.get<std::string>();
     json release_xbes = j.value("release_xbes", json::object());
     for (auto& [sha, names] : release_xbes.items()) game.release_xbes[Lower(sha)] = names.get<std::vector<std::string>>();
+    game.settings_file = j.value("settings_file", game.settings_file);
+    if (j.contains("settings") && !ParseLauncherSettings(j["settings"].dump(), game.settings, error)) return false;
     if (game.title.empty() || game.short_name.empty() || game.repo.empty() || game.releases.empty()) {
         error = "game.json needs a title, a short name, a repo and its releases";
         return false;

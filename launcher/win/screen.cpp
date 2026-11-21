@@ -18,7 +18,7 @@ namespace {
 constexpr const char* kLicenseUrl = "https://go.microsoft.com/fwlink/?LinkId=2179911";  // Visual Studio Build Tools' terms
 constexpr float kBodyFont = 15;
 
-enum Page { kGamePage, kMusicPage, kManagePage, kLogPage };
+enum Page { kGamePage, kMusicPage, kManagePage, kLogPage, kSettingsPage };
 
 void TextIn(ImU32 colour, const std::string& text) {
     ImGui::PushStyleColor(ImGuiCol_Text, colour);
@@ -280,6 +280,59 @@ void MusicPage(App& app, void* window, ImFont* heading, const std::string& error
     }
 }
 
+// game.json's settings, read from the game's settings file when the page opens and saved as each one changes
+void SettingsPage(App& app, ImFont* heading) {
+    const fs::path file = app.builder->PlayDir() / app.game.settings_file;
+    if (!app.settings_loaded) {
+        app.settings_values = ReadSettingsFile(file);
+        app.settings_loaded = true;
+        app.settings_error.clear();
+    }
+    Section("Settings", heading);
+    TextIn(kDim, "Set before the game starts; the game's own PC Settings page has these and the rest. Close the game "
+                 "before changing them here: it keeps what it had when it closes.");
+    ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.3f));
+    const float em = ImGui::GetFontSize();
+    for (const LauncherSetting& set : app.game.settings) {
+        auto it = app.settings_values.find(set.key);
+        const std::string now = it == app.settings_values.end() ? set.def : it->second;
+        std::string chosen;
+        ImGui::PushID(set.key.c_str());
+        if (set.Checkbox()) {
+            bool on = SameValue(now, "true");
+            if (ImGui::Checkbox(set.label.c_str(), &on)) chosen = on ? "true" : "false";
+        } else {
+            int at = -1;
+            for (size_t i = 0; i < set.values.size(); i++)
+                if (SameValue(now, set.values[i])) at = int(i);
+            ImGui::SetNextItemWidth(em * 14);
+            const char* shown = at >= 0 ? set.names[size_t(at)].c_str() : now.c_str();
+            if (ImGui::BeginCombo(set.label.c_str(), shown)) {
+                for (size_t i = 0; i < set.values.size(); i++)
+                    if (ImGui::Selectable(set.names[i].c_str(), int(i) == at)) chosen = set.values[i];
+                ImGui::EndCombo();
+            }
+        }
+        if (!set.help.empty()) {
+            ImGui::Indent(em * 1.6f);
+            TextIn(kDim, set.help);
+            ImGui::Unindent(em * 1.6f);
+        }
+        ImGui::PopID();
+        if (!chosen.empty() && !SameValue(chosen, now)) {
+            std::string e;
+            if (WriteSettingsFile(file, {{set.key, chosen}}, e)) {
+                app.settings_values[set.key] = chosen;
+                app.settings_error.clear();
+                app.builder->Log("settings: " + set.key + " = " + chosen);
+            } else {
+                app.settings_error = e;
+            }
+        }
+    }
+    if (!app.settings_error.empty()) TextIn(kBad, app.settings_error);
+}
+
 void ManagePage(App& app, ImFont* heading) {
     const bool busy = app.busy, built = app.builder->Built();
     const float em = ImGui::GetFontSize();
@@ -433,6 +486,7 @@ void DrawScreen(App& app, void* window, ImFont* heading) {
         int page;
     };
     std::vector<Entry> entries = {{"Game", kGamePage}};
+    if (!app.game.settings.empty()) entries.push_back({"Settings", kSettingsPage});
     if (app.game.music) entries.push_back({"Your music", kMusicPage});
     entries.push_back({"Manage", kManagePage});
     entries.push_back({"Log", kLogPage});
@@ -442,7 +496,10 @@ void DrawScreen(App& app, void* window, ImFont* heading) {
     ImGui::Dummy(ImVec2(0, em * 0.3f));
     for (const Entry& e : entries) {
         ImVec2 pos = ImGui::GetCursorScreenPos(), row(side_w, em * 1.9f);
-        if (ImGui::InvisibleButton(e.name, row)) app.page = e.page;
+        if (ImGui::InvisibleButton(e.name, row)) {
+            if (e.page == kSettingsPage && app.page != kSettingsPage) app.settings_loaded = false;  // the game may have changed it
+            app.page = e.page;
+        }
         ImDrawList* side = ImGui::GetWindowDrawList();
         const bool on = app.page == e.page;
         if (on) side->AddRectFilled(pos, pos + row, kSelect);
@@ -460,6 +517,7 @@ void DrawScreen(App& app, void* window, ImFont* heading) {
     if (app.page == kMusicPage && app.game.music) MusicPage(app, window, heading, error, done);
     else if (app.page == kLogPage) LogPage(app);
     else if (app.page == kManagePage) ManagePage(app, heading);
+    else if (app.page == kSettingsPage && !app.game.settings.empty()) SettingsPage(app, heading);
     else GamePage(app, window, heading, st, error, done);
     ImGui::EndChild();
 

@@ -98,6 +98,12 @@ int main(int argc, char** argv) {
     Shot(app, big, out + "/3_built.png", W, H);
     app.page = 1, app.music = "D:\\Music", app.music_job = true, app.music_summary = "3 soundtracks, 41 songs.", app.done_message = "Your music is ready.";
     Shot(app, big, out + "/4_music.png", W, H);
+    if (!app.game.settings.empty()) {  // game.json's settings, one of them set in the file
+        std::string se;
+        WriteSettingsFile(app.builder->PlayDir() / app.game.settings_file, {{app.game.settings[0].key, app.game.settings[0].Checkbox() ? "true" : app.game.settings[0].values.back()}}, se);
+        app.page = 4, app.settings_loaded = false;
+        Shot(app, big, out + "/4b_settings.png", W, H);
+    }
     app.page = 3;
     for (int i = 0; i < 30; i++) app.log.push_back("09:14:" + std::to_string(10 + i) + " [" + std::to_string(i * 10) + "/434] Building CXX object");
     Shot(app, big, out + "/5_log.png", W, H);

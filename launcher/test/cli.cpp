@@ -148,6 +148,23 @@ int main(int argc, char** argv) {
         for (const auto& [k, v] : b.BuildEnv(plan)) std::printf("%s=%s\n", k.c_str(), v.c_str());
         return 0;
     }
+    if (cmd == "settings") {  // game.json's settings as play's settings file has them; settings <key> <toml text> sets one
+        fs::path file = b.PlayDir() / game.settings_file;
+        if (argc >= 6) {
+            std::string e;
+            if (!WriteSettingsFile(file, {{argv[4], argv[5]}}, e)) {
+                std::fprintf(stderr, "%s\n", e.c_str());
+                return 1;
+            }
+        }
+        auto values = ReadSettingsFile(file);
+        for (const LauncherSetting& set : game.settings) {
+            auto it = values.find(set.key);
+            std::printf("%s (%s) = %s%s\n", set.key.c_str(), set.label.c_str(),
+                        it == values.end() ? set.def.c_str() : it->second.c_str(), it == values.end() ? " (default)" : "");
+        }
+        return 0;
+    }
     if (cmd == "game" && argc >= 5) {
         GameCheck c = CheckGame(game, argv[4]);
         std::printf("%s: %s %s %s\n", c.ok ? "ok" : "no", c.release.c_str(), c.sha1.c_str(), c.error.c_str());
