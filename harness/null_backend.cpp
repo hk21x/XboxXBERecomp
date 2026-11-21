@@ -266,6 +266,7 @@ private:
                      s.simple[kMAlphaTestEnable >> 2], s.simple[kMAlphaFunc >> 2], s.simple[kMAlphaRef >> 2], s.rs[kRsZEnable],
                      s.simple[kMZFunc >> 2],
                      s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h);
+        if (s.hud_layout > 0) std::fprintf(f, "  hud_layout %.3f (a HUD piece to one side moves, gpu::HudMove)\n", s.hud_layout);
         if (s.scissor_count) {  // the title's scissor rectangles (SetScissors)
             std::fprintf(f, "  scissors %u:", s.scissor_count);
             for (uint32_t i = 0; i < s.scissor_count && i < 8; i++)

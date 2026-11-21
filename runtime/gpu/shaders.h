@@ -74,9 +74,10 @@ bool ScreenProgram(const std::vector<uint32_t>& program);
 int MatrixProgram(const std::vector<uint32_t>& program);
 // State::hud_layout: the guest pixels a HUD piece drawn now, from guest x lo to hi, is moved sideways by on a frame of
 // this aspect half_width guest pixels each side of its middle; 0 for anything else
-// whether a draw could be one (no depth test, a program, a flat matrix): checked before the CPU pass for its extent
-bool HudPiece(const State& s);
-float HudMove(const State& s, float aspect, float half_width, float lo, float hi);
+// whether a draw could be one (no depth test, a program, a flat matrix; or pretransformed, 2D in the frame's own pixels,
+// drawn across the whole frame's width): checked before the CPU pass for its extent
+bool HudPiece(const State& s, bool pretransformed = false);
+float HudMove(const State& s, float aspect, float half_width, float lo, float hi, bool pretransformed = false);
 // c[k] .. c[k+3] (hardware order) are a 2D matrix: x and y from x and y alone (scaled, rotated, offset), y flipped, w 1
 bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k);
 // fixed function vertex state a shader is built for
