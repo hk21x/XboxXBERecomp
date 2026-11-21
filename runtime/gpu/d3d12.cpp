@@ -321,7 +321,7 @@ struct DrawTextures {
     float k[4] = {1, 1, 1, 1};  // Extension::Sample's k
     float wide[4] = {};         // host texels per console texel of a target read into a smaller one, 0 otherwise
     uint32_t size[4][2] = {};   // the bound target's console size when the texture is a smaller one on its memory
-    bool replaced[4] = {};      // a title's replacement picture (FindReplacement)
+    uint8_t replaced[4] = {};   // a title's replacement picture (FindReplacement): 1, 2 SharpenWorld's
 };
 class D3D12Backend final : public Backend, public Context {
 public:
@@ -648,7 +648,7 @@ private:
         ID3D12Resource* res;
         D3D12_SHADER_RESOURCE_VIEW_DESC sv;
         TexInfo info;
-        bool replaced;
+        uint8_t replaced;
         uint32_t tw, th, tl, tf, tu;  // stage 0's for the draw notes
         uint64_t tmade;
     };
@@ -2467,7 +2467,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
         auto r = FindReplacement(d.data);
         if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
-            stages.replaced[stage] = true;
+            stages.replaced[stage] = r->world ? 2 : 1;
             return res;
         }
     }
@@ -2641,7 +2641,7 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     stages.rt[stage] = false;
     stages.k[stage] = 1;
     stages.wide[stage] = 0;
-    stages.replaced[stage] = false;
+    stages.replaced[stage] = 0;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;

@@ -458,7 +458,7 @@ constexpr uint32_t kTaddressWrap = 1;
 constexpr uint32_t kTaddressClamp = 3;
 
 D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint8_t shadow, bool clamp, uint32_t aniso,
-                                bool replaced) {
+                                uint8_t replaced) {
     D3D12_SAMPLER_DESC sd = {};
     const auto& t = s.tss[size_t(i)];
     uint32_t mag = t[kTssMagFilter];
@@ -488,7 +488,8 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, uint32_t mip_levels, uint
         // larger than the console's texture, so drawn smaller: its levels keep it from shimmering
         sd.Filter = D3D12_FILTER(fmin << 4 | fmag << 2 | D3D12_FILTER_TYPE_LINEAR);
         sd.MinLOD = 0;
-        sd.MaxLOD = D3D12_FLOAT32_MAX;
+        // with no mip filter the console draws its one level: down to the picture's level of that size, no smaller
+        sd.MaxLOD = mip || replaced != 2 ? D3D12_FLOAT32_MAX : 1.0f;
     }
     Color(t[kTssBorderColor], sd.BorderColor);
     if (shadow) {

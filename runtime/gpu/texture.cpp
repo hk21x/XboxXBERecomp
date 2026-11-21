@@ -510,7 +510,8 @@ std::mutex g_sharp_lock;
 std::unordered_map<uint32_t, int> g_sharp_drops;  // sharpened pictures dropped, by texture
 
 bool ReplacementFits(const Replacement& r, const TextureDesc& d) {
-    return !r.format || (r.format == d.format && r.src_width == d.width && r.src_height == d.height);
+    return !r.format || (r.format == d.format && r.src_width == d.width && r.src_height == d.height &&
+                         (!r.src_levels || r.src_levels == d.levels));
 }
 
 // up to 64 KB whole, beyond that 64 evenly spaced runs of 64 bytes
@@ -779,15 +780,16 @@ void SharpWorker() {
         uint32_t scale = job.world ? 2 : big <= 128 || (text && big <= 512) ? 4 : 2;
         auto r = std::make_shared<Replacement>();
         r->data = job.d.data;
-        r->guest_bytes = uint32_t(job.bytes.size());
+        r->guest_bytes = job.world ? LevelSize(job.d, 0) : uint32_t(job.bytes.size());
         r->sampled = job.world;
-        r->guest_hash = job.world ? SampledHash(job.bytes.data(), uint32_t(job.bytes.size())) : Hash(job.bytes.data(), job.bytes.size());
+        r->guest_hash = job.world ? SampledHash(job.bytes.data(), r->guest_bytes) : Hash(job.bytes.data(), job.bytes.size());
         r->width = job.d.width * scale;
         r->height = job.d.height * scale;
         r->sharpened = true;
         r->format = job.d.format;
         r->src_width = job.d.width;
         r->src_height = job.d.height;
+        r->src_levels = job.world ? job.d.levels : 0;
         r->world = job.world;
         if (job.world) {
             r->bgra = UpscaleEdgeDirected2x(px, job.d.width, job.d.height, job.wrap_u, job.wrap_v);
@@ -824,7 +826,20 @@ void SharpWorker() {
             tga("orig_", job.d.width, job.d.height, px);
             tga("sharp_", r->width, r->height, r->bgra);
         }
-        r->mips = MakeMips(r->bgra, r->width, r->height);
+        if (job.world) {
+            // below the enlarged picture, the game's own levels and no more: levels made from the enlarged one would
+            // go smaller than the console's texture ever does and blend a cut-out's or an atlas's clear texels into
+            // what is drawn (whole faces of Florence's buildings gone, PGR2 issue 40)
+            bool whole = true;
+            for (uint32_t l = 0; l < std::max(job.d.levels, 1u) && whole; l++) {
+                std::vector<uint32_t> level;
+                whole = DecodeBgra(job.d, l, job.bytes.data(), level);
+                r->mips.push_back(std::move(level));
+            }
+            if (!whole) continue;
+        } else {
+            r->mips = MakeMips(r->bgra, r->width, r->height);
+        }
         RegisterReplacement(std::move(r));
         static std::atomic<int> told{0};
         if (told++ < 8)
@@ -880,7 +895,7 @@ void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v) {
     static std::once_flag started;
     std::call_once(started, [] { std::thread(SharpWorker).detach(); });
     SharpJob job{d, {}, true, wrap_u, wrap_v};
-    uint32_t size = LevelSize(d, 0);
+    uint32_t size = TotalSize(d);  // every level: the game's own are the picture's levels below the enlarged one
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
     job.bytes.assign(p, p + size);
     g_sharp_jobs.push_back(std::move(job));

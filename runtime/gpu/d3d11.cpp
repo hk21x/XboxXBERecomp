@@ -109,7 +109,7 @@ struct DrawTextures {
     TexInfo info[4];
     ID3D11ShaderResourceView* srv[4] = {};
     uint32_t levels[4] = {1, 1, 1, 1};
-    bool replaced[4] = {};  // a title's replacement picture (FindReplacement)
+    uint8_t replaced[4] = {};  // a title's replacement picture (FindReplacement): 1, 2 SharpenWorld's
     StageReads reads;
 };
 
@@ -1422,7 +1422,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
         auto r = FindReplacement(d.data);
         if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
-            stages.replaced[stage] = true;
+            stages.replaced[stage] = r->world ? 2 : 1;
             return srv;
         }
     }
@@ -1537,7 +1537,7 @@ ID3D11ShaderResourceView* D3D11Backend::BindTexture(const State& s, int stage, D
     stages.reads.k[stage] = 1;
     stages.reads.wide[stage] = 0;
     stages.levels[stage] = 1;
-    stages.replaced[stage] = false;
+    stages.replaced[stage] = 0;
     uint32_t header = s.textures[size_t(stage)];
     TextureDesc d;
     if (!header || !Describe(header, d)) return nullptr;

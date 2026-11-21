@@ -68,6 +68,7 @@ struct Replacement {
     std::vector<std::vector<uint32_t>> mips;  // the levels below bgra, when the background thread made them
     // the texture it stands for (Sharpen2D's; 0 any): the same memory read in another format or size is not it
     uint32_t format = 0, src_width = 0, src_height = 0;
+    uint32_t src_levels = 0;  // SharpenWorld's: the texture's levels, its mips those levels decoded (0 any)
     std::vector<uint32_t> bgra;
 };
 void SetReplacement(uint32_t data_va, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra);
