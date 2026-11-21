@@ -76,6 +76,9 @@ int main(int argc, char** argv) {
     std::ofstream(prebuilt.PlayDir() / "PGR2.dll") << "x";
     app.done_message = "The game is ready. Press Play.";
     Shot(app, big, out + "/p5_ready.png", W, H);
+    app.play_at_start = true, app.auto_play = true, app.done_message.clear();
+    Shot(app, big, out + "/p5b_play_at_start.png", W, H);
+    app.auto_play = false, app.play_at_start = false;
     app.page = 2, app.build_bytes = 13ull << 20;
     Shot(app, big, out + "/p6_manage.png", W, H);
     app.page = 0, app.update = true, app.done_message.clear();
