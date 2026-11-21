@@ -3543,7 +3543,12 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     if (HudPiece(s, a.pretransformed)) {
         float lo, hi, top, bottom;
         if (a.pretransformed ? ScreenExtent(s, a, lo, hi, top, bottom, nullptr) : ProgramExtent(s, a, lo, hi))
+        {
             c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi, a.pretransformed);
+            LOGR_FIRST(48, "%s: HUD piece x %.1f to %.1f y %.1f to %.1f (half width %.1f, frame %.3f, squeeze %.3f, vp %u+%u, %s): moved %.1f",
+                      "d3d12", lo, hi, a.pretransformed ? top : 0.0f, a.pretransformed ? bottom : 0.0f, c.hud[1], aspect_, c.hud[0], s.viewport.x, s.viewport.w,
+                      a.pretransformed ? "pretransformed" : "program", c.hud_move[0]);
+        }
     }
     SqueezeBeyond(s, c.hud);
     Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud, c.zclip + 2,
