@@ -1774,6 +1774,18 @@ void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
     Wrote(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     SetBlitTarget(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), t.w, t.h);
+    // GameInfo::cpu_frames_boxed: on a frame wider than the 2D's shape, the picture at that shape in the middle
+    if (float box = BoxedWidth(t); box > 0) {
+        if (!over) {
+            const float black[4] = {0, 0, 0, 0};
+            CLAt(__func__)->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
+        }
+        const float x = (float(t.w) - box) * 0.5f;
+        D3D12_VIEWPORT vp{x, 0, box, float(t.h), 0, 1};
+        D3D12_RECT scissor{LONG(x), 0, LONG(std::ceil(x + box)), LONG(t.h)};
+        CLAt(__func__)->RSSetViewports(1, &vp);
+        CLAt(__func__)->RSSetScissorRects(1, &scissor);
+    }
     float uv[4] = {0, 0, 1, 1};
     float mul = 1 / t.range;
     Blit(tex.Get(), kBgra, uv, {.alpha = true, .mul = mul, .rtv = t.fmt, .over = over});

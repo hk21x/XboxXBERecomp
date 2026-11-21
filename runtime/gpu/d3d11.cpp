@@ -758,6 +758,18 @@ void D3D11Backend::UploadTarget(Target& t, const Surface& s) {
     Settle(t);
     Wrote(t);
     SetPassTarget(t.rtv.Get(), nullptr, t.w, t.h);
+    // GameInfo::cpu_frames_boxed: on a frame wider than the 2D's shape, the picture at that shape in the middle
+    if (float box = BoxedWidth(t); box > 0) {
+        if (!over) {
+            const float black[4] = {0, 0, 0, 0};
+            ctx_->ClearRenderTargetView(t.rtv.Get(), black);
+        }
+        const float x = (float(t.w) - box) * 0.5f;
+        D3D11_VIEWPORT vp{x, 0, box, float(t.h), 0, 1};
+        D3D11_RECT sc{LONG(x), 0, LONG(std::ceil(x + box)), LONG(t.h)};
+        ctx_->RSSetViewports(1, &vp);
+        ctx_->RSSetScissorRects(1, &sc);
+    }
     float uv[4] = {0, 0, 1, 1};
     Blit(srv.Get(), uv, {.alpha = true, .over = over});
     t.epoch = DirtyEpoch(t.data);

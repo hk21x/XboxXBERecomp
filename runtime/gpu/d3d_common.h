@@ -186,6 +186,10 @@ bool ScreenDraw(const State& s);
 // those moves to, so the clip goes with the picture
 inline float SqueezedX(const float hud[4], float x) { return hud[0] < 0 ? hud[1] + (x - hud[1]) * -hud[0] : x; }
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch);
+// GameInfo::cpu_frames_boxed: the width a w x h target of a gw x gh guest surface takes a picture the CPU wrote whole
+// into, at the 2D's shape (app::HudAspect) in the middle; 0 where it is not shown wider than that (all of it)
+float BoxedWidth(uint32_t w, uint32_t h, uint32_t gw, uint32_t gh);
+template <class T> float BoxedWidth(const T& t) { return BoxedWidth(t.w, t.h, t.gw, t.gh); }
 // how a squeezed 2D draw is squeezed, by where its vertices reach (kSpanFrame where its positions cannot be read):
 // kSpanFrame reaches both the left and right edge of a frame `width` wide (a full screen quad), or is an untextured
 // fill ending on one edge and not past it (EoN's sniper scope bars): its vertices on or past the edges stay there; kSpanViewport fills a viewport narrower than the frame (EoN's Thermovision shrinking the frame
