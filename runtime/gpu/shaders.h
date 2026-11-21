@@ -72,6 +72,11 @@ bool ScreenProgram(const std::vector<uint32_t>& program);
 // a program that starts by multiplying its position input by four consecutive constants (dp4 v0 with c[k] .. c[k+3],
 // then the screen tail): k, else -1. With an orthographic 2D matrix there (gpu::OrthoConstants), it draws 2D
 int MatrixProgram(const std::vector<uint32_t>& program);
+// State::hud_layout: the guest pixels a HUD piece drawn now, from guest x lo to hi, is moved sideways by on a frame of
+// this aspect half_width guest pixels each side of its middle; 0 for anything else
+// whether a draw could be one (no depth test, a program, a flat matrix): checked before the CPU pass for its extent
+bool HudPiece(const State& s);
+float HudMove(const State& s, float aspect, float half_width, float lo, float hi);
 // c[k] .. c[k+3] (hardware order) are a 2D matrix: x and y from x and y alone (scaled, rotated, offset), y flipped, w 1
 bool OrthoConstants(const std::array<std::array<float, 4>, 192>& c, int k);
 // fixed function vertex state a shader is built for
@@ -142,6 +147,7 @@ struct DrawConstants {
     float vattr[16][4];  // State::vattr
     float zclip[4];      // the depth clip planes, near and far, as depth from 0 to 1 (-2 and 2: none); [2] and [3] a
                          // pretransformed picture's vertical scale and its centre (State::pillar_fill, Pillarbox), 0 none
+    float hud_move[4];   // [0]: guest pixels a matrix program's position is moved sideways by (State::hud_layout, HudMove)
 };
 
 }  // namespace gpu

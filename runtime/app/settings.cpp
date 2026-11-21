@@ -232,6 +232,7 @@ void Load() {
     s.world_textures = t["world_textures"].value_or(s.world_textures);
     s.low_latency = t["low_latency"].value_or(s.low_latency);
     s.sharpen = std::min<uint32_t>(t["sharpen"].value_or(s.sharpen), 100);
+    s.crt = std::min<uint32_t>(t["crt"].value_or(s.crt), 100);
     std::string renderer = t["renderer"].value_or(std::string(kRenderers[s.renderer % kRendererCount]));
     for (uint32_t i = 0; i < kRendererCount; i++)
         if (renderer == kRenderers[i]) s.renderer = i;
@@ -326,6 +327,7 @@ toml::table Table() {
                   {"world_textures", s.world_textures},
                   {"low_latency", s.low_latency},
                   {"sharpen", int64_t(s.sharpen)},
+                  {"crt", int64_t(s.crt)},
                   {"renderer", kRenderers[s.renderer % kRendererCount]},
                   {"wheel_range", int64_t(s.wheel_range)},
                   {"wheel_lock", int64_t(s.wheel_lock)},
@@ -467,6 +469,7 @@ bool FillsWide(uint32_t a) { return a == 3 || (a == 0 && kGame.auto_fills_screen
 // kept from the first ask: the title reads its TV setting once, as it boots, so a resolution changed in play (16:10 to
 // 16:9 from the Display page) must not tell the renderers another mode than the title is in
 bool Widescreen() {
+    if (kGame.aspect_live) return true;
     static const bool wide = [] {
         const uint32_t a = AspectChoice();
         if (a == 1 || FillsNarrow()) return false;
@@ -476,7 +479,22 @@ bool Widescreen() {
     return wide;
 }
 
+namespace {
+std::atomic<float> g_held{0};
+}  // namespace
+void HoldAspect(float aspect) { g_held.store(aspect); }
+
 float FrameAspect() {
+    if (kGame.aspect_live) {
+        if (const float held = g_held.load(); held > 0) return held;
+        // the choice as it is now: 4:3, 16:9, the screen's shape (never under 16:9), or from the screen: its shape when
+        // 3:2 or wider (to 16:9 unless the title fills ultrawide screens), else 4:3
+        const uint32_t now = Get().aspect % 4;
+        const float r = ScreenAspect();
+        if (now == 1 || (now == 0 && r < 1.5f - 1e-3f)) return 4.0f / 3.0f;
+        if (now == 2 || (now == 0 && !kGame.auto_fills_screen)) return 16.0f / 9.0f;
+        return std::max(16.0f / 9.0f, r);
+    }
     const uint32_t a = AspectChoice();
     if (!Widescreen()) {
         // a title widening its 4:3 views fills the screen it is shown on now, as far as the setting reaches (16:10 at

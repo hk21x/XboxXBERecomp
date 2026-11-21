@@ -59,6 +59,7 @@ struct Settings {
     bool world_textures = false;     // the 3D scene's colour textures enlarged twice on a background thread
     bool low_latency = false;        // a waitable swap chain holding one frame, at the next start
     uint32_t sharpen = 0;            // percent, contrast adaptive sharpening of the finished frame
+    uint32_t crt = 0;                // percent, a CRT's scanlines and aperture grille on the finished frame
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
     uint32_t language = 1;           // the console's language (XC_LANGUAGE, GameInfo::languages), at the next start
     // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,
@@ -127,6 +128,9 @@ bool Widescreen();
 // the shape the frame is shown at: 4:3, 16:9, or the screen's when the aspect setting fills it (never under 16:9, but
 // for a title filling a screen between 4:3 and 16:9: 16:10 shows the title's 4:3 mode widened, not 16:9 letterboxed)
 float FrameAspect();
+// a title holding the frame at a shape for a while, the aspect setting's choice set aside (GameInfo::aspect_live: 50
+// Cent's cutscenes at 4:3 on any frame); 0 lets the setting have it again
+void HoldAspect(float aspect);
 // the shape the title's 2D is laid out for in the mode the console reports: GameInfo::hud_aspect, 4:3 on a 4:3 TV
 float HudAspect();
 
@@ -265,6 +269,10 @@ struct GameInfo {
     // the title's 3D views follow FrameAspect when it changes (PGR2 reshapes its cameras): in a widescreen boot, a choice
     // between 16:9 and filling the screen applies at once; 4:3 against widescreen still waits for the next start
     bool fill_follows_live = false;
+    // the aspect setting applies at once, every choice: the console always reports a widescreen TV, and the title's
+    // hooks shape its views to FrameAspect() each frame, 4:3 too (Juiced: its camera's angles are set every frame, and
+    // a restart for each change was asked gone; Harry, 2026-11-17). The 2D is laid out for hud_aspect in that mode
+    bool aspect_live = false;
     // while frames run late (slower than 120 a second), each face of a cube map the GPU draws (a car's reflections) is
     // drawn at most this often a second and keeps its last picture in between; frames on time draw every face. 0 draws
     // them every frame always. XBE_CUBE_FACE_HZ overrides it

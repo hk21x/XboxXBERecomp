@@ -120,13 +120,33 @@ fs::path Builder::SavedGame() const {
     if (!ReadAll(root_ / "launcher.json", text)) return {};
     json j = json::parse(text, nullptr, false);
     if (j.is_discarded()) return {};
-    return PathOf(j.value("game", ""));
+    fs::path game = PathOf(j.value("game", ""));
+    // the image chosen is gone but the copy SetGame made in play\assets is there (one on another drive): that one
+    std::error_code ec;
+    if (!game.empty() && !fs::exists(game, ec) && Lower(U8(game.extension())) == ".iso") {
+        fs::path copy = PlayDir() / "assets" / game.filename();
+        if (fs::is_regular_file(copy, ec)) return copy;
+    }
+    return game;
 }
 
 bool Builder::SetGame(const GameCheck& copy, std::string& error) {
     std::error_code ec;
     fs::create_directories(PlayDir(), ec);
     fs::path assets = PlayDir() / "assets";
+    // the copy chosen is the one already in play\assets (an image copied there from another drive, or that folder):
+    // it stays as it is. Emptying the folder first would delete the very file chosen (PGR2 issue 39)
+    const fs::path chosen_dir = copy.iso ? copy.path.parent_path() : copy.path;
+    if (fs::is_directory(assets, ec) && fs::equivalent(chosen_dir, assets, ec)) {
+        // other images there go, unless play\assets is a link (a junction is the player's own folder)
+        if (copy.iso && fs::symlink_status(assets, ec).type() == fs::file_type::directory)
+            for (const auto& e : fs::directory_iterator(assets, ec))
+                if (Lower(U8(e.path().extension())) == ".iso" && !fs::equivalent(e.path(), copy.path, ec)) fs::remove(e.path(), ec);
+        Remember("game", U8(copy.path));
+        Remember("game_sha1", copy.sha1);
+        Log("game: " + U8(copy.path) + " (in place), " + copy.release + ", sha1 " + copy.sha1);
+        return true;
+    }
     // the last copy's link: a junction or an empty folder goes with remove; a folder holding the image we put there
     // is emptied of images first. Never a recursive remove: a junction's target is the player's own files.
     if (fs::exists(fs::symlink_status(assets, ec)) && !fs::remove(assets, ec)) {
@@ -631,11 +651,26 @@ bool Builder::BuildPackage(std::string& error) {
                 std::string name = Lower(U8(e.path().filename()));
                 if (name == "logs" || (name.size() > 5 && name.compare(name.size() - 5, 5, ".toml") == 0)) continue;
                 fs::path to = PlayDir() / e.path().filename();
+                // Windows: a folder just built in (its compiler and work files) or the one it replaces can be held for
+                // a moment after the build's processes end (an antivirus scan, the search indexer), and the move was
+                // refused once and for all ("Could not put compiler in place ... Access is denied": an EoN 1.3.2
+                // update, and on the VM a fresh 1.3.1 install's first build, Defender's real-time scan on, the folder
+                // free minutes later). So the old one's removal and the move are tried again for up to 2 minutes, each
+                // try logged
                 std::error_code move;
-                if (e.is_directory(move)) fs::remove_all(to, move);
-                fs::rename(e.path(), to, move);
+                const bool dir = e.is_directory(move);
+                for (int attempt = 1;; attempt++) {
+                    move.clear();
+                    if (dir && fs::exists(to, move)) fs::remove_all(to, move);
+                    if (!move) fs::rename(e.path(), to, move);
+                    if (!move) break;
+                    Log("replace: " + U8(e.path().filename()) + ", try " + std::to_string(attempt) + ": " + move.message());
+                    if (attempt >= 120 || cancel) break;
+                    Say("Putting the new version in place", "Waiting for Windows to let go of " + U8(e.path().filename()), -1);
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
                 if (move) {
-                    error = "Could not put " + U8(e.path().filename()) + " in place (is the game still running?): " + move.message();
+                    error = "Could not put " + U8(e.path().filename()) + " in place (is the game still running, or an antivirus scanning it?): " + move.message() + ". Press Update again to retry; see launcher.log";
                     return false;
                 }
             }
@@ -742,6 +777,22 @@ std::string Builder::BuiltVersion() const {
     json j = json::parse(text, nullptr, false);
     if (j.is_discarded() || !j.is_object() || !j.contains("built") || !j["built"].is_string()) return {};
     return j["built"].get<std::string>();
+}
+
+bool Builder::PlayAtStart() const {
+    std::string text;
+    if (!ReadAll(root_ / "launcher.json", text)) return false;
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("play_at_start") || !j["play_at_start"].is_boolean()) return false;
+    return j["play_at_start"].get<bool>();
+}
+
+void Builder::SetPlayAtStart(bool on) {
+    std::string text;
+    json j = ReadAll(root_ / "launcher.json", text) ? json::parse(text, nullptr, false) : json::object();
+    if (j.is_discarded() || !j.is_object()) j = json::object();
+    j["play_at_start"] = on;
+    std::ofstream(root_ / "launcher.json") << j.dump(2);
 }
 
 fs::path Builder::SavedMusic() const {

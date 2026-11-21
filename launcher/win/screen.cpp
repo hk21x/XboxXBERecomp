@@ -238,6 +238,15 @@ void GamePage(App& app, void* window, ImFont* heading, const Status& st, const s
     }
     ImGui::PopFont();
     ImGui::EndDisabled();
+    if (app.auto_play) {
+        TextIn(kAccent, "The game starts once the check for a new version is done.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Stay in the launcher")) app.auto_play = false;
+    }
+    if (ImGui::Checkbox("Start the game when the launcher opens, if nothing needs updating", &app.play_at_start))
+        app.builder->SetPlayAtStart(app.play_at_start);
+    TextIn(kDim, "Hold Shift as the launcher opens to stay in it. The launch option --play does the same for one "
+                 "shortcut (a Steam shortcut, say).");
     TextIn(kDim, "In the game: F1 opens the PC settings. Saves, settings and logs stay in the game's folder.");
 }
 

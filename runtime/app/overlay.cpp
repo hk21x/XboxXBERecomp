@@ -405,7 +405,7 @@ void Display(Settings& s) {
     }
     int aspect = int(s.aspect % 4);
     const char* aspects[] = {"From the screen's shape", "4:3", "16:9 (widescreen)", "Fill the screen (ultrawide, 16:10)"};
-    const char* aspect_help = kGame.fill_follows_live
+    const char* aspect_help = kGame.aspect_live ? "Applies at once." : kGame.fill_follows_live
                                   ? "16:9 and the two that fill an ultrawide screen apply at once; to or from 4:3 at the next start (the game reads its TV setting when it boots)."
                                   : "Applies at the next start (the game reads its TV setting when it boots).";
     if (RowChoice("Aspect ratio", &aspect, aspects, 4, aspect_help)) {
@@ -462,6 +462,11 @@ void Graphics(Settings& s) {
     int sharp = int(s.sharpen);
     if (RowSlider("Sharpening", &sharp, 0, 100, 5, "%")) {
         s.sharpen = uint32_t(sharp);
+        Save();
+    }
+    int crt = int(s.crt);
+    if (RowSlider("CRT look", &crt, 0, 100, 5, "%", "Scanlines and a CRT's red, green and blue stripes over the finished frame, HUD included. Scanlines need the picture 720 pixels tall or more; they look best at 1440 and above.")) {
+        s.crt = uint32_t(crt);
         Save();
     }
     if (RowCheck("Low latency", &s.low_latency, "Applies at the next start. Holds one finished frame instead of several: less input lag, but a slow frame costs more.")) Save();

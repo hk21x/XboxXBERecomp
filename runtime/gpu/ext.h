@@ -29,6 +29,7 @@ struct Target {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     uint32_t data = 0, bytes = 0;
     uint64_t epoch = 0, sig = 0;  // last lock seen, guest memory as last matched
+    uint32_t lock_checks = 0;     // checks since a lock whose writes have not shown yet (LatchCpuWrite)
     bool drawn = false;           // the GPU wrote it since the last readback
     bool linear32 = true;         // a 32 bit linear surface in guest memory, written back row by row
     bool swizzled32 = false;      // a 32 bit swizzled one, written back in Morton order (a title reading it as data)

@@ -77,6 +77,7 @@ struct Target {
     uint32_t gw = 0, gh = 0, w = 0, h = 0;
     uint32_t data = 0, bytes = 0;
     uint64_t epoch = 0, sig = 0;  // last lock seen, guest memory as last matched
+    uint32_t lock_checks = 0;     // checks since a lock whose writes have not shown yet (LatchCpuWrite)
     bool drawn = false;           // the GPU wrote it since the last readback
     bool linear32 = true;         // a 32 bit linear surface in guest memory, written back row by row
     bool swizzled32 = false;      // a 32 bit swizzled one, written back in Morton order (a title reading it as data)
@@ -154,13 +155,20 @@ bool Changed(const Target& t) {
     return false;
 }
 
-// a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it
+// a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it. The render thread runs behind
+// the title, so it can look between a lock and the writes after it (CRI Sofdec locks its movie frame, a target the
+// title also draws on, and decodes into it on its own thread: 50 Cent: Bulletproof's cutscenes showed the frame
+// before for two frames); unchanged bytes keep the lock pending for kLockChecks more looks before it counts as a read
 bool LatchCpuWrite(Target& t) {
+    constexpr uint32_t kLockChecks = 16;
     uint64_t e = DirtyEpoch(t.data);
     if (e <= t.epoch) return false;
-    t.epoch = e;
     uint64_t sig = SurfaceSig(t.data, t.bytes);
-    if (sig == t.sig && !Changed(t)) return false;
+    if (sig == t.sig && !Changed(t)) {
+        if (++t.lock_checks >= kLockChecks) t.epoch = e, t.lock_checks = 0;
+        return false;
+    }
+    t.epoch = e, t.lock_checks = 0;
     t.sig = sig;
     return true;
 }
@@ -1058,15 +1066,16 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
     const app::Settings& st = app::Get();
-    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter || st.crt);
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
     ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h), h);
     if (!ps && final) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
-    float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
+    float c[12] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), 1.0f};
-    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f,
+               c[8] = float(std::min<uint32_t>(st.crt, 100)) / 100.0f, c[9] = kCrtLines;
     ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
-    FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
+    FullScreen(vs, ps, c, 12, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
 
 // a depth buffer drawn as colour into another depth buffer's memory: copied as depth
@@ -1914,6 +1923,10 @@ void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         Span span = DrawSpan(s, a, c.hud[1] * 2);
         if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
+    }
+    if (HudPiece(s)) {
+        float lo, hi;
+        if (ProgramExtent(s, a, lo, hi)) c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi);
     }
     SqueezeBeyond(s, c.hud);
     Pillarbox(s, a, aspect_, stretch, c.hud, c.zclip + 2, float(bound_rt_ ? bound_rt_->gh : guest_h_) / s.aa_y);

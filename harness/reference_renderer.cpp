@@ -13,7 +13,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
-#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,6 +21,7 @@
 #include "gpu/shaders.h"
 #include "gpu/texture.h"
 #include "gpu/vertex.h"
+#include "gpu/vertex_program.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
 #include "app/app.h"
@@ -33,12 +33,8 @@ using namespace gpu;
 
 namespace {
 
-struct Vec {
-    float c[4] = {};
-    float& operator[](int i) { return c[i]; }
-    float operator[](int i) const { return c[i]; }
-};
-Vec V(float x, float y, float z, float w) { return {{x, y, z, w}}; }
+using gpu::vp::Vec;
+using gpu::vp::V;
 float Sat(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 float AsFloat(uint32_t bits) {
     float f;
@@ -343,145 +339,13 @@ struct Unit {
 
 // vertex programs
 
-// the microcode fields, as shaders.cpp names them
-struct Tok {
-    const uint32_t* t;
-    uint32_t f(int sub, int bit, int len) const { return (t[sub] >> bit) & ((1u << len) - 1); }
-};
-
-// magnitude clamped between 1 / 2^64 and 2^64, sign kept
-float MagClamp(float v) {
-    float m = std::clamp(std::fabs(v), 5.42101e-20f, 1.84467e+19f);
-    return v < 0 ? -m : m;
-}
-float MacMul(float a, float b) { return (a == 0 || b == 0) ? 0 : a * b; }
-Vec Splat(float v) { return V(v, v, v, v); }
-
-// 1 mov, 2 mul, 3 add, 4 mad, 5 dp3, 6 dph, 7 dp4, 8 dst, 9 min, 10 max, 11 slt, 12 sge, 13 arl
-Vec Mac(uint32_t op, const Vec& a, const Vec& b, const Vec& c) {
-    Vec r;
-    switch (op) {
-        case 1:
-        case 13: return a;
-        case 2: for (int i = 0; i < 4; i++) r[i] = MacMul(a[i], b[i]); return r;
-        case 3: for (int i = 0; i < 4; i++) r[i] = a[i] + c[i]; return r;
-        case 4: for (int i = 0; i < 4; i++) r[i] = MacMul(a[i], b[i]) + c[i]; return r;
-        case 5: return Splat(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
-        case 6: return Splat(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + b[3]);
-        case 7: return Splat(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
-        case 8: return V(1, a[1] * b[1], a[2], b[3]);
-        case 9: for (int i = 0; i < 4; i++) r[i] = std::min(a[i], b[i]); return r;
-        case 10: for (int i = 0; i < 4; i++) r[i] = std::max(a[i], b[i]); return r;
-        case 11: for (int i = 0; i < 4; i++) r[i] = a[i] < b[i] ? 1.f : 0.f; return r;
-        case 12: for (int i = 0; i < 4; i++) r[i] = a[i] >= b[i] ? 1.f : 0.f; return r;
-        default: return r;
-    }
-}
-
-// 1 mov, 2 rcp, 3 rcc, 4 rsq, 5 exp, 6 log, 7 lit
-Vec Ilu(uint32_t op, const Vec& c) {
-    float v = c[0];
-    switch (op) {
-        case 1: return c;
-        case 2: return Splat(1.0f / v);
-        case 3: return Splat(MagClamp(1.0f / v));
-        case 4: return Splat(v == 0 ? INFINITY : 1.0f / std::sqrt(std::fabs(v)));
-        case 5: {
-            float whole = std::floor(v);
-            return V(std::exp2(whole), v - whole, std::exp2(v), 1);
-        }
-        case 6: {
-            float mag = std::fabs(v);
-            if (mag == 0) return V(-INFINITY, 1, -INFINITY, 1);
-            float ex = std::floor(std::log2(mag));
-            return V(ex, mag / std::exp2(ex), std::log2(mag), 1);
-        }
-        case 7: {
-            const float cap = 127.99609375f;
-            float power = std::clamp(c[3], -cap, cap), diffuse = std::max(c[0], 0.f), spec = std::max(c[1], 0.f);
-            return V(1, diffuse, diffuse > 0 ? std::exp2(power * std::log2(spec)) : 0, 1);
-        }
-        default: return Vec{};
-    }
-}
-
-struct VertexProgram {
-    const State& s;
-    Vec in[16];
-    Vec temp[12], out[16];  // out 0 oPos, 3 oD0, 4 oD1, 5 oFog, 6 oPts, 7 oB0, 8 oB1, 9 to 12 oT0 to oT3
-    int a0 = 0;
-
-    // temp 12 is oPos
-    Vec& Reg(uint32_t r) { return r == 12 ? out[0] : temp[r]; }
-
-    // operand A 0, B 1, C 2
-    Vec Operand(const Tok& k, int which) {
-        uint32_t neg, sw[4], reg, mux;
-        if (which == 0) {
-            neg = k.f(1, 8, 1);
-            sw[0] = k.f(1, 6, 2), sw[1] = k.f(1, 4, 2), sw[2] = k.f(1, 2, 2), sw[3] = k.f(1, 0, 2);
-            reg = k.f(2, 28, 4), mux = k.f(2, 26, 2);
-        } else if (which == 1) {
-            neg = k.f(2, 25, 1);
-            sw[0] = k.f(2, 23, 2), sw[1] = k.f(2, 21, 2), sw[2] = k.f(2, 19, 2), sw[3] = k.f(2, 17, 2);
-            reg = k.f(2, 13, 4), mux = k.f(2, 11, 2);
-        } else {
-            neg = k.f(2, 10, 1);
-            sw[0] = k.f(2, 8, 2), sw[1] = k.f(2, 6, 2), sw[2] = k.f(2, 4, 2), sw[3] = k.f(2, 2, 2);
-            reg = k.f(2, 0, 2) << 2 | k.f(3, 30, 2), mux = k.f(3, 28, 2);
-            uint32_t ilu = k.f(1, 25, 3);
-            if (ilu >= 2 && ilu <= 6) sw[1] = sw[2] = sw[3] = sw[0];  // scalar ops read x
-        }
-        Vec base;
-        if (mux == 1) {
-            base = reg == 12 ? out[0] : temp[reg > 12 ? 0 : reg];
-        } else if (mux == 2) {
-            base = in[k.f(1, 9, 4)];
-        } else {
-            int cr = int(k.f(1, 13, 8));
-            if (k.f(3, 1, 1)) cr = std::clamp(cr + a0, 0, 191);
-            const auto& c = s.vsc[size_t(cr)];
-            base = V(c[0], c[1], c[2], c[3]);
-        }
-        Vec r;
-        for (int i = 0; i < 4; i++) r[i] = neg ? -base[int(sw[i])] : base[int(sw[i])];
-        return r;
-    }
-
-    static void Masked(Vec& dst, const Vec& src, uint32_t xyzw) {
-        for (int i = 0; i < 4; i++)
-            if (xyzw >> (3 - i) & 1) dst[i] = src[i];
-    }
-
-    void Run(const std::vector<uint32_t>& prog) {
-        out[3] = out[7] = out[9] = out[10] = out[11] = out[12] = V(0, 0, 0, 1);
-        out[6] = V(1, 1, 1, 1);
-        for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
-            Tok k{&prog[n]};
-            uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
-            if (mac || ilu) {
-                Vec a = Operand(k, 0), b = Operand(k, 1), c = Operand(k, 2);
-                Vec mr = mac ? Mac(mac, a, b, c) : Vec{}, ir = ilu ? Ilu(ilu, c) : Vec{};
-                uint32_t r = k.f(3, 20, 4), omask = k.f(3, 12, 4);
-                bool use_ilu = k.f(3, 2, 1) == 1;
-                // the output register is written before the temporaries
-                if (omask && k.f(3, 11, 1) && ((use_ilu && ilu) || (!use_ilu && mac && mac != 13)))
-                    Masked(out[k.f(3, 3, 8) & 0xF], use_ilu ? ir : mr, omask);
-                if (ilu) {
-                    uint32_t dst = mac ? 1 : r;
-                    if (dst <= 12) Masked(Reg(dst), ir, k.f(3, 16, 4));
-                }
-                if (mac == 13) {
-                    a0 = int(std::floor(mr[0] + 0.001f));
-                } else if (mac) {
-                    uint32_t m = ilu && r == 1 ? 0 : k.f(3, 24, 4);
-                    if (r <= 12) Masked(Reg(r), mr, m);
-                }
-            }
-            if (k.f(3, 0, 1)) break;
-        }
-    }
-};
+using gpu::vp::Tok;
+using gpu::vp::MagClamp;
+using gpu::vp::MacMul;
+using gpu::vp::Splat;
+using gpu::vp::Mac;
+using gpu::vp::Ilu;
+using gpu::vp::VertexProgram;
 
 float FogAmount(const State& s, float d) {
     if (!s.rs[kRsFogEnable]) return 1;
@@ -1242,11 +1106,12 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         squeeze = app::HudAspect() / app::FrameAspect();
     // State::pillar_aspect: squeezed whole to that shape (the renderers' Pillarbox)
     const bool pillar = s.pillar_aspect > 0 && (as.pretransformed || screen) && slot[0] >= 0 && rt.ok &&
-                        (rt.h == 480 || rt.h == 576) && rt.w >= rt.h && app::FrameAspect() > s.pillar_aspect + 1e-3f &&
+                        (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
+                        (app::FrameAspect() > s.pillar_aspect + 1e-3f || s.pillar_fit) &&
                         (!s.pillar_format ||
                          (s.textures[0] && (kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.pillar_format));
     const float hud_squeeze = squeeze;  // what a pillar draw not spanning the frame keeps
-    if (pillar) squeeze = s.pillar_aspect / app::FrameAspect();
+    if (pillar) squeeze = std::min(1.0f, s.pillar_aspect / app::FrameAspect());
     std::vector<uint8_t> squeezable(as.vertex_count, 0);  // squeezed below, once the draw's extent is known
     for (uint32_t vi = 0; vi < as.vertex_count; vi++) {
         VertexProgram vp{s};
@@ -1328,8 +1193,8 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
     // where they are; any other is squeezed whole (EoN's driving radar: big tiles past the left edge only)
     // (positions here are already in aa_x pixels; the squeeze works in the draw's own, as it did per vertex)
     float clip_squeeze = 1;  // squeezed whole: the viewport and scissor go with the picture (gpu::SqueezedX)
-    const float pivot = float(rt.w) * 0.5f;  // what the squeeze is about
-    if (squeeze != 1) {
+    float pivot = float(rt.w) * 0.5f;  // what the squeeze is about
+    if (squeeze != 1 || pillar) {
         const float ax = float(s.aa_x), w = float(rt.w);
         float lo = 1e30f, hi = -1e30f;
         for (uint32_t vi = 0; vi < as.vertex_count; vi++)
@@ -1361,6 +1226,20 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
         if (!spans) clip_squeeze = squeeze;
         // State::pillar_fill: the width kept, the picture enlarged about the centre to its own shape (the renderers'
         // Pillarbox, zclip.z and .w)
+        // State::pillar_fit: the picture's whole height scaled into the frame about its own extent (the renderers'
+        // Pillarbox, zclip.z and .w), then squeezed to its shape
+        if (pillared && s.pillar_fit) {
+            const float ay = float(s.aa_y), gh = float(rt.h) / ay;
+            float top = 1e30f, bottom = -1e30f;
+            for (uint32_t vi = 0; vi < as.vertex_count; vi++)
+                if (squeezable[vi]) top = std::min(top, verts[vi].pos[1] / ay), bottom = std::max(bottom, verts[vi].pos[1] / ay);
+            if (bottom - top > gh + 0.5f) {
+                const float z = gh / (bottom - top), cy = -top * z / (1 - z);
+                for (uint32_t vi = 0; vi < as.vertex_count; vi++)
+                    if (squeezable[vi]) verts[vi].pos[1] = (cy + (verts[vi].pos[1] / ay - cy) * z) * ay;
+            }
+            spans = false;
+        }
         if (pillared && s.pillar_fill) {
             const float k = app::FrameAspect() / s.pillar_aspect, ay = float(s.aa_y), cy = float(rt.h) * 0.5f;
             for (uint32_t vi = 0; vi < as.vertex_count; vi++)
@@ -1373,6 +1252,15 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
             if (squeezable[vi] && !(spans && AtFrameEdge(x, w)) && squeeze != 1)
                 verts[vi].pos[0] = (pivot + (x + shift - pivot) * squeeze) * ax;
         }
+    }
+
+    // State::hud_layout: a HUD piece moved sideways to keep its distance from its edge (the renderers' HudMove)
+    if (s.hud_layout > 0 && as.vertex_count) {
+        const float ax = float(s.aa_x);
+        float lo = 1e30f, hi = -1e30f;
+        for (uint32_t vi = 0; vi < as.vertex_count; vi++) lo = std::min(lo, verts[vi].pos[0] / ax), hi = std::max(hi, verts[vi].pos[0] / ax);
+        if (const float move = HudMove(s, app::FrameAspect(), float(rt.w) * 0.5f / ax, lo, hi); move != 0)
+            for (uint32_t vi = 0; vi < as.vertex_count; vi++) verts[vi].pos[0] += move * ax;
     }
 
     // point sprites: each point a square of its size in console pixels, clamped to D3DRS_POINTSIZE_MIN and _MAX, every

@@ -1,5 +1,6 @@
 // What the Direct3D 12 and Direct3D 11 renderers share (d3d_common.h)
 #include "gpu/d3d_common.h"
+#include "gpu/vertex_program.h"
 
 #include <d3dcompiler.h>
 
@@ -179,7 +180,7 @@ void ForgetPipelines() {
 }
 
 const char* kBlitHlsl = R"(
-cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+cbuffer B : register(b1) { float4 uvrect; float4 opts; float4 crt; };
 Texture2D img : register(t0);
 Texture2D lut : register(t1);
 SamplerState ls : register(s0);
@@ -211,7 +212,7 @@ float4 psmix(O i) : SV_Target {
     return float4(c.rgb, 1);
 }
 // the finished frame, the settings' passes in one (the plain blit without them): opts.y bit 0 for FXAA, bit 1 for the
-// sharp scaling filter, opts.z the sharpening 0 to 1. The filter: Catmull-Rom over source pixels going up; going down, the
+// sharp scaling filter, opts.z the sharpening 0 to 1, crt.x the CRT look 0 to 1 over crt.y lines. The filter: Catmull-Rom over source pixels going up; going down, the
 // output pixel's area (four taps, even at a ratio that is not whole) less a little of its neighbours. FXAA: where the luma of a pixel and its four neighbours differs enough to be an edge, the colour is
 // averaged along the edge's direction, found from the diagonal neighbours. Sharpening, contrast adaptive (as AMD's CAS):
 // the pixel less its neighbours, weighted down where they already span much of the range, so strong edges get no halos;
@@ -265,6 +266,38 @@ float3 sharpen(float3 c, float2 uv, float2 t, float amount) {
     float3 k = amp * amount * -0.2;  // from nothing: CAS's own scale starts at -0.125, grainy on the road textures
     return saturate(((n + s + e + w) * k + c) / (1 + 4 * k));
 }
+// a CRT's look, on the colour as shown, at amount 0 to 1: the picture in lines, each a beam wider where it is brighter,
+// so dark lines are thin and bright ones meet; then an aperture grille, a red, green and blue stripe each screen pixel
+// in turn. A line is a whole number of screen pixels, the nearest to the console's lines (2 at 1080, 3 at 1440, 4 or 5
+// at 2160), as a fraction beats with the pixels; under 2 there is no room for one, and only the grille shows. In linear
+// light, and each step keeps the light's average (the beam over its line's pixels, the grille over its three), so the
+// screen gives out as much as without it; only highlights, clipped at a line's centre, lose some
+float beamat(float d, float h) {
+    float u = saturate(abs(d) / h);
+    return (1 - u * u) * (1 - u * u);
+}
+float3 crtlook(float3 c, float2 uv, float2 pos, float amount, float lines) {
+    float3 l = pow(saturate(c), 2.2);
+    float3 lit = l;
+    float rows = 1 / max(fwidth(uv.y), 1e-6);  // the frame's height on the screen
+    int n = min((int)round(rows / lines), 8);  // screen pixels a line
+    if (n >= 2) {
+        // the frame's row, counted from its top; a line's centre on a row, its edges between rows
+        int r = (int)floor(uv.y * rows) % n;
+        float3 h = lerp(0.38, 0.7, sqrt(l));  // the beam's half width, in lines
+        float3 sum = 0, here = 0;
+        for (int j = 0; j < n; j++) {
+            float d = frac(float(j) / n + 0.5) - 0.5;
+            float3 b = float3(beamat(d, h.r), beamat(d, h.g), beamat(d, h.b));
+            sum += b;
+            if (j == r) here = b;
+        }
+        lit = saturate(l * here * n / max(sum, 1e-4));
+    }
+    uint m = uint(pos.x) % 3;
+    float3 grille = float3(m == 0, m == 1, m == 2) * 0.45 + 0.85;
+    return pow(saturate(lerp(l, lit * grille, amount)), 1 / 2.2);
+}
 float4 psfinal(O i) : SV_Target {
     float2 size;
     img.GetDimensions(size.x, size.y);
@@ -276,6 +309,7 @@ float4 psfinal(O i) : SV_Target {
     if (opts.z > 0) c = sharpen(c, i.uv, px, opts.z);
     c *= opts.w;
     if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
+    if (crt.x > 0) c = crtlook(c, i.uv, i.p.xy, crt.x, crt.y);
     return float4(c, 1);
 }
 )";
@@ -992,7 +1026,7 @@ bool ScreenDraw(const State& s) {
 // the screen x a draw's positions reach (lo to hi) and their screen y (top to bottom, without a matrix); false where they
 // cannot be read. xs: each vertex's screen x too (the first 4096)
 bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, float& top, float& bottom,
-                  std::vector<float>* xs = nullptr) {
+                  std::vector<float>* xs) {
     // the position (v0) of vertex i, from the converted vertices or the guest's own buffer
     const int regs = std::popcount(uint32_t(a.regs));
     const VertexElement& e = a.elements[0];
@@ -1029,6 +1063,61 @@ bool ScreenExtent(const State& s, const Assembled& a, float& lo, float& hi, floa
         hi = std::max(hi, x);
         top = std::min(top, p[1]);
         bottom = std::max(bottom, p[1]);
+    }
+    return true;
+}
+
+bool ProgramExtent(const State& s, const Assembled& a, float& lo, float& hi) {
+    if (!(s.vs_handle & 1) || !s.vs || s.vs->program.empty() || !(a.regs & 1)) return false;
+    const bool converted = !a.vertices.empty();
+    const VertexElement& e = a.elements[0];
+    const VertexBuffer& b = a.buffers[e.buffer];
+    uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
+    if (!count) return false;
+    // the position as the input assembler reads it: floats, or 16 bit integers as they are (D3DVSDT_SHORT*: 50 Cent's
+    // HUD text, the ammo count among it) or over 32767 (NORMSHORT*); what a format leaves out is 0, w 1
+    const uint32_t decode = uint32_t(a.decode & 0xF);  // v0's
+    int n = 0, kind = 0;                               // kind 0 float, 1 int16, 2 snorm16
+    switch (e.format) {
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: n = 4; break;
+        case DXGI_FORMAT_R32G32B32_FLOAT: n = 3; break;
+        case DXGI_FORMAT_R32G32_FLOAT: n = 2; break;
+        case DXGI_FORMAT_R16G16B16A16_SINT: n = decode == kDecodeIntW1 ? 3 : 4, kind = 1; break;
+        case DXGI_FORMAT_R16G16_SINT: n = 2, kind = 1; break;
+        case DXGI_FORMAT_R16G16B16A16_SNORM: n = decode == kDecodeW1 ? 3 : 4, kind = 2; break;
+        case DXGI_FORMAT_R16G16_SNORM: n = 2, kind = 2; break;
+        default: break;
+    }
+    if (!converted && (!b.src || !n)) return false;
+    int regs = 0, slot[16];
+    for (int r = 0; r < 16; r++) slot[r] = (a.regs >> r) & 1 ? regs++ : -1;
+    lo = 1e30f, hi = -1e30f;
+    count = std::min<uint32_t>(count, 1024);
+    for (uint32_t i = 0; i < count; i++) {
+        vp::VertexProgram p{s};
+        for (int r = 0; r < 16; r++) {
+            float v[4] = {0, 0, 0, 1};
+            if (slot[r] >= 0 && converted) {
+                std::memcpy(v, &a.vertices[(size_t(i) * size_t(regs) + size_t(slot[r])) * 4], sizeof v);
+            } else if (r == 0 && !converted) {
+                const uint8_t* at = b.src + size_t(i) * b.stride + e.offset;
+                if (kind == 0) {
+                    std::memcpy(v, at, size_t(n) * 4);
+                } else {
+                    for (int c = 0; c < n; c++) {
+                        int16_t q;
+                        std::memcpy(&q, at + c * 2, 2);
+                        v[c] = kind == 1 ? float(q) : std::max(-1.0f, float(q) / 32767.0f);
+                    }
+                }
+            } else {
+                std::memcpy(v, s.vattr[size_t(r)].data(), sizeof v);
+            }
+            p.in[r] = vp::V(v[0], v[1], v[2], v[3]);
+        }
+        p.Run(s.vs->program);
+        lo = std::min(lo, p.out[0][0]);
+        hi = std::max(hi, p.out[0][0]);
     }
     return true;
 }
@@ -1084,11 +1173,24 @@ void SqueezeBeyond(const State& s, float hud[4]) {
 }
 
 void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, float hud[4], float zoom[2], float gh) {
-    if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1 || aspect <= s.pillar_aspect + 1e-3f) return;
+    if (s.pillar_aspect <= 0 || !(a.pretransformed || ScreenDraw(s)) || stretch <= 1) return;
+    const bool wider = aspect > s.pillar_aspect + 1e-3f;
+    if (!wider && !s.pillar_fit) return;
     if (s.pillar_format && (!s.textures[0] || (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) != s.pillar_format)) return;
     // only a picture spanning the frame, into a centred box: a panel narrowed in place showed hard edges inside the
     // vignette drawn over it at its old size (PGR2's title movie)
     if (DrawSpan(s, a, hud[1] * 2) != kSpanFrame) return;
+    if (s.pillar_fit && gh > 0) {
+        // y' = c + (y - c) z takes the picture's top to 0 and its bottom to gh
+        float lo, hi, top, bottom;
+        if (ScreenExtent(s, a, lo, hi, top, bottom) && bottom - top > gh + 0.5f) {
+            const float z = gh / (bottom - top);
+            zoom[0] = z;
+            zoom[1] = -top * z / (1 - z);
+        }
+        if (wider) hud[0] = -(s.pillar_aspect / aspect);
+        return;
+    }
     if (s.pillar_fill && gh > 0) {
         // the frame's width kept, the picture's height enlarged to its shape about the centre (top and bottom cropped)
         hud[0] = 1;

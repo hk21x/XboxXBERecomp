@@ -2338,6 +2338,8 @@ void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
         s.pillar_aspect = g_state.pillar_aspect;
         s.pillar_format = g_state.pillar_format;
         s.pillar_fill = g_state.pillar_fill;
+        s.pillar_fit = g_state.pillar_fit;
+        s.hud_layout = g_state.hud_layout;
         s.blank_format = g_state.blank_format;
         if (!g_backend) continue;
         if (!d->up.empty()) {

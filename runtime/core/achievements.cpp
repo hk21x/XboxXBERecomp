@@ -296,6 +296,29 @@ std::string Check(const char* condition) {
     return Parse(condition, g);
 }
 
+namespace {
+void Unlock(Ach& a) {
+    a.unlocked = true;
+    a.when = Now();
+    g_recent = a.def->title;
+    g_recent_points = a.def->points;
+    g_recent_at = std::chrono::steady_clock::now();
+    LOGR("achievement unlocked: %s (%u points)", a.def->title, a.def->points);
+}
+}  // namespace
+
+void Award(const char* id) {
+    if (app::kGame.achievements.empty()) return;
+    std::lock_guard lock(g_lock);
+    if (!g_loaded) Load();
+    for (Ach& a : g_list) {
+        if (std::string(a.def->id) != id) continue;
+        if (!a.unlocked) Unlock(a), Save();
+        return;
+    }
+    LOGE("achievements: award of an unknown id %s", id);
+}
+
 void Frame() {
     if (app::kGame.achievements.empty()) return;
     std::lock_guard lock(g_lock);
@@ -316,12 +339,7 @@ void Frame() {
             continue;
         }
         if (!a.armed) continue;  // met since start: waits until it is unmet once
-        a.unlocked = true;
-        a.when = Now();
-        g_recent = a.def->title;
-        g_recent_points = a.def->points;
-        g_recent_at = std::chrono::steady_clock::now();
-        LOGR("achievement unlocked: %s (%u points)", a.def->title, a.def->points);
+        Unlock(a);
         changed = true;
     }
     if (changed) Save();

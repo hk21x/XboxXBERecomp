@@ -197,6 +197,65 @@ bool launcher::UpdateLauncher(App& app, const Release& r, std::string& error) {
     return true;
 }
 
+namespace {
+
+// why the launcher stays open rather than starting the game by itself; empty when it can start it
+std::string NotReadyToPlay(App& app) {
+    if (!app.copy.ok) return "no game chosen";
+    if (!app.builder->Built()) return "the game is not built";
+    if (app.builder->Legacy()) return "the game is to be updated to the prebuilt way";
+    if (app.update) return "a new version of the game is ready to install";
+    if (app.launcher_update) return "a new launcher is offered";
+    std::lock_guard l(app.lock);
+    if (!app.error.empty()) return "the start's check ended with an error";
+    return {};
+}
+
+// The game started with the launcher hidden, which waits for it and then closes, so a shortcut (Steam's above all)
+// sees it running until it ends. Its processes are put in a job (not killed with it), so a game that starts itself
+// again (a renderer change) is still waited for. False with the reason when it did not start.
+bool PlayAndWait(App& app, HWND hwnd, std::string& error) {
+    fs::path exe = app.builder->GameExe(), dir = app.builder->PlayDir();
+    std::wstring cmd = L"\"" + exe.wstring() + L"\"";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, dir.c_str(), &si, &pi)) {
+        error = "Could not start the game (error " + std::to_string(GetLastError()) + ").";
+        if (job) CloseHandle(job);
+        return false;
+    }
+    if (job && !AssignProcessToJobObject(job, pi.hProcess)) CloseHandle(job), job = nullptr;
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    app.builder->Log("play at start: the game started, the launcher waits for it");
+    ShowWindow(hwnd, SW_HIDE);
+    for (;;) {
+        DWORD r = MsgWaitForMultipleObjects(1, &pi.hProcess, FALSE, 500, QS_ALLINPUT);
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (r == WAIT_OBJECT_0 || r == WAIT_TIMEOUT) {
+            if (WaitForSingleObject(pi.hProcess, 0) != WAIT_OBJECT_0) continue;
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
+            if (job && QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &info, sizeof(info), nullptr) &&
+                info.ActiveProcesses > 0)
+                continue;
+            break;
+        }
+        if (r == WAIT_FAILED) break;
+    }
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job);
+    app.builder->Log("play at start: the game ended (exit code " + std::to_string(code) + "), the launcher closes");
+    return true;
+}
+
+}  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -233,6 +292,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     fs::path saved = app.builder->SavedGame();
     if (!saved.empty()) app.copy = CheckGame(app.game, saved);
     app.music = app.builder->SavedMusic();
+    // the game straight away (EoN issue 37): the saved choice or --play, not with Shift held
+    {
+        bool play = false;
+        int argc = 0;
+        if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+            for (int i = 1; i < argc; i++)
+                if (_wcsicmp(argv[i], L"--play") == 0 || _wcsicmp(argv[i], L"-play") == 0 || _wcsicmp(argv[i], L"/play") == 0)
+                    play = true;
+            LocalFree(argv);
+        }
+        app.play_at_start = app.builder->PlayAtStart();
+        const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        app.auto_play = (app.play_at_start || play) && !shift;
+        if (app.play_at_start || play)
+            app.builder->Log(std::string("play at start: ") + (play ? "--play" : "the saved choice") +
+                             (shift ? ", Shift held: the launcher stays" : ""));
+    }
     app.build_bytes = app.builder->BuildFilesBytes();
     app.old_bytes = app.builder->OldBuildBytes();
     // a new version: a newer release's launcher looked for once at start (a release launcher only), and the game
@@ -327,6 +403,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             app.restart = false;
             std::lock_guard l(app.lock);
             app.error = "The new launcher is in place but did not start: " + err + " Start it again.";
+        }
+        // playing at start: once the start's check is done, if nothing needs updating; Shift stops it
+        if (app.auto_play && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) {
+            app.auto_play = false;
+            app.builder->Log("play at start: Shift held, the launcher stays");
+        }
+        if (app.auto_play && !app.busy) {
+            app.auto_play = false;
+            std::string why = NotReadyToPlay(app), err;
+            if (!why.empty()) {
+                app.builder->Log("play at start: the launcher stays, " + why);
+            } else if (PlayAndWait(app, hwnd, err)) {
+                break;
+            } else {
+                std::lock_guard l(app.lock);
+                app.error = err;
+            }
         }
         if (!app.busy && !IsWindowVisible(hwnd)) Sleep(50);
     }

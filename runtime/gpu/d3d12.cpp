@@ -258,13 +258,20 @@ bool Changed(const Target& t) {
     return false;
 }
 
-// a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it
+// a lock alone proves nothing, reads lock too: only changed bytes mean the CPU wrote it. The render thread runs behind
+// the title, so it can look between a lock and the writes after it (CRI Sofdec locks its movie frame, a target the
+// title also draws on, and decodes into it on its own thread: 50 Cent: Bulletproof's cutscenes showed the frame
+// before for two frames); unchanged bytes keep the lock pending for kLockChecks more looks before it counts as a read
 bool LatchCpuWrite(Target& t) {
+    constexpr uint32_t kLockChecks = 16;
     uint64_t e = DirtyEpoch(t.data);
     if (e <= t.epoch) return false;
-    t.epoch = e;
     uint64_t sig = MemSig(t.data, t.bytes);
-    if (sig == t.sig && !Changed(t)) return false;
+    if (sig == t.sig && !Changed(t)) {
+        if (++t.lock_checks >= kLockChecks) t.epoch = e, t.lock_checks = 0;
+        return false;
+    }
+    t.epoch = e, t.lock_checks = 0;
     t.sig = sig;
     return true;
 }
@@ -1840,11 +1847,12 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + 1, srv_inc_));
     uint32_t si = EnsureBlitSamplers();
     Alloc cb = Upload(256, 256);
-    float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
+    float c[12] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
     const app::Settings& st = app::Get();
-    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
-    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter || st.crt);
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f,
+               c[8] = float(std::min<uint32_t>(st.crt, 100)) / 100.0f, c[9] = kCrtLines;
     std::memcpy(cb.cpu, c, sizeof(c));
     ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples, o.mix != nullptr);
     if (!pso && final) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
@@ -3515,6 +3523,10 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         Span span = DrawSpan(s, a, c.hud[1] * 2);
         if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
+    }
+    if (HudPiece(s)) {
+        float lo, hi;
+        if (ProgramExtent(s, a, lo, hi)) c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi);
     }
     SqueezeBeyond(s, c.hud);
     Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud, c.zclip + 2,
