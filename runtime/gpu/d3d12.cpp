@@ -1847,11 +1847,12 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     dev_->CreateShaderResourceView(lut_.Get(), &sv, Cpu(srv_heap_.Get(), slot + 1, srv_inc_));
     uint32_t si = EnsureBlitSamplers();
     Alloc cb = Upload(256, 256);
-    float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
+    float c[12] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3],
                   o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f, float(o.taps), o.mul};
     const app::Settings& st = app::Get();
-    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
-    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter || st.crt);
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f,
+               c[8] = float(std::min<uint32_t>(st.crt, 100)) / 100.0f, c[9] = kCrtLines;
     std::memcpy(cb.cpu, c, sizeof(c));
     ID3D12PipelineState* pso = EnsureBlitPipeline(o.rtv, o.over, final, o.samples, o.mix != nullptr);
     if (!pso && final) pso = EnsureBlitPipeline(o.rtv, o.over);  // a shader that failed: the plain blit
