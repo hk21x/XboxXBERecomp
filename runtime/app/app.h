@@ -127,6 +127,9 @@ bool Widescreen();
 // the shape the frame is shown at: 4:3, 16:9, or the screen's when the aspect setting fills it (never under 16:9, but
 // for a title filling a screen between 4:3 and 16:9: 16:10 shows the title's 4:3 mode widened, not 16:9 letterboxed)
 float FrameAspect();
+// a title holding the frame at a shape for a while, the aspect setting's choice set aside (GameInfo::aspect_live: 50
+// Cent's cutscenes at 4:3 on any frame); 0 lets the setting have it again
+void HoldAspect(float aspect);
 // the shape the title's 2D is laid out for in the mode the console reports: GameInfo::hud_aspect, 4:3 on a 4:3 TV
 float HudAspect();
 

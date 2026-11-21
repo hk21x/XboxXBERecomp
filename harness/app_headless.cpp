@@ -1,4 +1,5 @@
 // the host side without a window: settings at their defaults, the run folder as the exe folder
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -55,7 +56,13 @@ bool Widescreen() { return kGame.aspect_live || (!FillsNarrow() && Desktop().wid
 // FRAME_ASPECT_X100=239 (a shape times 100): as the Windows aspect setting "screen" on an ultrawide display
 // a file `frame_aspect` in the run folder holding such a number changes it as the run goes (GameInfo::aspect_live: the
 // setting changed in play)
+namespace {
+std::atomic<float> g_held{0};
+}  // namespace
+void HoldAspect(float aspect) { g_held.store(aspect); }
+
 float FrameAspect() {
+    if (const float held = g_held.load(); kGame.aspect_live && held > 0) return held;
     static float forced = float(harness::Env("FRAME_ASPECT_X100")) / 100;
     static uint32_t asked = 0;
     if (kGame.aspect_live && asked++ % 256 == 0) {
