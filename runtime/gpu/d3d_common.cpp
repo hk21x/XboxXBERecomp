@@ -1041,9 +1041,21 @@ bool ProgramExtent(const State& s, const Assembled& a, float& lo, float& hi) {
     const VertexBuffer& b = a.buffers[e.buffer];
     uint32_t count = converted ? a.vertex_count : (b.stride ? b.bytes / b.stride : 0);
     if (!count) return false;
-    if (!converted && (!b.src || (e.format != DXGI_FORMAT_R32G32B32A32_FLOAT && e.format != DXGI_FORMAT_R32G32B32_FLOAT &&
-                                  e.format != DXGI_FORMAT_R32G32_FLOAT)))
-        return false;
+    // the position as the input assembler reads it: floats, or 16 bit integers as they are (D3DVSDT_SHORT*: 50 Cent's
+    // HUD text, the ammo count among it) or over 32767 (NORMSHORT*); what a format leaves out is 0, w 1
+    const uint32_t decode = uint32_t(a.decode & 0xF);  // v0's
+    int n = 0, kind = 0;                               // kind 0 float, 1 int16, 2 snorm16
+    switch (e.format) {
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: n = 4; break;
+        case DXGI_FORMAT_R32G32B32_FLOAT: n = 3; break;
+        case DXGI_FORMAT_R32G32_FLOAT: n = 2; break;
+        case DXGI_FORMAT_R16G16B16A16_SINT: n = decode == kDecodeIntW1 ? 3 : 4, kind = 1; break;
+        case DXGI_FORMAT_R16G16_SINT: n = 2, kind = 1; break;
+        case DXGI_FORMAT_R16G16B16A16_SNORM: n = decode == kDecodeW1 ? 3 : 4, kind = 2; break;
+        case DXGI_FORMAT_R16G16_SNORM: n = 2, kind = 2; break;
+        default: break;
+    }
+    if (!converted && (!b.src || !n)) return false;
     int regs = 0, slot[16];
     for (int r = 0; r < 16; r++) slot[r] = (a.regs >> r) & 1 ? regs++ : -1;
     lo = 1e30f, hi = -1e30f;
@@ -1055,8 +1067,16 @@ bool ProgramExtent(const State& s, const Assembled& a, float& lo, float& hi) {
             if (slot[r] >= 0 && converted) {
                 std::memcpy(v, &a.vertices[(size_t(i) * size_t(regs) + size_t(slot[r])) * 4], sizeof v);
             } else if (r == 0 && !converted) {
-                const size_t n = e.format == DXGI_FORMAT_R32G32_FLOAT ? 2 : e.format == DXGI_FORMAT_R32G32B32_FLOAT ? 3 : 4;
-                std::memcpy(v, b.src + size_t(i) * b.stride + e.offset, n * 4);
+                const uint8_t* at = b.src + size_t(i) * b.stride + e.offset;
+                if (kind == 0) {
+                    std::memcpy(v, at, size_t(n) * 4);
+                } else {
+                    for (int c = 0; c < n; c++) {
+                        int16_t q;
+                        std::memcpy(&q, at + c * 2, 2);
+                        v[c] = kind == 1 ? float(q) : std::max(-1.0f, float(q) / 32767.0f);
+                    }
+                }
             } else {
                 std::memcpy(v, s.vattr[size_t(r)].data(), sizeof v);
             }
