@@ -1420,7 +1420,11 @@ ID3D11ShaderResourceView* D3D11Backend::BindGuestTexture(const State& s, int sta
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
+        // a picture sharpened for 2D (Sharpen2D) stands in on 2D draws only: a texture a 2D draw samples once (Agent Under
+        // Fire's lightmaps) kept its mask sharpening on the world's faces, their edges showing (AUF issue 14)
+        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d && draw_2d_)) ||
+                  !ReplacementFits(*r, d)))
+            r = nullptr;
         if (ID3D11ShaderResourceView* srv = r ? BindReplacement(*r, d, stages.levels[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return srv;
