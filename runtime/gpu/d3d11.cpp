@@ -1078,15 +1078,16 @@ void D3D11Backend::FullScreen(ID3D11VertexShader* vs, ID3D11PixelShader* ps, con
 void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], const BlitOptions& o) {
     uint64_t h;
     const app::Settings& st = app::Get();
-    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter);
+    const bool final = o.final && (st.fxaa || st.sharpen || st.scale_filter || st.crt);
     ID3D11VertexShader* vs = VertexShader(Compile(kBlitHlsl, "vs", "vs_5_0", h), h);
     ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h), h);
     if (!ps && final) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
-    float c[8] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
+    float c[12] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
                   float(o.taps), 1.0f};
-    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f;
+    if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f,
+               c[8] = float(std::min<uint32_t>(st.crt, 100)) / 100.0f, c[9] = kCrtLines;
     ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
-    FullScreen(vs, ps, c, 8, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
+    FullScreen(vs, ps, c, 12, srv, 2, o.over ? over_.Get() : opaque_.Get(), no_depth_.Get());
 }
 
 // a depth buffer drawn as colour into another depth buffer's memory: copied as depth

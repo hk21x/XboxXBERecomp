@@ -180,7 +180,7 @@ void ForgetPipelines() {
 }
 
 const char* kBlitHlsl = R"(
-cbuffer B : register(b1) { float4 uvrect; float4 opts; };
+cbuffer B : register(b1) { float4 uvrect; float4 opts; float4 crt; };
 Texture2D img : register(t0);
 Texture2D lut : register(t1);
 SamplerState ls : register(s0);
@@ -212,7 +212,7 @@ float4 psmix(O i) : SV_Target {
     return float4(c.rgb, 1);
 }
 // the finished frame, the settings' passes in one (the plain blit without them): opts.y bit 0 for FXAA, bit 1 for the
-// sharp scaling filter, opts.z the sharpening 0 to 1. The filter: Catmull-Rom over source pixels going up; going down, the
+// sharp scaling filter, opts.z the sharpening 0 to 1, crt.x the CRT look 0 to 1 over crt.y lines. The filter: Catmull-Rom over source pixels going up; going down, the
 // output pixel's area (four taps, even at a ratio that is not whole) less a little of its neighbours. FXAA: where the luma of a pixel and its four neighbours differs enough to be an edge, the colour is
 // averaged along the edge's direction, found from the diagonal neighbours. Sharpening, contrast adaptive (as AMD's CAS):
 // the pixel less its neighbours, weighted down where they already span much of the range, so strong edges get no halos;
@@ -266,6 +266,38 @@ float3 sharpen(float3 c, float2 uv, float2 t, float amount) {
     float3 k = amp * amount * -0.2;  // from nothing: CAS's own scale starts at -0.125, grainy on the road textures
     return saturate(((n + s + e + w) * k + c) / (1 + 4 * k));
 }
+// a CRT's look, on the colour as shown, at amount 0 to 1: the picture in lines, each a beam wider where it is brighter,
+// so dark lines are thin and bright ones meet; then an aperture grille, a red, green and blue stripe each screen pixel
+// in turn. A line is a whole number of screen pixels, the nearest to the console's lines (2 at 1080, 3 at 1440, 4 or 5
+// at 2160), as a fraction beats with the pixels; under 2 there is no room for one, and only the grille shows. In linear
+// light, and each step keeps the light's average (the beam over its line's pixels, the grille over its three), so the
+// screen gives out as much as without it; only highlights, clipped at a line's centre, lose some
+float beamat(float d, float h) {
+    float u = saturate(abs(d) / h);
+    return (1 - u * u) * (1 - u * u);
+}
+float3 crtlook(float3 c, float2 uv, float2 pos, float amount, float lines) {
+    float3 l = pow(saturate(c), 2.2);
+    float3 lit = l;
+    float rows = 1 / max(fwidth(uv.y), 1e-6);  // the frame's height on the screen
+    int n = min((int)round(rows / lines), 8);  // screen pixels a line
+    if (n >= 2) {
+        // the frame's row, counted from its top; a line's centre on a row, its edges between rows
+        int r = (int)floor(uv.y * rows) % n;
+        float3 h = lerp(0.38, 0.7, sqrt(l));  // the beam's half width, in lines
+        float3 sum = 0, here = 0;
+        for (int j = 0; j < n; j++) {
+            float d = frac(float(j) / n + 0.5) - 0.5;
+            float3 b = float3(beamat(d, h.r), beamat(d, h.g), beamat(d, h.b));
+            sum += b;
+            if (j == r) here = b;
+        }
+        lit = saturate(l * here * n / max(sum, 1e-4));
+    }
+    uint m = uint(pos.x) % 3;
+    float3 grille = float3(m == 0, m == 1, m == 2) * 0.45 + 0.85;
+    return pow(saturate(lerp(l, lit * grille, amount)), 1 / 2.2);
+}
 float4 psfinal(O i) : SV_Target {
     float2 size;
     img.GetDimensions(size.x, size.y);
@@ -277,6 +309,7 @@ float4 psfinal(O i) : SV_Target {
     if (opts.z > 0) c = sharpen(c, i.uv, px, opts.z);
     c *= opts.w;
     if (opts.x > 0) c = float3(lut.Sample(ps, float2(c.r, 0.5)).r, lut.Sample(ps, float2(c.g, 0.5)).g, lut.Sample(ps, float2(c.b, 0.5)).b);
+    if (crt.x > 0) c = crtlook(c, i.uv, i.p.xy, crt.x, crt.y);
     return float4(c, 1);
 }
 )";

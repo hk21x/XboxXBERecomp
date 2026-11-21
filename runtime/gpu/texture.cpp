@@ -682,7 +682,8 @@ std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t
     for (size_t i = 0; i < n; i++) {
         alpha[i] = uint8_t(bgra[i] >> 24);
         seen += alpha[i] > 8;
-        partial += alpha[i] > 8 && alpha[i] < 247;
+        // a faint alpha counts too: under a cut-out's mask it would become 0, which the console's alpha kill drops
+        partial += alpha[i] > 0 && alpha[i] < 247;
     }
     const bool mask = seen && partial * 4 < seen;  // edges, not glows
     const int w = int(width), h = int(height), s = int(scale), ow = w * s, oh = h * s;
@@ -797,7 +798,9 @@ void SharpWorker() {
             for (size_t i = 0; i < px.size(); i++) {
                 alpha[i] = uint8_t(px[i] >> 24);
                 seen += alpha[i] > 8;
-                partial += alpha[i] > 8 && alpha[i] < 247;
+                // a faint alpha is not a cut-out's outside: Florence's walls have alpha 3 with a few opaque patches,
+                // and as a mask the 3 became 0, which the alpha kill drops: whole faces gone (PGR2 issue 40)
+                partial += alpha[i] > 0 && alpha[i] < 247;
             }
             if (seen && seen < px.size() && partial * 4 < seen) {
                 std::vector<uint8_t> a = UpscaleMask(alpha.data(), job.d.width, job.d.height, 2);

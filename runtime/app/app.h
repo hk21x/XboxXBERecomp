@@ -59,6 +59,7 @@ struct Settings {
     bool world_textures = false;     // the 3D scene's colour textures enlarged twice on a background thread
     bool low_latency = false;        // a waitable swap chain holding one frame, at the next start
     uint32_t sharpen = 0;            // percent, contrast adaptive sharpening of the finished frame
+    uint32_t crt = 0;                // percent, a CRT's scanlines and aperture grille on the finished frame
     uint32_t renderer = 0;           // 0 Direct3D 12, 1 Direct3D 11, at the next start
     uint32_t language = 1;           // the console's language (XC_LANGUAGE, GameInfo::languages), at the next start
     // a steering wheel and its kit (core/wheel.cpp), playing as controller 1: each control on any DirectInput device,

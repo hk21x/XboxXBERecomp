@@ -464,6 +464,11 @@ void Graphics(Settings& s) {
         s.sharpen = uint32_t(sharp);
         Save();
     }
+    int crt = int(s.crt);
+    if (RowSlider("CRT look", &crt, 0, 100, 5, "%", "Scanlines and a CRT's red, green and blue stripes over the finished frame, HUD included. Scanlines need the picture 720 pixels tall or more; they look best at 1440 and above.")) {
+        s.crt = uint32_t(crt);
+        Save();
+    }
     if (RowCheck("Low latency", &s.low_latency, "Applies at the next start. Holds one finished frame instead of several: less input lag, but a slow frame costs more.")) Save();
     if (RowCheck("Show frames a second", &s.show_fps)) Save();
     if (kGame.sharpen_2d && RowCheck("Sharp text and HUD", &s.sharp_2d)) Save();
