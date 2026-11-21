@@ -22,6 +22,8 @@ struct Status {
 };
 
 void Frame();                     // the title's thread, once a presented frame
+// unlock one by its id from a game's hook, for an event no memory shows (its condition "0=1", never met); once
+void Award(const char* id);
 std::vector<Status> List();       // every achievement, in the game's order
 // the newest unlock's title and how long ago it came (seconds), for the pop-up; false when none is showing
 bool Recent(std::string& title, uint32_t& points, double& age);
