@@ -759,6 +759,22 @@ std::string Builder::BuiltVersion() const {
     return j["built"].get<std::string>();
 }
 
+bool Builder::PlayAtStart() const {
+    std::string text;
+    if (!ReadAll(root_ / "launcher.json", text)) return false;
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("play_at_start") || !j["play_at_start"].is_boolean()) return false;
+    return j["play_at_start"].get<bool>();
+}
+
+void Builder::SetPlayAtStart(bool on) {
+    std::string text;
+    json j = ReadAll(root_ / "launcher.json", text) ? json::parse(text, nullptr, false) : json::object();
+    if (j.is_discarded() || !j.is_object()) j = json::object();
+    j["play_at_start"] = on;
+    std::ofstream(root_ / "launcher.json") << j.dump(2);
+}
+
 fs::path Builder::SavedMusic() const {
     std::string text;
     if (!ReadAll(root_ / "launcher.json", text)) return {};
