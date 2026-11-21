@@ -77,6 +77,10 @@ public:
     bool UpdateAvailable(bool& available, std::string& error);
     std::string BuiltVersion() const;  // the launcher version the game in play was built by, empty if not known
     bool Launch(std::string& error);
+    // launcher.json "play_at_start": the launcher starts the game by itself when nothing needs updating (GitHub issue
+    // EoN 37: a Steam Big Picture shortcut straight into the game)
+    bool PlayAtStart() const;
+    void SetPlayAtStart(bool on);
     uint64_t BuildFilesBytes() const;  // source\out, removable once built
     bool RemoveBuildFiles(std::string& error);
 

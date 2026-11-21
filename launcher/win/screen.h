@@ -46,6 +46,11 @@ struct App {
     fs::path music;            // the music folder imported last
     bool music_job = false;    // the job running or last run imports the music: its result shows under Your music
     std::string music_summary;
+    // the game started by the launcher itself (EoN issue 37): play_at_start is the saved choice (the Play section's box);
+    // auto_play is this start doing it, from that or --play, until the start's update check is done; Shift held or
+    // the Play section's button stops it
+    bool play_at_start = false;
+    std::atomic<bool> auto_play{false};
 
     void Start(std::function<bool(std::string&)> job, std::string done) {
         if (busy) return;
