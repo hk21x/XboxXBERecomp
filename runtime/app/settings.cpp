@@ -485,8 +485,10 @@ std::atomic<float> g_held{0};
 void HoldAspect(float aspect) { g_held.store(aspect); }
 
 float FrameAspect() {
+    // a shape the title holds (HoldAspect) is the frame's whatever the setting: aspect_live or not (Fight Night Round 2's
+    // in-engine cutscenes at 16:9 on an ultrawide screen, its play filling it)
+    if (const float held = g_held.load(); held > 0) return held;
     if (kGame.aspect_live) {
-        if (const float held = g_held.load(); held > 0) return held;
         // the choice as it is now: 4:3, 16:9, the screen's shape (never under 16:9), or from the screen: its shape when
         // 3:2 or wider (to 16:9 unless the title fills ultrawide screens), else 4:3
         const uint32_t now = Get().aspect % 4;
