@@ -18,6 +18,7 @@
 #include <cstring>
 #include <iterator>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include <SDL3/SDL.h>
@@ -30,9 +31,21 @@ namespace input {
 namespace {
 
 // a controller takes the lowest free port when it is plugged in and keeps it until it is unplugged
-std::mutex g_lock;
+// Every SDL call after SDL_Init is on the pad thread (PadThread): pumping SDL can stall (HIDAPI listing the HID devices
+// took about a second on some PCs, every few seconds), and the game's pad reads, the mouse's look among them, waited
+// on it (Agent Under Fire issue 12: the mouse stuck for a second every 5 to 8). The game's threads read the pad
+// thread's last snapshot (g_snap) and leave rumble for it to set, never waiting on a device, as core/wheel.cpp does.
+std::mutex g_lock;  // g_snap
 bool g_sdl = false;
-SDL_Gamepad* g_pads[4] = {};
+SDL_Gamepad* g_pads[4] = {};  // the pad thread's own
+
+struct Snap {
+    bool connected = false;
+    float in[kControls] = {};
+};
+Snap g_snap[4];
+std::atomic<uint16_t> g_face{0};  // HeldOnAnyController's face buttons on every pad
+std::atomic<uint32_t> g_rumble_want[4];  // the motors asked for, left << 16 | right; set by the pad thread
 
 void AddPad(SDL_JoystickID id) {
     // a steering wheel is core/wheel.cpp's, through DirectInput, never a pad here as well
@@ -59,17 +72,61 @@ void RemovePad(SDL_JoystickID id) {
     }
 }
 
-// once a millisecond at most, however many ports and threads read
+// SDL's events: pads plugged in and unplugged (the pad thread's)
 void UpdatePads() {
-    static uint64_t last = 0;
-    uint64_t now = SDL_GetTicks();
-    if (!g_sdl || now == last) return;
-    last = now;
     SDL_PumpEvents();
     SDL_Event e;
     while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) AddPad(e.gdevice.which);
         else if (e.type == SDL_EVENT_GAMEPAD_REMOVED) RemovePad(e.gdevice.which);
+    }
+}
+
+void ReadPad(SDL_Gamepad* pad, float* v);
+
+// reads every pad about once a millisecond into g_snap, sets the motors asked for; nothing the game waits on
+void PadThread() {
+    int count = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
+        for (int i = 0; i < count; i++) AddPad(ids[i]);
+        SDL_free(ids);
+    }
+    uint32_t rumble_set[4] = {};
+    for (;;) {
+        auto pump = std::chrono::steady_clock::now();
+        UpdatePads();
+        auto took = std::chrono::steady_clock::now() - pump;
+        if (took > std::chrono::milliseconds(100)) {
+            static std::atomic<int> said{0};
+            if (said.fetch_add(1) < 20)
+                LOGR("input: SDL took %lld ms to look for controllers (the game's pad reads no longer wait on it)",
+                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(took).count());
+        }
+        Snap snap[4];
+        uint16_t face = 0;
+        constexpr std::pair<SDL_GamepadButton, uint16_t> kFaceButtons[] = {
+            {SDL_GAMEPAD_BUTTON_SOUTH, 0x1000}, {SDL_GAMEPAD_BUTTON_EAST, 0x2000},
+            {SDL_GAMEPAD_BUTTON_WEST, 0x4000},  {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
+        for (int i = 0; i < 4; i++) {
+            if (!g_pads[i]) continue;
+            snap[i].connected = true;
+            ReadPad(g_pads[i], snap[i].in);
+            for (auto [button, mask] : kFaceButtons)
+                if (SDL_GetGamepadButton(g_pads[i], button)) face |= mask;
+            uint32_t want = g_rumble_want[i].load();
+            if (want != rumble_set[i]) {
+                SDL_RumbleGamepad(g_pads[i], uint16_t(want >> 16), uint16_t(want), 0);
+                rumble_set[i] = want;
+            }
+        }
+        for (int i = 0; i < 4; i++)
+            if (!g_pads[i]) rumble_set[i] = 0;  // a pad plugged in later starts still, then takes what is asked
+        {
+            std::lock_guard lock(g_lock);
+            for (int i = 0; i < 4; i++) g_snap[i] = snap[i];
+        }
+        g_face = face;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -92,13 +149,8 @@ void Init() {
     int v = SDL_GetVersion();
     LOGI("input: SDL %d.%d.%d", SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v), SDL_VERSIONNUM_MICRO(v));
     WheelInit(app::Window());
-    std::lock_guard lock(g_lock);
     g_sdl = true;
-    int count = 0;
-    if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
-        for (int i = 0; i < count; i++) AddPad(ids[i]);
-        SDL_free(ids);
-    }
+    std::thread(PadThread).detach();
 }
 
 namespace {
@@ -270,13 +322,10 @@ Pad Poll(int port) {
     Pad p;
     float in[kControls] = {}, out[kControls] = {};
     const app::Settings& s = app::Get();
-    {
+    if (port >= 0 && port < 4) {
         std::lock_guard lock(g_lock);
-        UpdatePads();
-        if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
-            p.connected = true;
-            ReadPad(pad, in);
-        }
+        p.connected = g_snap[port].connected;
+        std::memcpy(in, g_snap[port].in, sizeof(in));
     }
     // the controller's sticks by the settings, before the remap (the keyboard and the wheel are added after)
     for (int i = 0; i < 2; i++) {
@@ -362,25 +411,13 @@ Pad Poll(int port) {
     return p;
 }
 
-uint16_t HeldOnAnyController() {
-    constexpr std::pair<SDL_GamepadButton, uint16_t> kFaceButtons[] = {
-        {SDL_GAMEPAD_BUTTON_SOUTH, 0x1000}, {SDL_GAMEPAD_BUTTON_EAST, 0x2000},
-        {SDL_GAMEPAD_BUTTON_WEST, 0x4000},  {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
-    std::lock_guard lock(g_lock);
-    UpdatePads();
-    uint16_t held = 0;
-    for (SDL_Gamepad* pad : g_pads)
-        for (auto [button, mask] : kFaceButtons)
-            if (pad && SDL_GetGamepadButton(pad, button)) held |= mask;
-    return held;
-}
+uint16_t HeldOnAnyController() { return g_face.load(); }
 
 // the motors run until set again
 void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
     if (port == 0) g_rumble[0] = left, g_rumble[1] = right;
-    std::lock_guard lock(g_lock);
-    if (port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);
+    if (port >= 0 && port < 4) g_rumble_want[port] = uint32_t(left) << 16 | right;  // the pad thread sets it
 }
 
 }  // namespace input
