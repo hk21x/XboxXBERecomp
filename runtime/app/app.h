@@ -294,6 +294,10 @@ struct GameInfo {
     bool unbound_texture_zero = false;
     // the game's own dead zone on each stick axis, as a part of full throw: the stick sensitivity scales the throw past it
     float stick_deadzone = 0;
+    // the console's vertical blanks a second: 60, or 50 for a PAL title whose game steps one 50th of a second a frame
+    // (Fight Night Round 2's 640x576 mode, refresh 0: PAL 50 Hz on the console, 20% fast at 60). The vertical blank
+    // interrupt and the present interval's pacing follow it; the screen's own refresh is untouched
+    uint32_t vblank_hz = 60;
 };
 extern const GameInfo kGame;
 

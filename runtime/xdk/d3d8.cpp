@@ -400,8 +400,9 @@ void VerticalBlank(X86Context& ctx) {
     using clock = std::chrono::steady_clock;
     uint32_t info = mem::AllocSystem(12), swap_data = mem::AllocSystem(20), shown = 0;
     auto next = clock::now();
+    const auto period = std::chrono::microseconds(1000000 / std::max<uint32_t>(app::kGame.vblank_hz, 1));  // GameInfo::vblank_hz
     for (;;) {
-        next = std::max(next + std::chrono::microseconds(16667), clock::now());
+        next = std::max(next + period, clock::now());
         std::this_thread::sleep_until(next);
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
@@ -618,6 +619,8 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
 #if HAS_D3D_FvfShader
     if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
 #endif
+    if (app::kGame.vblank_hz != 60 && app::g_pace_hz.exchange(app::kGame.vblank_hz) != app::kGame.vblank_hz)
+        LOGR("d3d: vertical blanks at %u Hz (GameInfo::vblank_hz)", app::kGame.vblank_hz);
     if (kVBlank) {
         // notification event, signalled
         SetDev(XDK_CDevice_VBlankEvent, 0x00040000);
