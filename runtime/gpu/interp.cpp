@@ -34,6 +34,17 @@ constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
+
+// GameInfo::interp_near_hold names a draw by its vertex program's code (its handle is an address the title allocates,
+// which moves between runs: Fight Night Round 2's rope program was B0003131 in one, B0103131 in another)
+bool NearHoldNames(const State& s, uint32_t count) {
+    uint64_t hash = 0;
+    if ((s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
+        if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
+        hash = s.vs->hash;
+    }
+    return app::kGame.interp_near_hold(hash, s.textures[0], count);
+}
 constexpr int kFreshShare = 4;                                // matched draws of a program to each new one, for it to be scenery
 constexpr double kLate = 1.2;                                 // of the usual step
 constexpr int kFirstPatience = 120, kMostPatience = 1800;     // steps
@@ -140,7 +151,7 @@ public:
         for (const auto& stream : s.streams) AddHeader(r, stream.vb);
         for (uint32_t t : s.textures) AddHeader(r, t);
         KeepVertices(r, s, start, count, indices);
-        if (app::kGame.interp_near_hold && app::kGame.interp_near_hold(s.vs_handle, s.textures[0], count)) {
+        if (app::kGame.interp_near_hold && NearHoldNames(s, count)) {
             r.named = true;
             r.offscreen = !Presented(s.rt.data);
             r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices, r.box, r.has_box);
@@ -670,7 +681,7 @@ bool Interpolating::Match() {
     for (size_t i = 0; app::kGame.interp_near_hold && i < count_; i++) {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw) continue;
-        if (!app::kGame.interp_near_hold(r.s->vs_handle, r.s->textures[0], r.c)) continue;
+        if (!NearHoldNames(*r.s, r.c)) continue;
         // one of them at the near plane, or on screen with no camera move to give it
         const char* why = r.near_clipped                                          ? "at the near plane"
                           : r.camera_moved < 0 && !r.offscreen                      ? "without the camera's move"
