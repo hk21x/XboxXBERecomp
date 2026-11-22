@@ -710,8 +710,15 @@ int MatrixProgram(const std::vector<uint32_t>& prog) {
     return k >= 0 && k + 3 < 192 ? k : -1;
 }
 
-bool HudPiece(const State& s) {
-    if (s.hud_layout <= 0 || s.rs[kRsZEnable] || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
+bool HudPiece(const State& s, bool pretransformed) {
+    if (s.hud_layout <= 0) return false;
+    // pretransformed: already flat in the frame's pixels (007: Agent Under Fire's HUD, depth tested at z 0: the vertex
+    // shader moves a depth tested one only at the near plane); one drawn into a viewport narrower than the frame (a split
+    // screen's view) is laid out for that view and stays
+    if (pretransformed) return s.viewport.x == 0;  // its width against the frame's in HudMove
+    // depth on with the comparison ALWAYS is no test (007: Agent Under Fire's DRIVING.XBE draws its HUD so)
+    const bool tested = s.rs[kRsZEnable] && s.simple[kMZFunc >> 2] != 0x207;
+    if (tested || !(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return false;
     // a matrix program's only where its matrix is flat (x from the piece's own x and y, w 1 at its z 0): not something
     // out in the world drawn without depth testing (a glow)
     if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
@@ -723,8 +730,9 @@ bool HudPiece(const State& s) {
     return true;
 }
 
-float HudMove(const State& s, float aspect, float half_width, float lo, float hi) {
-    if (aspect <= 0 || !HudPiece(s)) return 0;
+float HudMove(const State& s, float aspect, float half_width, float lo, float hi, bool pretransformed) {
+    if (aspect <= 0 || !HudPiece(s, pretransformed)) return 0;
+    if (pretransformed && float(s.viewport.w) + 1 < half_width * 2) return 0;  // a split screen's view
     // a piece, not something across the frame, and to one side: the middle quarter's stay (the crosshair, the messages)
     const float mid = (lo + hi) * 0.5f - half_width;
     if (!(hi - lo < half_width) || std::fabs(mid) < half_width * 0.25f) return 0;
@@ -842,6 +850,8 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         // State::squeeze_beyond)
         s += "    if ((hud.x < 0 || (oPos.x > 1.5 && oPos.x < hud.y * 2 - 1.5)) && (hud.z == 0 || rhw.w >= 0.25))\n"
              "        oPos.x = hud.y + (oPos.x - hud.y) * abs(hud.x);\n";
+        // State::hud_layout: a HUD piece moved sideways (gpu::HudMove), a depth tested one only at the near plane
+        s += "    if (hud.z == 0 || rhw.w >= 0.25) oPos.x += hud_move.x;\n";
         // State::pillar_fill: the picture enlarged about the centre to its own shape (zclip.z the scale, .w the centre)
         s += "    if (zclip.z > 0) oPos.y = zclip.w + (oPos.y - zclip.w) * zclip.z;\n";
     } else {

@@ -7,12 +7,14 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 
 #include "core/builder.h"
+#include "core/settings.h"
 #include "core/update.h"
 #include "core/util.h"
 
@@ -46,6 +48,10 @@ struct App {
     fs::path music;            // the music folder imported last
     bool music_job = false;    // the job running or last run imports the music: its result shows under Your music
     std::string music_summary;
+    // the Settings page's (core/settings.h): the settings file's top-level values, read when the page opens
+    std::map<std::string, std::string> settings_values;
+    bool settings_loaded = false;
+    std::string settings_error;
     // the game started by the launcher itself (EoN issue 37): play_at_start is the saved choice (the Play section's box);
     // auto_play is this start doing it, from that or --play, until the start's update check is done; Shift held or
     // the Play section's button stops it

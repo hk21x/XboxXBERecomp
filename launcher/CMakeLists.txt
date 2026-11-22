@@ -42,7 +42,7 @@ configure_file(${nlohmann_json_SOURCE_DIR}/json.hpp ${CMAKE_BINARY_DIR}/include/
 
 set(XZ ${xz_embedded_SOURCE_DIR}/linux/lib/xz)
 add_library(launcher_core STATIC
-    core/archive.cpp core/builder.cpp core/game.cpp core/hash.cpp core/music.cpp core/net.cpp core/plan.cpp core/update.cpp
+    core/archive.cpp core/builder.cpp core/game.cpp core/hash.cpp core/music.cpp core/net.cpp core/plan.cpp core/settings.cpp core/update.cpp
     ${SDK_ROOT}/runtime/kernel/disc.cpp
     # disc.cpp logs a host read it retries (d1b10b1): the runtime's log, never set up here, so its lines go to stderr
     ${SDK_ROOT}/runtime/core/log.cpp

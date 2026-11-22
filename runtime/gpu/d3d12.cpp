@@ -1774,6 +1774,18 @@ void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
     Wrote(t);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     SetBlitTarget(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), t.w, t.h);
+    // GameInfo::cpu_frames_boxed: on a frame wider than the 2D's shape, the picture at that shape in the middle
+    if (float box = BoxedWidth(t); box > 0) {
+        if (!over) {
+            const float black[4] = {0, 0, 0, 0};
+            CLAt(__func__)->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), black, 0, nullptr);
+        }
+        const float x = (float(t.w) - box) * 0.5f;
+        D3D12_VIEWPORT vp{x, 0, box, float(t.h), 0, 1};
+        D3D12_RECT scissor{LONG(x), 0, LONG(std::ceil(x + box)), LONG(t.h)};
+        CLAt(__func__)->RSSetViewports(1, &vp);
+        CLAt(__func__)->RSSetScissorRects(1, &scissor);
+    }
     float uv[4] = {0, 0, 1, 1};
     float mul = 1 / t.range;
     Blit(tex.Get(), kBgra, uv, {.alpha = true, .mul = mul, .rtv = t.fmt, .over = over});
@@ -2466,7 +2478,11 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     // a linear texture's too: its texel coordinates are over the guest's size (texsize), whatever the picture's
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
-        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
+        // a picture sharpened for 2D (Sharpen2D) stands in on 2D draws only: a texture a 2D draw samples once (Agent Under
+        // Fire's lightmaps) kept its mask sharpening on the world's faces, their edges showing (AUF issue 14)
+        if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d && draw_2d_)) ||
+                  !ReplacementFits(*r, d)))
+            r = nullptr;
         if (r && r->palette) {  // a P8 texture's, made with its palette: not with another
             StagePalette now;
             ReadStagePalette(s, stage, d, now);
@@ -3529,9 +3545,15 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
         if (span == kSpanNone) c.hud[0] = -c.hud[0];  // squeezed whole
         if (span == kSpanViewport) c.hud[0] = 1;      // a pass filling its own viewport
     }
-    if (HudPiece(s)) {
-        float lo, hi;
-        if (ProgramExtent(s, a, lo, hi)) c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi);
+    if (HudPiece(s, a.pretransformed)) {
+        float lo, hi, top, bottom;
+        if (a.pretransformed ? ScreenExtent(s, a, lo, hi, top, bottom, nullptr) : ProgramExtent(s, a, lo, hi))
+        {
+            c.hud_move[0] = HudMove(s, aspect_, c.hud[1], lo, hi, a.pretransformed);
+            LOGR_FIRST(48, "%s: HUD piece x %.1f to %.1f y %.1f to %.1f (half width %.1f, frame %.3f, squeeze %.3f, vp %u+%u, %s): moved %.1f",
+                      "d3d12", lo, hi, a.pretransformed ? top : 0.0f, a.pretransformed ? bottom : 0.0f, c.hud[1], aspect_, c.hud[0], s.viewport.x, s.viewport.w,
+                      a.pretransformed ? "pretransformed" : "program", c.hud_move[0]);
+        }
     }
     SqueezeBeyond(s, c.hud);
     Pillarbox(s, a, aspect_, bound_rt_ ? XStretch(bound_rt_->gw, bound_rt_->gh) : 0, c.hud, c.zclip + 2,

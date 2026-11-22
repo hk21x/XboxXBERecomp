@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "core/settings.h"
+
 namespace launcher {
 
 struct GameConfig {
@@ -28,6 +30,9 @@ struct GameConfig {
     std::vector<std::string> xbes, exes;
     // a release with other programs than xbes lists (Agent Under Fire's USA disc): game.json "release_xbes", xbe SHA-1 -> its xbes
     std::map<std::string, std::vector<std::string>> release_xbes;
+    // the settings offered on the launcher's Settings page (core/settings.h), game.json "settings"; none: no page
+    std::vector<LauncherSetting> settings;
+    std::string settings_file = "settings.toml";  // the game's, in play (GameInfo::settings), game.json "settings_file"
 };
 
 bool ParseGameConfig(const std::string& json_text, GameConfig& game, std::string& error);

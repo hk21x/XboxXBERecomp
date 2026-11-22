@@ -1201,6 +1201,15 @@ void Pillarbox(const State& s, const Assembled& a, float aspect, float stretch, 
     hud[0] = -(s.pillar_aspect / aspect);
 }
 
+float BoxedWidth(uint32_t w, uint32_t h, uint32_t gw, uint32_t gh) {
+    if (!app::kGame.cpu_frames_boxed || !w || !h || !gw || !gh) return 0;
+    // stretched across: more pixels across than the guest's shape gives (gpu::XStretch)
+    const float stretch = float(w) * float(gh) / (float(h) * float(gw));
+    const float aspect = app::FrameAspect(), wide = app::HudAspect();
+    if (stretch <= 1.001f || aspect <= wide + 1e-3f) return 0;
+    return float(w) * wide / aspect;
+}
+
 float HudSqueeze(const State& s, const Assembled& a, float aspect, float stretch) {
     const float wide = app::HudAspect();
     if (!(a.pretransformed || ScreenDraw(s)) || aspect <= wide + 1e-3f || stretch <= 1) return 1;

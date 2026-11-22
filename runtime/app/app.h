@@ -211,6 +211,10 @@ struct GameInfo {
     bool bink_frame_hold = true;
     // the shape the title lays out its 2D for (HUD, menus): shown wider, that 2D is squeezed into it (gpu::HudSqueeze)
     float hud_aspect = 16.0f / 9.0f;
+    // a picture the CPU wrote into a frame whole (Agent Under Fire's intro movies, decoded into the frame buffer with no
+    // draws) is put at that shape in the middle of a wider frame, its sides black, as the 2D is: else it is stretched
+    // across the frame
+    bool cpu_frames_boxed = false;
     // that 2D also where drawn by a vertex program that only moves its position input to the screen (gpu::
     // ScreenProgram: EoN's HUD and menus, through D3D's pass-through program form), or that multiplies it by a 2D
     // orthographic matrix (gpu::MatrixProgram, OrthoConstants: EoN's driving HUD)
