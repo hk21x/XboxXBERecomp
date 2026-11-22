@@ -74,6 +74,9 @@ struct Rec {
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
     bool near_clipped = false;  // GameInfo::interp_near_hold: a vertex at or behind the near plane this step
+    bool named = false;         // GameInfo::interp_near_hold names it: not matched, moved by the camera's move alone
+    int camera_moved = -1;      // named: 1 when the camera's move was given to it
+    bool offscreen = false;     // named: drawn into a target that is not a frame buffer
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
@@ -135,8 +138,11 @@ public:
         for (const auto& stream : s.streams) AddHeader(r, stream.vb);
         for (uint32_t t : s.textures) AddHeader(r, t);
         KeepVertices(r, s, start, count, indices);
-        if (app::kGame.interp_near_hold && app::kGame.interp_near_hold(s.vs_handle, s.textures[0], count))
-            r.near_clipped = NearClipped(s, start, count, indices);
+        if (app::kGame.interp_near_hold && app::kGame.interp_near_hold(s.vs_handle, s.textures[0], count)) {
+            r.named = true;
+            r.offscreen = !Presented(s.rt.data);
+            r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices);
+        }
         for (uint32_t p : s.palettes) AddHeader(r, p);
         r.has_bytes = indices != nullptr;
         if (indices) r.bytes.assign(indices, indices + size_t(count) * 2);
@@ -217,6 +223,9 @@ private:
         r.turning = false;
         r.derived = false;
         r.near_clipped = false;
+        r.named = false;
+        r.camera_moved = -1;
+        r.offscreen = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -434,6 +443,7 @@ bool Interpolating::Match() {
         Rec& r = now_[i];
         if (r.kind != Rec::Draw) continue;
         draws++;
+        if (r.named) continue;  // GameInfo::interp_near_hold: the camera's move alone, below
         auto it = found.find(KeyOf(r));
         if (it == found.end() || it->second.empty()) continue;
         // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
@@ -616,6 +626,23 @@ bool Interpolating::Match() {
                 }
             r.derived = true;
         }
+        // GameInfo::interp_near_hold's draws (a ring's rope sections, told apart by their matrices alone, as many as are in
+        // view): not matched, which paired sections with their neighbours and broke a rope into steps; each takes the
+        // camera's move (step before = move * now), so a rope moves as one with the scene around it
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || !r.named || r.offscreen || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            if (!camera || camera->votes < kLeastVotes) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.derived = true;
+            r.camera_moved = 1;
+        }
     }
     LogJumps();
     // GameInfo::interp_near_hold: a draw it names that reaches the near plane in this step or its match in the step before
@@ -625,9 +652,14 @@ bool Interpolating::Match() {
     for (size_t i = 0; app::kGame.interp_near_hold && i < count_; i++) {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw) continue;
-        if (r.near_clipped || (r.prev >= 0 && before_[size_t(r.prev)].near_clipped)) {
+        if (!app::kGame.interp_near_hold(r.s->vs_handle, r.s->textures[0], r.c)) continue;
+        // one of them at the near plane, or on screen with no camera move to give it
+        const char* why = r.near_clipped                     ? "at the near plane"
+                          : r.camera_moved < 0 && !r.offscreen ? "without the camera's move"
+                                                                : nullptr;
+        if (why) {
             static uint32_t held = 0;
-            if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a draw at the near plane (%u so far)", held);
+            if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a named draw %s (%u so far)", why, held);
             return false;
         }
     }
