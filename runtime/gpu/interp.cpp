@@ -457,7 +457,7 @@ bool Interpolating::Match() {
     }
     static const bool pieces = [] {
         const char* e = std::getenv("XBE_INTERP_PIECES");
-        const bool on = !e || std::atoi(e) != 0;
+        const bool on = e ? std::atoi(e) != 0 : app::kGame.interp_pieces;
         LOGR("gpu: in-between frames: scenery come into view %s (XBE_INTERP_PIECES)", on ? "takes the camera's move" : "stays at its step's place");
         return on;
     }();

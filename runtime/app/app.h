@@ -256,6 +256,10 @@ struct GameInfo {
     // (a reflection pass drawn from a mirrored view each step: blended, what samples it slid against it, back and forth every
     // other step: EoN's driving floor); off, every matched draw is blended
     bool interp_sampled_targets_at_step = false;
+    // in-between frames: a draw with no match in the step before (scenery come into view) takes the camera's move, read
+    // off matched draws; off, it stays at its step's place (Fight Night Round 2's ring ropes are rebuilt each step and
+    // were thrown about by it). XBE_INTERP_PIECES overrides
+    bool interp_pieces = true;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
