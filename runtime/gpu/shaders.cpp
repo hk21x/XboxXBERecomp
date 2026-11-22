@@ -695,19 +695,43 @@ bool ScreenProgram(const std::vector<uint32_t>& prog) {
 
 int MatrixProgram(const std::vector<uint32_t>& prog) {
     int k = -1;
-    for (int i = 0; i < 4; i++) {
+    bool in_order = true;
+    for (int i = 0; i < 4 && in_order; i++) {
         size_t n = size_t(i) * 4;
         if (n + 4 > prog.size()) return -1;
         Tok t{&prog[n]};
         uint32_t mac = t.f(1, 21, 4), ilu = t.f(1, 25, 3);
         // dp4 (7), A the input v0 (mux 2, register 0), B a constant (mux 3) not indexed by a0
-        if (mac != 7 || ilu || t.f(2, 26, 2) != 2 || t.f(1, 9, 4) != 0 || t.f(2, 11, 2) != 3 || t.f(3, 1, 1)) return -1;
+        if (mac != 7 || ilu || t.f(2, 26, 2) != 2 || t.f(1, 9, 4) != 0 || t.f(2, 11, 2) != 3 || t.f(3, 1, 1)) {
+            in_order = false;
+            break;
+        }
         int cr = int(t.f(1, 13, 8));
         if (i == 0) k = cr;
-        else if (cr != k + i) return -1;
+        else if (cr != k + i) in_order = false;
         if (t.f(3, 0, 1) && i < 3) return -1;  // ended early
     }
-    return k >= 0 && k + 3 < 192 ? k : -1;
+    if (in_order) return k >= 0 && k + 3 < 192 ? k : -1;
+    // the same four dp4s in another order, each writing its own lane of oPos from the MAC, an ILU beside one writing a
+    // temporary only (Fight Night Round 2's untextured 2D, B0101FB1: w first, then x, y beside an rcc of w, then z)
+    k = -1;
+    uint32_t lanes = 0;
+    for (int i = 0; i < 4; i++) {
+        size_t n = size_t(i) * 4;
+        if (n + 4 > prog.size()) return -1;
+        Tok t{&prog[n]};
+        if (t.f(1, 21, 4) != 7 || t.f(2, 26, 2) != 2 || t.f(1, 9, 4) != 0 || t.f(2, 11, 2) != 3 || t.f(3, 1, 1)) return -1;
+        // oPos (o 0) written from the MAC, one lane (x 8, y 4, z 2, w 1)
+        const uint32_t omask = t.f(3, 12, 4);
+        if (!t.f(3, 11, 1) || t.f(3, 2, 1) || (t.f(3, 3, 8) & 0xF) != 0 || std::popcount(omask) != 1) return -1;
+        const int lane = omask == 8 ? 0 : omask == 4 ? 1 : omask == 2 ? 2 : 3;
+        const int base = int(t.f(1, 13, 8)) - lane;
+        if (k < 0) k = base;
+        if (base != k || (lanes & (1u << lane))) return -1;
+        lanes |= 1u << lane;
+        if (t.f(3, 0, 1) && i < 3) return -1;  // ended early
+    }
+    return lanes == 0xF && k >= 0 && k + 3 < 192 ? k : -1;
 }
 
 bool HudPiece(const State& s) {
