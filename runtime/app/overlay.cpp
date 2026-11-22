@@ -687,11 +687,63 @@ void Wheel(Settings& s) {
     }
 }
 
+// a control's two key buttons (a table's next two cells): press one, then a key or mouse button binds it
+void KeyCells(Settings& s, int c) {
+    const char* key_help = "Press, then press the key or mouse button (Escape clears it); Y clears it too. Each input takes up to two keys.";
+    for (int slot = 0; slot < 2; slot++) {
+        ImGui::TableNextColumn();
+        ImGui::PushID(slot);
+        bool waiting = g_bind_control == c && g_bind_slot == slot;
+        std::string name = waiting ? "press a key..." : KeyToName(s.keys[c][slot]);
+        if (name.empty()) name = "-";
+        if (ImGui::Button((name + "###key").c_str(), ImVec2(-1, 0))) {  // the id stays as the key changes, and the selection with it
+            g_bind_slot = slot;
+            g_bind_control = c;
+        }
+        if (ImGui::IsItemFocused()) {
+            g_prompt_clear = true;
+            SetHelp(key_help);
+            if (!waiting && (ImGui::IsKeyPressed(kClearKey, false) || ImGui::IsKeyPressed(ImGuiKey_Delete, false))) {
+                s.keys[c][slot] = 0;
+                Save();
+            }
+        }
+        ImGui::PopID();
+    }
+}
+
+// the title's own actions (GameInfo::actions): keys only
+void GameActions(Settings& s) {
+    if (kGame.actions.empty()) return;
+    Section("Game actions");
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(ImGui::GetStyle().FramePadding.x, ImGui::GetStyle().CellPadding.y));
+    bool table = ImGui::BeginTable("actions", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX);
+    ImGui::PopStyleVar();
+    if (!table) return;
+    float pad = ImGui::GetStyle().FramePadding.x * 2 + ImGui::GetStyle().CellPadding.x * 2;
+    ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("press a key...").x + pad);
+    ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("press a key...").x + pad);
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    ImGui::TableHeadersRow();
+    ImGui::PopItemFlag();
+    for (int c = input::kControls; c < input::ControlCount(); c++) {
+        ImGui::PushID(c);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(input::ControlLabel(c));
+        KeyCells(s, c);
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
 void Controls(Settings& s) {
-    if (s.keys.size() != input::kControls || s.pad_map.size() != input::kControls) return;  // sized in Get
+    if (s.keys.size() != size_t(input::ControlCount()) || s.pad_map.size() != input::kControls) return;  // sized in Get
     if (RowCheck("Keyboard plays as controller 1", &s.keyboard)) Save();
     if (RowButton("Default keys")) {
-        for (int c = 0; c < input::kControls; c++) s.keys[c] = DefaultKeys(c);
+        for (int c = 0; c < input::ControlCount(); c++) s.keys[c] = DefaultKeys(c);
         Save();
     }
     if (RowButton("Default controller")) {
@@ -732,33 +784,13 @@ void Controls(Settings& s) {
     ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
     ImGui::TableHeadersRow();
     ImGui::PopItemFlag();
-    const char* key_help = "Press, then press the key or mouse button (Escape clears it); Y clears it too. Each input takes up to two keys.";
     for (int c = 0; c < input::kControls; c++) {
         ImGui::PushID(c);
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(input::ControlLabel(c));
-        for (int slot = 0; slot < 2; slot++) {
-            ImGui::TableNextColumn();
-            ImGui::PushID(slot);
-            bool waiting = g_bind_control == c && g_bind_slot == slot;
-            std::string name = waiting ? "press a key..." : KeyToName(s.keys[c][slot]);
-            if (name.empty()) name = "-";
-            if (ImGui::Button((name + "###key").c_str(), ImVec2(-1, 0))) {  // the id stays as the key changes, and the selection with it
-                g_bind_slot = slot;
-                g_bind_control = c;
-            }
-            if (ImGui::IsItemFocused()) {
-                g_prompt_clear = true;
-                SetHelp(key_help);
-                if (!waiting && (ImGui::IsKeyPressed(kClearKey, false) || ImGui::IsKeyPressed(ImGuiKey_Delete, false))) {
-                    s.keys[c][slot] = 0;
-                    Save();
-                }
-            }
-            ImGui::PopID();
-        }
+        KeyCells(s, c);
         ImGui::TableNextColumn();
         int from = s.pad_map[c];
         if (ImGui::Button((std::string(input::ControlLabel(from)) + "###input").c_str(), ImVec2(-1, 0))) ImGui::OpenPopup("##pad");
@@ -778,6 +810,7 @@ void Controls(Settings& s) {
         ImGui::PopID();
     }
     ImGui::EndTable();
+    GameActions(s);
 }
 
 }  // namespace
@@ -893,7 +926,7 @@ bool OverlayKey(uint16_t vk) {
     int c = g_bind_control;
     if (!g_open || c < 0) return false;
     Settings& s = Get();
-    if (s.keys.size() == input::kControls) {
+    if (c < int(s.keys.size())) {
         s.keys[c][g_bind_slot] = vk == VK_ESCAPE ? 0 : vk;
         Save();
     }

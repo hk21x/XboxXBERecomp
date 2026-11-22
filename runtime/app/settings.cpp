@@ -85,6 +85,7 @@ uint16_t KeyFromName(const std::string& name) {
 // arrows steer and move through menus (the left stick does both), W and S accelerate and brake, Enter or Space is A;
 // a title's own (GameInfo::default_keys) instead
 std::array<uint16_t, 2> DefaultKeys(int c) {
+    if (c >= input::kControls) return c < input::ControlCount() ? kGame.actions[size_t(c - input::kControls)].keys : std::array<uint16_t, 2>{0, 0};
     if (kGame.default_keys) return kGame.default_keys(c);
     switch (c) {
         case input::kUp: return {VK_NUMPAD8, 0};
@@ -170,7 +171,7 @@ Settings& Get() {
     // the control tables have their size from the start: the settings window changes entries, game threads read them
     static Settings s = [] {
         Settings d;
-        d.keys.resize(input::kControls);
+        d.keys.resize(size_t(input::ControlCount()));  // the title's own actions after the console's inputs
         d.pad_map.resize(input::kControls);
         d.wheel_buttons.resize(input::kControls);
         d.wheel_gears.resize(kGears);
@@ -179,6 +180,7 @@ Settings& Get() {
             d.wheel_buttons[c].button = DefaultWheelButton(c);
             d.pad_map[c] = uint8_t(c);
         }
+        for (int c = input::kControls; c < input::ControlCount(); c++) d.keys[c] = DefaultKeys(c);
         return d;
     }();
     return s;
@@ -281,7 +283,7 @@ void Load() {
         for (auto& [name, v] : *keys) {
             int c = input::ControlByName(std::string(name.str()).c_str());
             const toml::array* a = v.as_array();
-            if (c < 0 || !a) continue;
+            if (c < 0 || c >= int(s.keys.size()) || !a) continue;
             s.keys[c] = {0, 0};
             for (size_t i = 0; i < 2 && i < a->size(); i++) s.keys[c][i] = KeyFromName((*a)[i].value_or(std::string()));
         }
@@ -290,7 +292,7 @@ void Load() {
         for (auto& [name, v] : *pad) {
             int c = input::ControlByName(std::string(name.str()).c_str());
             int from = input::ControlByName(v.value_or(std::string()).c_str());
-            if (c >= 0 && from >= 0) s.pad_map[c] = uint8_t(from);
+            if (c >= 0 && c < input::kControls && from >= 0 && from < input::kControls) s.pad_map[c] = uint8_t(from);
         }
     }
     for (const Option& o : kGame.options) {
@@ -339,10 +341,10 @@ toml::table Table() {
         t.insert(key, BindTable(*bind));
     // only what differs from the defaults
     toml::table keys, pad;
-    for (int c = 0; c < input::kControls; c++) {
+    for (int c = 0; c < input::ControlCount(); c++) {
         if (c < int(s.keys.size()) && s.keys[c] != DefaultKeys(c))
             keys.insert(input::ControlName(c), toml::array{KeyToName(s.keys[c][0]), KeyToName(s.keys[c][1])});
-        if (c < int(s.pad_map.size()) && s.pad_map[c] != c) pad.insert(input::ControlName(c), input::ControlName(s.pad_map[c]));
+        if (c < input::kControls && c < int(s.pad_map.size()) && s.pad_map[c] != c) pad.insert(input::ControlName(c), input::ControlName(s.pad_map[c]));
     }
     toml::table wheel_buttons, wheel_gears;
     for (int c = 0; c < input::kControls; c++)

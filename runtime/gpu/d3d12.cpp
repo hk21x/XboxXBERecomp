@@ -2467,18 +2467,23 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
     if (!d.cube && d.depth == 1 && !fi.depth) {
         auto r = FindReplacement(d.data);
         if (r && ((r->sharpened && !(r->world ? app::Get().world_textures : app::Get().sharp_2d)) || !ReplacementFits(*r, d))) r = nullptr;
+        if (r && r->palette) {  // a P8 texture's, made with its palette: not with another
+            StagePalette now;
+            ReadStagePalette(s, stage, d, now);
+            if (now.hash != r->palette) r = nullptr;
+        }
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
         }
     }
     step(g_perf.f_replace);
-    if (draw_2d_) Sharpen2D(d);
-    else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
-    step(g_perf.f_sharpen);
     StagePalette palette;
     ReadStagePalette(s, stage, d, palette);
     step(g_perf.f_palette);
+    if (draw_2d_) Sharpen2D(d, palette.va ? palette.colours : nullptr, palette.hash);
+    else SharpenWorld(d, s.tss[size_t(stage)][kTssAddressU] == 1, s.tss[size_t(stage)][kTssAddressV] == 1);
+    step(g_perf.f_sharpen);
     const uint64_t key = uint64_t(palette.va) << 32 | d.data;
     Tex& tx = textures_[key];
     uint32_t total = TotalSize(d);
@@ -3456,7 +3461,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // decide writes the packet's parts in place: the constants alone are 2.8 KB a draw
     DrawTextures& stages = packet_->stages;
     stages = DrawTextures{};
-    draw_2d_ = a.pretransformed || ScreenDraw(s);
+    draw_2d_ = a.pretransformed || ScreenDraw(s) || s.flat_2d;
     if (!BindStageTexturesAndTargets(s, stages)) return;
     perf_shaders = PerfNow();
     PixelKey& pk = packet_->pk;

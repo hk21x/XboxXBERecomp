@@ -279,6 +279,16 @@ uint32_t MouseButtons() {
            ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
 }
 
+bool ActionHeld(int action) {
+    const int c = kControls + action;
+    if (action < 0 || c >= ControlCount() || !app::Get().keyboard || app::OverlayOpen()) return false;
+    HWND hwnd = static_cast<HWND>(app::Window());
+    if (!hwnd || GetForegroundWindow() != hwnd) return false;
+    for (uint16_t k : ControlKeys(c))
+        if (k && (GetAsyncKeyState(k) & 0x8000)) return true;
+    return false;
+}
+
 std::array<uint16_t, 2> ControlKeys(int c) {
     const app::Settings& s = app::Get();
     return c >= 0 && c < int(s.keys.size()) ? s.keys[size_t(c)] : app::DefaultKeys(c);
@@ -305,11 +315,18 @@ bool MouseLooking() {
            !app::OverlayOpen();
 }
 
-const char* ControlName(int c) { return c >= 0 && c < kControls ? kNames[c] : ""; }
-const char* ControlLabel(int c) { return c >= 0 && c < kControls ? kLabels[c] : ""; }
+int ControlCount() { return kControls + int(app::kGame.actions.size()); }
+const char* ControlName(int c) {
+    if (c >= kControls && c < ControlCount()) return app::kGame.actions[size_t(c - kControls)].name;
+    return c >= 0 && c < kControls ? kNames[c] : "";
+}
+const char* ControlLabel(int c) {
+    if (c >= kControls && c < ControlCount()) return app::kGame.actions[size_t(c - kControls)].label;
+    return c >= 0 && c < kControls ? kLabels[c] : "";
+}
 int ControlByName(const char* name) {
-    for (int c = 0; c < kControls; c++)
-        if (std::strcmp(kNames[c], name) == 0) return c;
+    for (int c = 0; c < ControlCount(); c++)
+        if (std::strcmp(ControlName(c), name) == 0) return c;
     return -1;
 }
 

@@ -139,8 +139,12 @@ int TakeWheel() {
 
 // the title's defaults (no settings file headless)
 std::array<uint16_t, 2> ControlKeys(int c) {
+    if (c >= kControls) return c < ControlCount() ? app::kGame.actions[size_t(c - kControls)].keys : std::array<uint16_t, 2>{0, 0};
     return app::kGame.default_keys ? app::kGame.default_keys(c) : std::array<uint16_t, 2>{0, 0};
 }
+int ControlCount() { return kControls + int(app::kGame.actions.size()); }
+// no keyboard headless: a title's own actions are never held
+bool ActionHeld(int) { return false; }
 
 void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);

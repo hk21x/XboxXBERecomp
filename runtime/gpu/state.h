@@ -256,6 +256,9 @@ struct State {
     // of the middle is moved sideways to keep its distance from that edge of the frame as it had at that shape, its own
     // shape left as drawn (gpu::HudMove); one about the middle stays there
     float hud_layout = 0;
+    // a game hook draws its own 2D (a menu or HUD layer) through a camera of its own, not as screen space or a flat
+    // program the renderers know: its textures are 2D's all the same (Sharpen2D; 50 Cent: Bulletproof's menus)
+    bool flat_2d = false;
     // ultrawide: the 2D being drawn is drawn past the frame's edge by a game hook to fill a margin of the squeezed picture:
     // clipped to that margin instead of the squeezed viewport (-1 left, 1 right, 0 no)
     int squeeze_margin = 0;
