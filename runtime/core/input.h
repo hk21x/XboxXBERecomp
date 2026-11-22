@@ -22,6 +22,8 @@ enum Control : int {
     kLSLeft, kLSRight, kLSUp, kLSDown, kRSLeft, kRSRight, kRSUp, kRSDown,
     kControls
 };
+// kControls, then the title's own actions (GameInfo::actions): what the key tables and the names below cover
+int ControlCount();
 const char* ControlName(int c);  // settings file name, "dpad_up" ...
 const char* ControlLabel(int c); // shown to the player, "D-pad up" ...
 int ControlByName(const char* name);  // -1 when unknown
@@ -48,6 +50,9 @@ std::array<uint16_t, 2> ControlKeys(int c);
 // positive), and the buttons held (1 left, 2 right, 4 middle)
 int TakeWheel();
 uint32_t MouseButtons();
+// one of the title's own actions (GameInfo::actions, from 0): one of its keys held, while the keyboard plays and the game
+// window is in front with the settings window shut
+bool ActionHeld(int action);
 void MouseWheel(int delta);  // window thread, WHEEL_DELTA (120) a notch
 void Rumble(int port, uint16_t left, uint16_t right);
 // the physical controls held on any controller, a bit per Control, from the last polls (the settings window's

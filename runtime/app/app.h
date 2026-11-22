@@ -244,6 +244,15 @@ struct GameInfo {
     bool mouse_direct = false;
     // the keys each input::Control starts with (two Windows virtual keys, 0 none), else the SDK's (DefaultKeys)
     std::array<uint16_t, 2> (*default_keys)(int c) = nullptr;
+    // the title's own actions besides the console's inputs, played by keys only (input::ActionHeld): shown on the
+    // Controls page after them, and kept in settings.toml's [keys] by name. Numbered from input::kControls in the key
+    // tables (input::ControlName, ControlKeys)
+    struct Action {
+        const char* name;   // settings file name, "weapon_1"
+        const char* label;  // shown to the player
+        std::array<uint16_t, 2> keys;  // the keys it starts with
+    };
+    std::vector<Action> actions;
     // a texture the title binds (SetTexture, its guest D3DBaseTexture) with its stage's palette (D3DPalette, 0 none), on
     // the title's thread before the draws that use it, and again when the stage's palette is set (SetPalette): the
     // title may change its texels in guest memory (EoN's button pictures), true when it did, and may give the

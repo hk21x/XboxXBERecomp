@@ -58,6 +58,7 @@ static const char* kL[kControls] = {"D-pad up", "D-pad down", "D-pad left", "D-p
     "Right stick left", "Right stick right", "Right stick up", "Right stick down"};
 const char* ControlLabel(int c) { return c >= 0 && c < kControls ? kL[c] : ""; }
 const char* ControlName(int c) { return ControlLabel(c); }
+int ControlCount() { return kControls; }
 void WheelSetup() {}
 void WheelTestForce(float) {}
 WheelInfo Wheel() {
