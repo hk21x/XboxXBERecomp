@@ -4282,9 +4282,9 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     if (frame && app::kGame.bars_backdrop && app::kGame.bars_backdrop() && bb_h_ &&
         app::FrameAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
         D3D12_RESOURCE_STATES fs = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        ComPtr<ID3D12Resource> small = Shrink(frame, fs, frame_fmt, 64, 36, {.taps = 8, .into = backdrop_.Get(), .into_state = backdrop_state_, .mul = 0.45f});
-        if (small) {
-            backdrop_ = small;
+        ComPtr<ID3D12Resource> shrunk = Shrink(frame, fs, frame_fmt, 64, 36, {.taps = 8, .into = backdrop_.Get(), .into_state = backdrop_state_, .mul = 0.45f});
+        if (shrunk) {
+            backdrop_ = shrunk;
             backdrop_state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
             Transition(backdrop_.Get(), backdrop_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             backdrop = true;
