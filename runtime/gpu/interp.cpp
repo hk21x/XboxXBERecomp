@@ -5,6 +5,7 @@
 // waiting here. So the picture is up to one step late; nothing is drawn beyond what the title gave. No blend after a camera cut.
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -75,6 +76,20 @@ struct Rec {
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
 
+// the surfaces presented lately: the frame buffers. A title rotating two or three of them draws each step into another
+// (Fight Night Round 2: 00A73000, 00BDC000, 0090A000), so in a draw's key they are one target, the frame
+std::array<std::atomic<uint32_t>, 4> g_presented{};
+bool Presented(uint32_t data) {
+    for (const auto& p : g_presented)
+        if (data && p.load(std::memory_order_relaxed) == data) return true;
+    return false;
+}
+void NotePresented(uint32_t data) {
+    if (!data || Presented(data)) return;
+    static std::atomic<uint32_t> next{0};
+    g_presented[next++ % g_presented.size()].store(data, std::memory_order_relaxed);
+}
+
 uint64_t KeyOf(const Rec& r) {
     const State& s = *r.s;
     uint64_t h = 0xCBF29CE484222325ull;
@@ -84,7 +99,7 @@ uint64_t KeyOf(const Rec& r) {
     // environment maps at 811C0000 and 813C0000 through one header), and a draw matched to the other picture's of the step
     // before blended two views into one. Unmatched, they are drawn at the step's place, and what samples them with them
     // (GameInfo::interp_sampled_targets_at_step)
-    mix(s.rt.data);
+    mix(Presented(s.rt.data) ? 1 : s.rt.data);
     // stage 0's texture only: the other stages can hold a binding the program does not read that changes from one step to the
     // next (EoN's driving: stage 2 bound one step and not the next), and lost the match of a whole floor's scenery and its decals
     mix(s.textures[0]);
@@ -150,7 +165,10 @@ private:
         const uint32_t cap = app::Get().fps_cap;
         return cap ? cap : kFastest;
     }
-    static bool On() { return app::kGame.step_interpolation && app::kGame.step_interpolation() && (Test() || Rate() > 60); }
+    // a frame cap above the console's own rate (GameInfo::vblank_hz: 60, or a PAL title's 50, whose 60 then has room)
+    static bool On() {
+        return app::kGame.step_interpolation && app::kGame.step_interpolation() && (Test() || Rate() > app::g_pace_hz.load());
+    }
     // headless: XBE_INTERP_TEST=N draws N frames a step, evenly, however long they take
     static int Test() {
         static const int n = [] {
@@ -696,6 +714,7 @@ void Interpolating::Replay(float alpha) {
 }
 
 void Interpolating::Present(const Surface& front) {
+    NotePresented(front.data);
     const auto t = Clock::now();
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
