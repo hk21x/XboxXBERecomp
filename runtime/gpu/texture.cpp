@@ -781,7 +781,10 @@ void SharpWorker() {
         // would be 4 MB here and 5 MB of video memory
         uint32_t big = std::max(job.d.width, job.d.height);
         bool text = job.d.format == 0x19 || job.d.format == 0x1F;  // A8
-        uint32_t scale = job.world ? 2 : big <= 128 || (text && big <= 512) ? 4 : 2;
+        // a P8 sheet up to 256 texels (50 Cent: Bulletproof's fonts, 256x128 and 128x256) four times too; larger P8
+        // pictures (its PDA's 512 square frame) twice
+        const bool p8_sheet = job.d.format == 0x0B && big <= 256;
+        uint32_t scale = job.world ? 2 : big <= 128 || (text && big <= 512) || p8_sheet ? 4 : 2;
         auto r = std::make_shared<Replacement>();
         r->data = job.d.data;
         r->guest_bytes = uint32_t(job.bytes.size());
