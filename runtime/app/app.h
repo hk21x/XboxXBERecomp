@@ -260,6 +260,10 @@ struct GameInfo {
     // off matched draws; off, it stays at its step's place (Fight Night Round 2's ring ropes are rebuilt each step and
     // were thrown about by it). XBE_INTERP_PIECES overrides
     bool interp_pieces = true;
+    // in-between frames: a draw this says true of (its vertex program handle, stage 0 texture header, index or vertex
+    // count) is drawn as the step has it, not blended: Fight Night Round 2's ring ropes, whose sections near the camera
+    // swept across the screen when blended
+    bool (*interp_unblended)(uint32_t vs_handle, uint32_t texture, uint32_t count) = nullptr;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)

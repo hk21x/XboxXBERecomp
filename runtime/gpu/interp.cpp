@@ -388,6 +388,10 @@ bool Interpolating::Match() {
         draws++;
         auto it = found.find(KeyOf(r));
         if (it == found.end() || it->second.empty()) continue;
+        if (app::kGame.interp_unblended && app::kGame.interp_unblended(r.s->vs_handle, r.s->textures[0], r.c)) {
+            it->second.pop_back();  // its self in the step before taken, so the next alike matches the next
+            continue;
+        }
         // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
         auto& list = it->second;
         size_t best = list.size() - 1;
