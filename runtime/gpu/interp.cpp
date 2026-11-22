@@ -77,6 +77,8 @@ struct Rec {
     bool named = false;         // GameInfo::interp_near_hold names it: not matched, moved by the camera's move alone
     int camera_moved = -1;      // named: 1 when the camera's move was given to it
     bool offscreen = false;     // named: drawn into a target that is not a frame buffer
+    float box[6] = {};          // named: v0's bounds (min x y z, max x y z), for the camera's earlier place
+    bool has_box = false;
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
@@ -141,7 +143,7 @@ public:
         if (app::kGame.interp_near_hold && app::kGame.interp_near_hold(s.vs_handle, s.textures[0], count)) {
             r.named = true;
             r.offscreen = !Presented(s.rt.data);
-            r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices);
+            r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices, r.box, r.has_box);
         }
         for (uint32_t p : s.palettes) AddHeader(r, p);
         r.has_bytes = indices != nullptr;
@@ -226,6 +228,7 @@ private:
         r.named = false;
         r.camera_moved = -1;
         r.offscreen = false;
+        r.has_box = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -255,7 +258,7 @@ private:
     // a vertex of the draw at or behind the near plane (clip z < 0 or w <= 0) through the program's position matrix (one
     // that only transforms v0 by four constants: gpu::MatrixProgram); v0 as FLOAT3, FLOAT4 or SHORT3 (D3DVSDT 0x32, 0x42,
     // 0x35) in its stream. False when it cannot be read
-    static bool NearClipped(const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
+    static bool NearClipped(const State& s, uint32_t start, uint32_t count, const uint8_t* indices, float box[6], bool& has_box) {
         if (!(s.vs_handle & 1) || !s.vs) return false;
         if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
         const int k = s.vs->matrix;
@@ -280,6 +283,9 @@ private:
         const auto* base = static_cast<const uint8_t*>(kernel::HostPtr(va));
         const auto& z = s.vsc[size_t(k) + 2];
         const auto& w = s.vsc[size_t(k) + 3];
+        bool clipped = false;
+        box[0] = box[1] = box[2] = 1e30f;
+        box[3] = box[4] = box[5] = -1e30f;
         for (uint32_t v = 0; v < most; v++) {
             const uint8_t* at = base + size_t(v) * st.stride + in.offset;
             float p[3];
@@ -290,8 +296,20 @@ private:
             } else {
                 std::memcpy(p, at, 12);
             }
+            for (int c = 0; c < 3; c++) box[c] = std::min(box[c], p[c]), box[3 + c] = std::max(box[3 + c], p[c]);
             if (w[0] * p[0] + w[1] * p[1] + w[2] * p[2] + w[3] <= 0 || z[0] * p[0] + z[1] * p[1] + z[2] * p[2] + z[3] < 0)
-                return true;
+                clipped = true;
+        }
+        has_box = true;
+        return clipped;
+    }
+    // a box's corners through a matrix's z and w rows (rows 2 and 3): any at or behind the near plane
+    static bool BoxClipped(const float box[6], const float m[4][4]) {
+        for (int i = 0; i < 8; i++) {
+            const float p[3] = {box[(i & 1) ? 3 : 0], box[(i & 2) ? 4 : 1], box[(i & 4) ? 5 : 2]};
+            const float z = m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3];
+            const float w = m[3][0] * p[0] + m[3][1] * p[1] + m[3][2] * p[2] + m[3][3];
+            if (w <= 0 || z < 0) return true;
         }
         return false;
     }
@@ -654,9 +672,10 @@ bool Interpolating::Match() {
         if (r.kind != Rec::Draw) continue;
         if (!app::kGame.interp_near_hold(r.s->vs_handle, r.s->textures[0], r.c)) continue;
         // one of them at the near plane, or on screen with no camera move to give it
-        const char* why = r.near_clipped                     ? "at the near plane"
-                          : r.camera_moved < 0 && !r.offscreen ? "without the camera's move"
-                                                                : nullptr;
+        const char* why = r.near_clipped                                          ? "at the near plane"
+                          : r.camera_moved < 0 && !r.offscreen                      ? "without the camera's move"
+                          : r.camera_moved > 0 && r.has_box && BoxClipped(r.box, r.was) ? "at the camera's earlier near plane"
+                                                                                     : nullptr;
         if (why) {
             static uint32_t held = 0;
             if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a named draw %s (%u so far)", why, held);
