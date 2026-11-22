@@ -19,6 +19,7 @@
 #include "app/app.h"
 #include "core/log.h"
 #include "gpu/backend.h"
+#include "gpu/shaders.h"
 #include "gpu/texture.h"
 #include "kernel/kernel.h"
 #include "kernel/memory.h"
@@ -72,7 +73,7 @@ struct Rec {
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
-    bool camera_only = false;  // GameInfo::interp_unblended: moves with the camera alone
+    bool near_clipped = false;  // GameInfo::interp_near_hold: a vertex at or behind the near plane this step
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
@@ -134,6 +135,8 @@ public:
         for (const auto& stream : s.streams) AddHeader(r, stream.vb);
         for (uint32_t t : s.textures) AddHeader(r, t);
         KeepVertices(r, s, start, count, indices);
+        if (app::kGame.interp_near_hold && app::kGame.interp_near_hold(s.vs_handle, s.textures[0], count))
+            r.near_clipped = NearClipped(s, start, count, indices);
         for (uint32_t p : s.palettes) AddHeader(r, p);
         r.has_bytes = indices != nullptr;
         if (indices) r.bytes.assign(indices, indices + size_t(count) * 2);
@@ -213,7 +216,7 @@ private:
         r.prev = -1;
         r.turning = false;
         r.derived = false;
-        r.camera_only = false;
+        r.near_clipped = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -239,6 +242,49 @@ private:
             std::memcpy(to + material, from + material, sizeof(State) - material);
         }
         r.vsc = s.vsc;
+    }
+    // a vertex of the draw at or behind the near plane (clip z < 0 or w <= 0) through the program's position matrix (one
+    // that only transforms v0 by four constants: gpu::MatrixProgram); v0 as FLOAT3, FLOAT4 or SHORT3 (D3DVSDT 0x32, 0x42,
+    // 0x35) in its stream. False when it cannot be read
+    static bool NearClipped(const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
+        if (!(s.vs_handle & 1) || !s.vs) return false;
+        if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
+        const int k = s.vs->matrix;
+        const auto& in = s.vs->inputs[0];
+        if (k < 0 || in.stream < 0 || (in.type != 0x32 && in.type != 0x42 && in.type != 0x35)) return false;
+        const auto& st = s.streams[size_t(in.stream)];
+        if (!st.vb || !st.stride) return false;
+        const uint32_t data = kernel::R32(st.vb + 4);
+        if (!data) return false;
+        const uint32_t va = mem::VirtualFromPhysical(data);
+        uint32_t most = start + count;
+        if (indices) {
+            most = 0;
+            for (uint32_t i = 0; i < count; i++) {
+                uint16_t v;
+                std::memcpy(&v, indices + size_t(i) * 2, 2);
+                most = std::max(most, uint32_t(v) + 1);
+            }
+            most += s.base_vertex;
+        }
+        if (!most || !mem::IsCommitted(va) || !mem::IsCommitted(va + most * st.stride - 1)) return false;
+        const auto* base = static_cast<const uint8_t*>(kernel::HostPtr(va));
+        const auto& z = s.vsc[size_t(k) + 2];
+        const auto& w = s.vsc[size_t(k) + 3];
+        for (uint32_t v = 0; v < most; v++) {
+            const uint8_t* at = base + size_t(v) * st.stride + in.offset;
+            float p[3];
+            if (in.type == 0x35) {
+                int16_t q[3];
+                std::memcpy(q, at, 6);
+                p[0] = q[0], p[1] = q[1], p[2] = q[2];
+            } else {
+                std::memcpy(p, at, 12);
+            }
+            if (w[0] * p[0] + w[1] * p[1] + w[2] * p[2] + w[3] <= 0 || z[0] * p[0] + z[1] * p[1] + z[2] * p[2] + z[3] < 0)
+                return true;
+        }
+        return false;
     }
     // finds each draw's last self; false when there is nothing to blend or the camera was cut
     bool Match();
@@ -390,11 +436,6 @@ bool Interpolating::Match() {
         draws++;
         auto it = found.find(KeyOf(r));
         if (it == found.end() || it->second.empty()) continue;
-        if (app::kGame.interp_unblended && app::kGame.interp_unblended(r.s->vs_handle, r.s->textures[0], r.c)) {
-            it->second.pop_back();  // its self in the step before taken, so the next alike matches the next
-            r.camera_only = true;
-            continue;
-        }
         // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
         auto& list = it->second;
         size_t best = list.size() - 1;
@@ -575,23 +616,21 @@ bool Interpolating::Match() {
                 }
             r.derived = true;
         }
-        // GameInfo::interp_unblended: its own matrix not blended, the camera's move alone (step before = move * now), so it
-        // stays put in the scene however its own matrix changed (Fight Night Round 2's ropes near the camera)
-        for (size_t i = 0; i < count_; i++) {
-            Rec& r = now_[i];
-            if (r.kind != Rec::Draw || !r.camera_only || flat(r.vsc)) continue;
-            const Move* camera = camera_of(r.s->rt.data);
-            if (!camera || camera->votes < kLeastVotes) continue;
-            for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) {
-                    double t = 0;
-                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
-                    r.was[a][b] = float(t);
-                }
-            r.derived = true;
-        }
     }
     LogJumps();
+    // GameInfo::interp_near_hold: a draw it names that reaches the near plane in this step or its match in the step before
+    // (a ring rope the camera passes by) has no in-between picture that is right: blended, its vertices through w 0 are
+    // thrown across the screen; its parts behind the camera are cut where the game never drew them. The step is shown as
+    // the title drew it, with no frames in between
+    for (size_t i = 0; app::kGame.interp_near_hold && i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind != Rec::Draw) continue;
+        if (r.near_clipped || (r.prev >= 0 && before_[size_t(r.prev)].near_clipped)) {
+            static uint32_t held = 0;
+            if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a draw at the near plane (%u so far)", held);
+            return false;
+        }
+    }
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
     return true;
