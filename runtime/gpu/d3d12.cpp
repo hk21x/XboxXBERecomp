@@ -2470,8 +2470,13 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
         if (r && r->palette) {  // a P8 texture's, made with its palette: not with another
             StagePalette now;
             ReadStagePalette(s, stage, d, now);
-            if (now.hash != r->palette) r = nullptr;
+            if (now.hash != r->palette) {
+                LOGR_FIRST(40, "DIAG p8 replacement %08X made with palette %016llX, drawn with %016llX (va %08X)", d.data,
+                           (unsigned long long)r->palette, (unsigned long long)now.hash, now.va);
+                r = nullptr;
+            }
         }
+        if (r && r->palette) LOGR_FIRST(40, "DIAG p8 replacement %08X bound (%ux%u)", d.data, r->width, r->height);
         if (ID3D12Resource* res = r ? BindReplacement(*r, d, stages.sv[stage]) : nullptr) {
             stages.replaced[stage] = true;
             return res;
