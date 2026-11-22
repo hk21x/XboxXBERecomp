@@ -125,7 +125,7 @@ A game that sets `XBE_GAME_DLL` builds its recompiled code into `<exe>.dll` on t
 - **No Audio Device** - If XAudio2 cannot start, the mixer is still pulled on the clock, so the game keeps its timing.
 
 ### Input
-- **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
+- **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble. Controllers are read on their own thread, so a slow scan for devices never holds the game.
 - **Remapping** - Maps any physical controller input to any console input.
 - **Stick Tuning** - A dead zone and a sensitivity for each stick, in the Controls tab (`GameInfo::stick_deadzone` gives the game's own dead zone).
 - **Keyboard** - Plays as controller 1 with two keys per console input, remappable, saved in the settings file's `[keys]` table. A game can list its own keyboard actions (`GameInfo::actions`, `input::ActionHeld`).
