@@ -1096,10 +1096,21 @@ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const u
                         (ScreenProgram(s.vs->program) || (MatrixProgram(s.vs->program) >= 0 &&
                                                           OrthoConstants(s.vsc, MatrixProgram(s.vs->program))));
     // the hardware renderers' 2D sharpening (GameInfo::sharpen_2d) run headless too: its pictures with XBE_SHARPEN_DUMP
-    if (as.pretransformed || screen)
+    if (as.pretransformed || screen || s.flat_2d)
         for (int i = 0; i < 4; i++) {
             TextureDesc sd;
-            if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], sd) && !FindReplacement(sd.data)) Sharpen2D(sd);
+            if (!s.textures[size_t(i)] || !Describe(s.textures[size_t(i)], sd) || FindReplacement(sd.data)) continue;
+            // a P8 texture with the stage's palette (D3DPalette: +0 its size code in the top two bits, +4 the colours'
+            // physical address), hashed as the renderers do
+            uint32_t colours[256] = {};
+            uint64_t hash = 0;
+            if (sd.format == 0x0B && s.palettes[size_t(i)]) {
+                const uint32_t header = s.palettes[size_t(i)];
+                const uint32_t va = mem::VirtualFromPhysical(kernel::R32(header + 4));
+                std::memcpy(colours, kernel::HostPtr(va), (256u >> (kernel::R32(header) >> 30)) * 4);
+                hash = Hash(colours, sizeof colours);
+            }
+            Sharpen2D(sd, hash ? colours : nullptr, hash);
         }
     if ((as.pretransformed || screen) && slot[0] >= 0 && rt.ok && (rt.h == 480 || rt.h == 576) && rt.w >= rt.h &&
         app::FrameAspect() > app::HudAspect() + 1e-3f)

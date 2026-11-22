@@ -658,12 +658,14 @@ float Cubic(float t, int i) {  // Catmull-Rom weight of tap i (0..3) around t
 }
 }  // namespace
 
-bool DecodeBgra(const TextureDesc& d, uint32_t level, const uint8_t* guest, std::vector<uint32_t>& out) {
+bool DecodeBgra(const TextureDesc& d, uint32_t level, const uint8_t* guest, std::vector<uint32_t>& out,
+                const uint32_t* palette) {
     const FormatInfo& fi = Format(d.format);
     if (fi.depth || fi.host == Host::None || fi.host == Host::R32F || fi.host == Host::R16Unorm) return false;
+    if (d.format == 0x0B && !palette) return false;  // P8
     std::vector<uint8_t> px;
     uint32_t pitch = 0;
-    DecodeLevel(d, level, 0, guest, nullptr, px, pitch);
+    DecodeLevel(d, level, 0, guest, palette, px, pitch);
     uint32_t w = std::max(1u, d.width >> level), h = std::max(1u, d.height >> level);
     if (fi.compressed) {
         DecodeBlocks(fi.host, w, h, px, pitch, out);
@@ -757,6 +759,8 @@ struct SharpJob {
     TextureDesc d;
     std::vector<uint8_t> bytes;  // level 0 as the game had it
     bool world = false, wrap_u = false, wrap_v = false;  // SharpenWorld's
+    std::vector<uint32_t> palette;  // a P8 texture's colours, and their hash
+    uint64_t palette_hash = 0;
 };
 std::condition_variable g_sharp_cv;
 std::deque<SharpJob> g_sharp_jobs;
@@ -772,7 +776,7 @@ void SharpWorker() {
             g_sharp_jobs.pop_front();
         }
         std::vector<uint32_t> px;
-        if (!DecodeBgra(job.d, 0, job.bytes.data(), px)) continue;
+        if (!DecodeBgra(job.d, 0, job.bytes.data(), px, job.palette.empty() ? nullptr : job.palette.data())) continue;
         // text (alpha only) and small pictures four times, larger ones twice: a 256 square picture at four times
         // would be 4 MB here and 5 MB of video memory
         uint32_t big = std::max(job.d.width, job.d.height);
@@ -790,6 +794,7 @@ void SharpWorker() {
         r->src_width = job.d.width;
         r->src_height = job.d.height;
         r->world = job.world;
+        r->palette = job.palette_hash;
         if (job.world) {
             r->bgra = UpscaleEdgeDirected2x(px, job.d.width, job.d.height, job.wrap_u, job.wrap_v);
             // cut-outs keep a hard edge, as UpscalePicture gives them
@@ -837,9 +842,9 @@ void SharpWorker() {
 }
 }  // namespace
 
-void Sharpen2D(const TextureDesc& d) {
+void Sharpen2D(const TextureDesc& d, const uint32_t* palette, uint64_t palette_hash) {
     if (!app::kGame.sharpen_2d || !app::Get().sharp_2d) return;
-    if (d.linear || d.cube || d.depth > 1 || d.format == 0x0B) return;  // P8: its colours come with the palette bound
+    if (d.linear || d.cube || d.depth > 1 || (d.format == 0x0B && !palette)) return;  // P8: its colours come with the palette bound
     if (d.width < 8 || d.height < 8 || d.width > 512 || d.height > 512) return;
     const FormatInfo& fi = Format(d.format);
     if (fi.depth || fi.host == Host::None || fi.host == Host::R32F || fi.host == Host::R16Unorm) return;
@@ -853,6 +858,7 @@ void Sharpen2D(const TextureDesc& d) {
     static std::once_flag started;
     std::call_once(started, [] { std::thread(SharpWorker).detach(); });
     SharpJob job{d, {}};
+    if (d.format == 0x0B) job.palette.assign(palette, palette + 256), job.palette_hash = palette_hash;
     uint32_t size = LevelSize(d, 0);
     const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
     job.bytes.assign(p, p + size);

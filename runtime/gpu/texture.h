@@ -68,12 +68,16 @@ struct Replacement {
     std::vector<std::vector<uint32_t>> mips;  // the levels below bgra, when the background thread made them
     // the texture it stands for (Sharpen2D's; 0 any): the same memory read in another format or size is not it
     uint32_t format = 0, src_width = 0, src_height = 0;
+    // a P8 texture's (Sharpen2D): the hash of the palette it was decoded with; drawn with another palette it is not used
+    uint64_t palette = 0;
     std::vector<uint32_t> bgra;
 };
 void SetReplacement(uint32_t data_va, uint32_t guest_bytes, uint32_t width, uint32_t height, std::vector<uint32_t> bgra);
 // a texture a 2D draw samples (GameInfo::sharpen_2d), from the render thread: its level 0 copied and enlarged on a
 // background thread, then set as its replacement (sharpened); one whose bytes keep changing is left alone
-void Sharpen2D(const TextureDesc& d);
+// A P8 texture is taken with the palette bound for the draw (`palette`: 256 colours, `palette_hash` as the renderer
+// keys them; none: left alone), and stands in only while that palette is bound (50 Cent: Bulletproof's menus and text)
+void Sharpen2D(const TextureDesc& d, const uint32_t* palette = nullptr, uint64_t palette_hash = 0);
 // a colour texture a 3D draw samples, with Settings::world_textures: as Sharpen2D, twice its size (UpscaleEdgeDirected2x),
 // up to a budget of memory. wrap_u, wrap_v: it tiles that way
 void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v);
@@ -81,7 +85,9 @@ void SharpenWorld(const TextureDesc& d, bool wrap_u, bool wrap_v);
 // colour Catmull-Rom interpolated weighted by alpha. B8G8R8A8 in and out.
 std::vector<uint32_t> UpscalePicture(const std::vector<uint32_t>& bgra, uint32_t width, uint32_t height, uint32_t scale);
 // one level as B8G8R8A8 rows (the DXT formats decoded too); false for formats it cannot
-bool DecodeBgra(const TextureDesc& d, uint32_t level, const uint8_t* guest, std::vector<uint32_t>& out);
+// a P8 texture's colours from `palette` (256 B8G8R8A8), without one false
+bool DecodeBgra(const TextureDesc& d, uint32_t level, const uint8_t* guest, std::vector<uint32_t>& out,
+                const uint32_t* palette = nullptr);
 void ClearReplacement(uint32_t data_va);
 // false (and dropped) when the guest bytes changed since it was set; a renderer checks once a frame
 bool ReplacementHolds(const Replacement& r);
