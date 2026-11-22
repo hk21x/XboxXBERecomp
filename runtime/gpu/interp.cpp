@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -34,6 +35,8 @@ constexpr double kSameMove = 0.1, kStill = 1e-4;              // of the camera's
 constexpr int kLeastVotes = 3;                                // draws agreeing on it
 constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
+
+bool RopeCheck();  // XBE_INTERP_ROPE_CHECK, below
 
 // GameInfo::interp_near_hold names a draw by its vertex program's code (its handle is an address the title allocates,
 // which moves between runs: Fight Night Round 2's rope program was B0003131 in one, B0103131 in another)
@@ -133,6 +136,7 @@ public:
     void Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) override {
         inner_->Clear(s, count, rects, flags, color, z, stencil);
         if (!On()) return;
+        if (count_ == 0) CheckRopeMemory();
         Rec& r = Next(Rec::Clear);
         Keep(r, s);
         r.a = count, r.b = flags, r.c = color, r.d = stencil, r.z = z;
@@ -143,6 +147,7 @@ public:
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
         inner_->Draw(s, prim, start, count, indices);
         if (!On()) return;
+        if (count_ == 0) CheckRopeMemory();
         Rec& r = Next(Rec::Draw);
         Keep(r, s);
         r.a = prim, r.b = start, r.c = count;
@@ -155,6 +160,11 @@ public:
             r.named = true;
             r.offscreen = !Presented(s.rt.data);
             r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices, r.box, r.has_box);
+            if (RopeCheck())
+                for (const Rec::Kept& kp : r.kept) {
+                    const uint32_t va = mem::VirtualFromPhysical(kernel::R32(s.streams[kp.stream].vb + 4));
+                    rope_now_.push_back({va, std::vector<uint8_t>(kept_bytes_.begin() + kp.offset, kept_bytes_.begin() + kp.offset + kp.bytes)});
+                }
         }
         for (uint32_t p : s.palettes) AddHeader(r, p);
         r.has_bytes = indices != nullptr;
@@ -334,6 +344,8 @@ private:
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> rope_now_, rope_before_;  // XBE_INTERP_ROPE_CHECK
+    void CheckRopeMemory();
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
     double replay_seconds_ = 0, typical_ = 0, frame_seconds_ = 0;
@@ -350,6 +362,33 @@ private:
     double sum_drawing_ = 0, sum_prepare_ = 0, sum_replay_ = 0, sum_planned_ = 0, sum_limit_ = 0;
     uint32_t replays_ = 0;
 };
+
+// XBE_INTERP_ROPE_CHECK=1 (a test): the named draws' vertex memory, as kept at their draws, compared at the next
+// step's first draw: rewritten by then, a renderer reading it late (the render thread a step behind) draws torn
+bool RopeCheck() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_INTERP_ROPE_CHECK");
+        return e && *e == '1';
+    }();
+    return on;
+}
+
+void Interpolating::CheckRopeMemory() {
+    if (!RopeCheck()) return;
+    uint32_t changed = 0, total = 0;
+    for (const auto& [va, bytes] : rope_before_) {
+        total++;
+        if (mem::IsCommitted(va) && std::memcmp(kernel::HostPtr(va), bytes.data(), bytes.size())) changed++;
+    }
+    static uint32_t steps = 0, changed_all = 0, total_all = 0;
+    steps++, changed_all += changed, total_all += total;
+    if (steps % 100 == 0) {
+        LOGR("gpu: in-between frames: rope check, %u of %u named streams rewritten by the next step's first draw (last 100 steps)",
+             changed_all, total_all);
+        changed_all = total_all = 0;
+    }
+    rope_before_.clear();
+}
 
 void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
     uint32_t vertices = start + count;
@@ -838,6 +877,11 @@ void Interpolating::Replay(float alpha) {
 
 void Interpolating::Present(const Surface& front) {
     NotePresented(front.data);
+    // the step's own draws, up to here: the renderer reads their vertices when it comes to them, and the title writes some
+    // in place for its next step without locking them (Fight Night Round 2's ring ropes: one stream in five of them
+    // rewritten before its next step's first draw, XBE_INTERP_ROPE_CHECK). Behind by the frames in between, the renderer
+    // drew ropes torn into the next step's, flickering; so the title goes on only once they have been read (below)
+    const uint32_t own = On() ? inner_->Fence() : 0;
     const auto t = Clock::now();
     const double step = std::chrono::duration<double>(t - presented_).count();
     presented_ = t;
@@ -964,12 +1008,15 @@ void Interpolating::Present(const Surface& front) {
         sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
         replays_ = 0;
     }
+    if (own) inner_->WaitFence(own);
     now_.swap(before_);
     before_count_ = count_;
     count_ = 0;
     kept_bytes_.clear();
     kept_count_ = 0;
     kept_full_ = false;
+    rope_before_.swap(rope_now_);
+    rope_now_.clear();
 }
 }  // namespace
 
