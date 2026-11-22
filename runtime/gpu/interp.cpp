@@ -72,6 +72,7 @@ struct Rec {
     int prev = -1;  // the same draw in the step before
     bool turning = false;  // only the matrix's place follows prev
     bool derived = false;  // first seen this step: where the camera's move says its matrix was
+    bool camera_only = false;  // GameInfo::interp_unblended: moves with the camera alone
     float was[4][4];
     int peer = -1;  // none found: a draw of this step sharing its matrix, whose blend it follows register by register
 };
@@ -212,6 +213,7 @@ private:
         r.prev = -1;
         r.turning = false;
         r.derived = false;
+        r.camera_only = false;
         r.peer = -1;
         r.headers.clear();
         r.kept.clear();
@@ -390,6 +392,7 @@ bool Interpolating::Match() {
         if (it == found.end() || it->second.empty()) continue;
         if (app::kGame.interp_unblended && app::kGame.interp_unblended(r.s->vs_handle, r.s->textures[0], r.c)) {
             it->second.pop_back();  // its self in the step before taken, so the next alike matches the next
+            r.camera_only = true;
             continue;
         }
         // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
@@ -564,6 +567,21 @@ bool Interpolating::Match() {
             }
             double d[4][4];
             if (!near || !move_of(*near, d) || !same_move(d, camera->d)) continue;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) {
+                    double t = 0;
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    r.was[a][b] = float(t);
+                }
+            r.derived = true;
+        }
+        // GameInfo::interp_unblended: its own matrix not blended, the camera's move alone (step before = move * now), so it
+        // stays put in the scene however its own matrix changed (Fight Night Round 2's ropes near the camera)
+        for (size_t i = 0; i < count_; i++) {
+            Rec& r = now_[i];
+            if (r.kind != Rec::Draw || !r.camera_only || flat(r.vsc)) continue;
+            const Move* camera = camera_of(r.s->rt.data);
+            if (!camera || camera->votes < kLeastVotes) continue;
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     double t = 0;
