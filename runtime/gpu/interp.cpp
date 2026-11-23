@@ -108,6 +108,7 @@ struct Rec {
     bool named = false;         // GameInfo::interp_near_hold names it: not matched, moved by the camera's move alone
     int camera_moved = -1;      // named: 1 when the camera's move was given to it
     uint32_t xf = 0;            // the first of the registers holding its transform (GameInfo::interp_named_transform)
+    bool snap = false;          // named, crossing the near plane: drawn whole at the nearer step, not blended
     bool xf_known = false;      // given by the title, or the program only transforms v0 by those four (gpu::MatrixProgram)
     bool offscreen = false;     // named: drawn into a target that is not a frame buffer
     float box[6] = {};          // named: v0's bounds (min x y z, max x y z), for the camera's earlier place
@@ -271,6 +272,7 @@ private:
         r.near_clipped = false;
         r.named = false;
         r.camera_moved = -1;
+        r.snap = false;
         r.xf = 0;
         r.xf_known = false;
         r.offscreen = false;
@@ -904,18 +906,23 @@ bool Interpolating::Match() {
     // thrown across the screen; its parts behind the camera are cut where the game never drew them. The step is shown as
     // the title drew it, with no frames in between
     for (size_t i = 0; app::kGame.interp_near_hold && i < count_; i++) {
-        const Rec& r = now_[i];
+        Rec& r = now_[i];
         if (r.kind != Rec::Draw) continue;
         if (!NearHoldNames(*r.s, r.c)) continue;
-        // given the camera's move: one of its vertices on one side of the near plane in this step and on the other in the
-        // step before (one behind the camera in both stays behind it in between, the blend being linear, and is clipped as
-        // the title's own is: a ring's ropes always run behind the camera somewhere); without it, at the near plane now
-        const char* why = r.camera_moved > 0 ? (Crosses(r) ? "crossing the near plane"
-                                                 : r.has_box && BoxJumped(r.box, r.was, r.vsc, r.xf) ? "moved too far by the camera's move"
-                                                                                                     : nullptr)
-                          : r.near_clipped               ? "at the near plane"
-                          : !r.offscreen                 ? "without the camera's move"
-                                                         : nullptr;
+        // given the camera's move, a section with a vertex on one side of the near plane in this step and on the other
+        // in the step before (a ring rope round the camera, most steps at the Staples Center) has no right in-between
+        // place: blended, it sweeps across the view. It alone is drawn whole at the nearer step (Replay) while the rest
+        // blends; holding the whole step for it dropped the picture to the title's own rate for seconds on end (Harry,
+        // 2026-11-23: 50 then 200 frames a second, back and forth). Without the camera's move the step is held
+        if (r.camera_moved > 0) {
+            r.snap = Crosses(r) || (r.has_box && BoxJumped(r.box, r.was, r.vsc, r.xf));
+            if (r.snap) {
+                static uint32_t snapped = 0;
+                if (snapped++ % 500 == 0) LOGR("gpu: in-between frames: a named draw crossing the near plane drawn at the nearer step (%u so far)", snapped);
+            }
+            continue;
+        }
+        const char* why = r.near_clipped ? "at the near plane" : !r.offscreen ? "without the camera's move" : nullptr;
         if (why) {
             static uint32_t held = 0;
             if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a named draw %s (%u so far)", why, held);
@@ -1047,6 +1054,11 @@ void Interpolating::Replay(float alpha) {
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
                         BlendRigid(p.vsc, r.vsc, alpha, d.vsc);
                     }
+                } else if (r.derived && r.snap && alpha != 1 && !at_step) {
+                    d.vsc = r.vsc;  // the nearer step, whole: the step before's place, the camera's move undone
+                    if (alpha < 0.5f)
+                        for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                            for (uint32_t c = 0; c < 4; c++) d.vsc[r.xf + k][c] = r.was[k][c];
                 } else if (r.derived && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
