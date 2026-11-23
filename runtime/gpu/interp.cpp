@@ -108,6 +108,7 @@ struct Rec {
     bool named = false;         // GameInfo::interp_near_hold names it: not matched, moved by the camera's move alone
     int camera_moved = -1;      // named: 1 when the camera's move was given to it
     uint32_t xf = 0;            // the first of the registers holding its transform (GameInfo::interp_named_transform)
+    bool xf_known = false;      // given by the title, or the program only transforms v0 by those four (gpu::MatrixProgram)
     bool offscreen = false;     // named: drawn into a target that is not a frame buffer
     float box[6] = {};          // named: v0's bounds (min x y z, max x y z), for the camera's earlier place
     bool has_box = false;
@@ -180,6 +181,8 @@ public:
             const int xf = NamedTransform(s);
             r.xf = xf >= 0 ? uint32_t(xf) : 0;
             r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices, r.box, r.has_box, xf);
+            if (s.vs && s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
+            r.xf_known = xf >= 0 || (s.vs && s.vs->matrix == 0);
             if (RopeCheck())
                 for (const Rec::Kept& kp : r.kept) {
                     const uint32_t va = mem::VirtualFromPhysical(kernel::R32(s.streams[kp.stream].vb + 4));
@@ -269,6 +272,7 @@ private:
         r.named = false;
         r.camera_moved = -1;
         r.xf = 0;
+        r.xf_known = false;
         r.offscreen = false;
         r.has_box = false;
         r.peer = -1;
@@ -371,9 +375,11 @@ private:
         return false;
     }
     // GameInfo::interp_near_hold's draw, given the camera's move: a kept vertex clipped by the near plane (w at most the
-    // margin, or z below 0) through one of the step before's matrix (was) and this step's, not both. True when it
-    // cannot be read: held as before
+    // margin, or z below 0) through one of the step before's matrix (was) and this step's, not both. False where its
+    // transform is not known (as the near plane test always was there: Fight Night Round 2's 653-index ropes, whose
+    // program does more than transform v0, were never held by it and showed whole), true where it cannot be read
     bool Crosses(const Rec& r) const {
+        if (!r.xf_known) return false;
         const State& s = *r.s;
         if (!(s.vs_handle & 1) || !s.vs) return true;
         const auto& in = s.vs->inputs[0];
