@@ -978,7 +978,7 @@ void Interpolating::Show(const Surface& front) {
         if (s.rt.data == front.data) {
             const int32_t rect[4] = {0, 0, 24, 24};
             const uint32_t color = marked_alpha_ < 0 ? 0xFFFF0000u : 0xFF000000u | (uint32_t(64 + marked_alpha_ * 191) << 8);
-            inner_->Clear(s, 1, reinterpret_cast<const uint8_t*>(rect), 1, color, 1, 0);
+            inner_->Clear(s, 1, reinterpret_cast<const uint8_t*>(rect), 0xF0, color, 1, 0);  // D3DCLEAR_TARGET (0xF0 on the console)
         }
     }
     marked_alpha_ = -1;
