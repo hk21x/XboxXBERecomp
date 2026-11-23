@@ -531,21 +531,31 @@ bool Interpolating::UploadKept() {
 // the shorter way round, normalised) with its position straight between; anything else stays blended as numbers
 namespace {
 using Regs = std::array<std::array<float, 4>, 192>;
-bool Rigid(const Regs& m, uint32_t k) {
+// a rotation times one scale (a boxer's size: Fight Night Round 2's skinned heads and limbs are 0.98), rows
+// perpendicular and of one length; that length in scale
+bool Rigid(const Regs& m, uint32_t k, float* scale = nullptr) {
     const auto& w = m[k + 3];
     if (w[0] != 0 || w[1] != 0 || w[2] != 0 || w[3] != 1) return false;
-    for (int i = 0; i < 3; i++)
-        for (int j = i; j < 3; j++) {
+    float len[3];
+    for (int i = 0; i < 3; i++) len[i] = std::sqrt(m[k + i][0] * m[k + i][0] + m[k + i][1] * m[k + i][1] + m[k + i][2] * m[k + i][2]);
+    const float l = (len[0] + len[1] + len[2]) / 3;
+    if (l < 0.25f || l > 4) return false;
+    for (int i = 0; i < 3; i++) {
+        if (std::fabs(len[i] / l - 1) > 0.02f) return false;
+        for (int j = i + 1; j < 3; j++) {
             float d = 0;
             for (int c = 0; c < 3; c++) d += m[k + i][c] * m[k + j][c];
-            if (std::fabs(d - (i == j ? 1.0f : 0.0f)) > 0.02f) return false;
+            if (std::fabs(d) / (l * l) > 0.02f) return false;
         }
+    }
+    if (scale) *scale = l;
     return true;
 }
-// rows of a rotation to (x y z w)
-void ToQuat(const Regs& m, uint32_t k, double q[4]) {
-    const double a = m[k][0], b = m[k][1], c = m[k][2], d = m[k + 1][0], e = m[k + 1][1], f = m[k + 1][2], g = m[k + 2][0],
-                 h = m[k + 2][1], i = m[k + 2][2];
+// rows of a rotation (divided by the group's scale) to (x y z w)
+void ToQuat(const Regs& m, uint32_t k, double q[4], float scale = 1) {
+    const double u = 1.0 / scale;
+    const double a = m[k][0] * u, b = m[k][1] * u, c = m[k][2] * u, d = m[k + 1][0] * u, e = m[k + 1][1] * u, f = m[k + 1][2] * u,
+                 g = m[k + 2][0] * u, h = m[k + 2][1] * u, i = m[k + 2][2] * u;
     const double t = a + e + i;
     if (t > 0) {
         const double s = std::sqrt(t + 1) * 2;
@@ -567,10 +577,11 @@ void ToQuat(const Regs& m, uint32_t k, double q[4]) {
 float MostTurn(const Regs& from, const Regs& to) {
     float most = 0;
     for (uint32_t k = 0; k + 3 < 192; k += 4) {
-        if (!Rigid(from, k) || !Rigid(to, k)) continue;
+        float sa, sb;
+        if (!Rigid(from, k, &sa) || !Rigid(to, k, &sb)) continue;
         double a[4], b[4];
-        ToQuat(from, k, a);
-        ToQuat(to, k, b);
+        ToQuat(from, k, a, sa);
+        ToQuat(to, k, b, sb);
         const double dot = std::min(1.0, std::fabs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]));
         most = std::max(most, float(2 * std::acos(dot) * 180 / 3.14159265358979));
     }
@@ -579,10 +590,12 @@ float MostTurn(const Regs& from, const Regs& to) {
 
 void BlendRigid(const Regs& from, const Regs& to, float alpha, Regs& out) {
     for (uint32_t k = 0; k + 3 < 192; k += 4) {
-        if (!Rigid(from, k) || !Rigid(to, k)) continue;
+        float sa, sb;
+        if (!Rigid(from, k, &sa) || !Rigid(to, k, &sb)) continue;
         double a[4], b[4], q[4];
-        ToQuat(from, k, a);
-        ToQuat(to, k, b);
+        ToQuat(from, k, a, sa);
+        ToQuat(to, k, b, sb);
+        const double scale = sa + (sb - sa) * alpha;
         const double dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
         const double sign = dot < 0 ? -1 : 1;
         double n = 0;
@@ -594,7 +607,7 @@ void BlendRigid(const Regs& from, const Regs& to, float alpha, Regs& out) {
                                 {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
                                 {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}};
         for (int i = 0; i < 3; i++)
-            for (int c = 0; c < 3; c++) out[k + i][c] = float(r[i][c]);  // the fourth column, the position, as blended
+            for (int c = 0; c < 3; c++) out[k + i][c] = float(r[i][c] * scale);  // the fourth column, the position, as blended
     }
 }
 
