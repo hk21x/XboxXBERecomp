@@ -437,6 +437,7 @@ private:
     std::unordered_map<uint64_t, std::vector<std::pair<std::array<std::array<float, 4>, 4>, int>>> bone_votes_;
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> seen_blend_;  // this replay's blended groups (a check)
     uint64_t skin_absent_unmatched_ = 0, skin_absent_matched_ = 0, skin_bad_ = 0, bad_keys_ = 0;
+    uint64_t shared_ = 0;  // skinned pieces sharing a like of the step before
     uint64_t skin_draws_ = 0, skin_from_table_ = 0, skin_missing_ = 0, skin_unmatched_ = 0, skin_seams_ = 0;
     size_t count_ = 0, before_count_ = 0;
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
@@ -718,6 +719,7 @@ bool Interpolating::Match() {
     found.reserve(before_count_);
     for (size_t i = before_count_; i-- > 0;)
         if (before_[i].kind == Rec::Draw) found[KeyOf(before_[i])].push_back(int(i));  // popped from the back: in order
+    const auto every = found;  // all of them, for a skinned piece whose own was taken
     uint32_t draws = 0, matched = 0, moved = 0, jumped = 0;
     for (size_t i = 0; i < count_; i++) {
         Rec& r = now_[i];
@@ -725,7 +727,27 @@ bool Interpolating::Match() {
         draws++;
         if (r.named) continue;  // GameInfo::interp_near_hold: the camera's move alone, below
         auto it = found.find(KeyOf(r));
-        if (it == found.end() || it->second.empty()) continue;
+        if (it == found.end() || it->second.empty()) {
+            // a skinned piece whose like in the step before another draw of it took (a pass drawn again): it shares the
+            // nearest of them; the same piece, its bones' step-before values are right (Fight Night Round 2: 50 to 120
+            // pieces a 10 s left unmatched, each drawn at its step while the body blended)
+            if (!Rigid(r.vsc, 0)) continue;
+            const auto all = every.find(KeyOf(r));
+            if (all == every.end()) continue;
+            int best = -1;
+            float best_distance = 1e30f;
+            for (int c : all->second) {
+                float distance = 0;
+                for (uint32_t k = 0; k < kMatrixRegisters; k++)
+                    for (uint32_t e = 0; e < 4; e++) distance += std::fabs(before_[size_t(c)].vsc[k][e] - r.vsc[k][e]);
+                if (distance < best_distance) best_distance = distance, best = c;
+            }
+            if (best < 0) continue;
+            r.prev = best;
+            matched++, shared_++;
+            if (std::memcmp(before_[size_t(best)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
+            continue;
+        }
         // of those alike (a mesh drawn in many places, a piece of the HUD), the one whose matrix is nearest
         auto& list = it->second;
         size_t best = list.size() - 1;
@@ -759,7 +781,8 @@ bool Interpolating::Match() {
         // round or the boxer leans (measured: 4 to 10). Taken for a different draw, a whole body was drawn at its step's
         // pose while its head and the scene blended: the body flickered against them. Its key (program, piece, texture)
         // already says which it is
-        if (Rigid(was.vsc, 0) && Rigid(r.vsc, 0)) turned = false, leapt = false;
+        // skinned now is enough: blended linearly, a first bone squashed for a step (a hit) blends as well as any
+        if (Rigid(r.vsc, 0) || Rigid(was.vsc, 0)) turned = false, leapt = false;
         matched++;
         if (leapt) {  // a different draw, alike in all but place
             jumped++;
@@ -1373,7 +1396,8 @@ void Interpolating::Present(const Surface& front) {
             LOGR("gpu: in-between frames: skinned groups not in the table: in unmatched draws %llu, in matched draws %llu; rows the "
                  "table corrected %llu (keys with two values %llu)", (unsigned long long)skin_absent_unmatched_, (unsigned long long)skin_absent_matched_,
                  (unsigned long long)skin_bad_, (unsigned long long)bad_keys_);
-            skin_absent_unmatched_ = skin_absent_matched_ = skin_bad_ = bad_keys_ = 0;
+            LOGR("gpu: in-between frames: skinned pieces sharing a like of the step before %llu", (unsigned long long)shared_);
+            skin_absent_unmatched_ = skin_absent_matched_ = skin_bad_ = bad_keys_ = shared_ = 0;
             skin_draws_ = skin_from_table_ = skin_missing_ = skin_unmatched_ = skin_seams_ = 0;
         }
         reported_ = t;
