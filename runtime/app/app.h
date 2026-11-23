@@ -273,6 +273,10 @@ struct GameInfo {
     // ...and one within this view depth of the camera counts as at the near plane: close by, a small error in the
     // camera's move read off the scene moves it far across the screen (XBE_INTERP_NEAR_W overrides)
     float interp_near_margin = 0;
+    // in-between frames: a step in which a bone (a rigid four register group of a matched draw) turns more than this
+    // many degrees is shown as drawn, with none in between; 0 never. Fight Night Round 2's boxers, a punch landing: a
+    // body's bones snap round in one step and its skin, weighted between them, tore in between (XBE_INTERP_BONE_HOLD)
+    float interp_bone_hold = 0;
     // ...and where those draws' programs keep their transform (projection, view and world: four registers, 0 the
     // first of c-96): by the program's code hash, -1 for the first four (or the four a program transforms v0 by alone).
     // Fight Night Round 2's Staples Center ropes are skinned: bones first, the transform at c84 (register 180)

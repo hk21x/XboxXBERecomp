@@ -905,12 +905,12 @@ bool Interpolating::Match() {
             return false;
         }
     }
-    // XBE_INTERP_BONE_HOLD=degrees: a step in which a matched draw's rigid group (a bone) turns further is shown as
-    // drawn; the turns of each step are counted for the log either way
+    // GameInfo::interp_bone_hold (XBE_INTERP_BONE_HOLD overrides): a step in which a matched draw's rigid group (a
+    // bone) turns further is shown as drawn; the turns of each step are counted for the log either way
     {
         static const float hold = [] {
             const char* e = std::getenv("XBE_INTERP_BONE_HOLD");
-            const float v = e && *e ? float(std::atof(e)) : 0;
+            const float v = e && *e ? float(std::atof(e)) : app::kGame.interp_bone_hold;
             if (v > 0) LOGR("gpu: in-between frames: a bone turning more than %.0f degrees in a step holds it", v);
             return v;
         }();
