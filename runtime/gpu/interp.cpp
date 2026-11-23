@@ -524,6 +524,66 @@ bool Interpolating::UploadKept() {
 }
 
 // 4 by 4, rows; false when it has no inverse
+// Skinned meshes keep a rigid matrix per bone: four registers from a multiple of four, a rotation in the first three
+// rows with the position in their fourth column, and (0 0 0 1) last. Blended a number at a time, a bone that turns far
+// in a step (Fight Night Round 2: a boxer's torso snapping round as a punch lands) shrinks and shears in between: the
+// body crumpled for a frame and flickered. Such a group, rigid in both steps, is blended as a rotation (quaternions,
+// the shorter way round, normalised) with its position straight between; anything else stays blended as numbers
+namespace {
+using Regs = std::array<std::array<float, 4>, 192>;
+bool Rigid(const Regs& m, uint32_t k) {
+    const auto& w = m[k + 3];
+    if (w[0] != 0 || w[1] != 0 || w[2] != 0 || w[3] != 1) return false;
+    for (int i = 0; i < 3; i++)
+        for (int j = i; j < 3; j++) {
+            float d = 0;
+            for (int c = 0; c < 3; c++) d += m[k + i][c] * m[k + j][c];
+            if (std::fabs(d - (i == j ? 1.0f : 0.0f)) > 0.02f) return false;
+        }
+    return true;
+}
+// rows of a rotation to (x y z w)
+void ToQuat(const Regs& m, uint32_t k, double q[4]) {
+    const double a = m[k][0], b = m[k][1], c = m[k][2], d = m[k + 1][0], e = m[k + 1][1], f = m[k + 1][2], g = m[k + 2][0],
+                 h = m[k + 2][1], i = m[k + 2][2];
+    const double t = a + e + i;
+    if (t > 0) {
+        const double s = std::sqrt(t + 1) * 2;
+        q[3] = s / 4, q[0] = (h - f) / s, q[1] = (c - g) / s, q[2] = (d - b) / s;
+    } else if (a > e && a > i) {
+        const double s = std::sqrt(1 + a - e - i) * 2;
+        q[3] = (h - f) / s, q[0] = s / 4, q[1] = (b + d) / s, q[2] = (c + g) / s;
+    } else if (e > i) {
+        const double s = std::sqrt(1 + e - a - i) * 2;
+        q[3] = (c - g) / s, q[0] = (b + d) / s, q[1] = s / 4, q[2] = (f + h) / s;
+    } else {
+        const double s = std::sqrt(1 + i - a - e) * 2;
+        q[3] = (d - b) / s, q[0] = (c + g) / s, q[1] = (f + h) / s, q[2] = s / 4;
+    }
+}
+}  // namespace
+
+void BlendRigid(const Regs& from, const Regs& to, float alpha, Regs& out) {
+    for (uint32_t k = 0; k + 3 < 192; k += 4) {
+        if (!Rigid(from, k) || !Rigid(to, k)) continue;
+        double a[4], b[4], q[4];
+        ToQuat(from, k, a);
+        ToQuat(to, k, b);
+        const double dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+        const double sign = dot < 0 ? -1 : 1;
+        double n = 0;
+        for (int c = 0; c < 4; c++) q[c] = a[c] + (sign * b[c] - a[c]) * alpha, n += q[c] * q[c];
+        if (n < 1e-12) continue;
+        n = 1 / std::sqrt(n);
+        const double x = q[0] * n, y = q[1] * n, z = q[2] * n, w = q[3] * n;
+        const double r[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
+                                {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
+                                {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}};
+        for (int i = 0; i < 3; i++)
+            for (int c = 0; c < 3; c++) out[k + i][c] = float(r[i][c]);  // the fourth column, the position, as blended
+    }
+}
+
 bool Invert(const double m[4][4], double out[4][4]) {
     double a[4][8];
     for (int i = 0; i < 4; i++)
@@ -926,6 +986,7 @@ void Interpolating::Replay(float alpha) {
                     } else {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
+                        BlendRigid(p.vsc, r.vsc, alpha, d.vsc);
                     }
                 } else if (r.derived && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;
