@@ -345,6 +345,8 @@ private:
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> rope_now_, rope_before_;  // XBE_INTERP_ROPE_CHECK
+    float marked_alpha_ = -1;  // XBE_INTERP_MARK: the replay just drawn, -1 the title's own picture
+    void Show(const Surface& front);
     void CheckRopeMemory();
     uint32_t region_ = 0, region_data_[2] = {}, region_headers_[2] = {}, region_fence_[2] = {};
     Clock::time_point presented_{}, first_{};
@@ -873,6 +875,26 @@ void Interpolating::Replay(float alpha) {
     region_fence_[region_] = inner_->Fence();
     replay_seconds_ = std::chrono::duration<double>(Clock::now() - began).count();
     sum_replay_ += replay_seconds_, replays_++;
+    marked_alpha_ = alpha;
+}
+
+// XBE_INTERP_MARK=1 (a test): a 24 pixel square at the frame's top left says what is shown, red the title's own
+// picture, green a frame in between (brighter further from the step before), for desktop grabs to be told apart
+void Interpolating::Show(const Surface& front) {
+    static const bool mark = [] {
+        const char* e = std::getenv("XBE_INTERP_MARK");
+        return e && *e == '1';
+    }();
+    if (mark && count_) {
+        const State& s = *now_[count_ - 1].s;
+        if (s.rt.data == front.data) {
+            const int32_t rect[4] = {0, 0, 24, 24};
+            const uint32_t color = marked_alpha_ < 0 ? 0xFFFF0000u : 0xFF000000u | (uint32_t(64 + marked_alpha_ * 191) << 8);
+            inner_->Clear(s, 1, reinterpret_cast<const uint8_t*>(rect), 1, color, 1, 0);
+        }
+    }
+    marked_alpha_ = -1;
+    inner_->Present(front);
 }
 
 void Interpolating::Present(const Surface& front) {
@@ -894,18 +916,18 @@ void Interpolating::Present(const Surface& front) {
         // as the paced frames go (below): from the step before towards this one, never this step's own picture last
         for (int i = 0; i < Test(); i++) {
             Replay(float(i) / float(Test()));
-            inner_->Present(front);
+            Show(front);
         }
     } else if (Test() && blend) {
         for (int i = 1; i < Test(); i++) {
             Replay(float(i) / float(Test()));
-            inner_->Present(front);
+            Show(front);
         }
         Replay(1);
-        inner_->Present(front);
+        Show(front);
     } else if (!blend || step > kLongestStep || step < kShortestStep) {
         overran_ = false;
-        inner_->Present(front);
+        Show(front);
     } else {
         if (!logged_) LOGR("gpu: in-between frames, a step of %.1f ms at up to %u a second", step * 1000, Rate());
         logged_ = true;
@@ -950,13 +972,13 @@ void Interpolating::Present(const Surface& front) {
         const double spacing = std::min(slot, usual / frames);
         if (t < rest_until_) {
             overran_ = false;
-            inner_->Present(front);
+            Show(front);
         } else if (replay_seconds_ > usual * kTooLong) {
             rest_until_ = t + std::chrono::seconds(2);
             replay_seconds_ = 0;
             LOGR("gpu: in-between frames: a replay takes too long, none for 2 s");
             overran_ = false;
-            inner_->Present(front);
+            Show(front);
         } else {
             // the title's choice for what the player aims: the step shown at once and carried on from there, up to a step too far when
             // the aim stops, with none of the delay
@@ -965,7 +987,7 @@ void Interpolating::Present(const Surface& front) {
             // full so does this. One begun that will not be done before the next step would make the title late
             if (ahead) {
                 const auto now = Clock::now();
-                inner_->Present(front);
+                Show(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() + replay_seconds_ - frame_seconds_) * 0.1;
             }
             overran_ = false;
@@ -975,7 +997,7 @@ void Interpolating::Present(const Surface& front) {
                 if ((i || ahead) && at + frame_seconds_ >= span + replay_seconds_) break;
                 const double along = std::min(at / usual, 1.0);
                 Replay(float(ahead ? 1.0 + along : along));
-                inner_->Present(front);
+                Show(front);
                 frame_seconds_ += (std::chrono::duration<double>(Clock::now() - now).count() - frame_seconds_) * 0.1;
                 if (i) shown_++;
                 // not past the time the title needs for its next step, and the next frame begun early enough to be done by it: the
