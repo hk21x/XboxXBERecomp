@@ -630,7 +630,11 @@ Group BlendGroup(const Group& from, const Group& to, float alpha) {
     for (int i = 0; i < 4; i++) a[size_t(i)] = from[size_t(i)], b[size_t(i)] = to[size_t(i)];
     for (int i = 0; i < 4; i++)
         for (int c = 0; c < 4; c++) o[size_t(i)][size_t(c)] = a[size_t(i)][size_t(c)] + (b[size_t(i)][size_t(c)] - a[size_t(i)][size_t(c)]) * alpha;
-    BlendRigidGroup(a, b, 0, alpha, o);  // a rigid group's rotation; otherwise the linear blend stands
+    // linear, not as a rotation: a piece's bones come multiplied by its own bind pose (the same bone has other numbers
+    // in each piece), and only a linear blend gives every piece the same in-between bone (lerp(A B, C B) = lerp(A, C) B).
+    // A rotation and a position blended apart did not, and pieces parted at the joints on a big turn (GPU-VM,
+    // 2026-11-23, a punch landing). A linear blend shrinks a turning bone a little (2% at 30 degrees): steps that turn
+    // further are held (GameInfo::interp_bone_hold)
     Group g;
     for (int i = 0; i < 4; i++) g[size_t(i)] = o[size_t(i)];
     return g;
@@ -1119,7 +1123,6 @@ void Interpolating::Replay(float alpha) {
                     } else {
                         for (uint32_t k = 0; k < kRegisters; k++)
                             for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = p.vsc[k][c] + (r.vsc[k][c] - p.vsc[k][c]) * alpha;
-                        BlendRigid(p.vsc, r.vsc, alpha, d.vsc);
                     }
                 } else if (r.derived && r.snap && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;  // the nearer step, whole: the step before's place, the camera's move undone
