@@ -689,6 +689,10 @@ bool Interpolating::Match() {
             // in the matrix's own units: the world's rows are near 1, a screen's HUD 0.003 a pixel, across the screen is a leap there
             if (std::fabs(x - y) > kLeap * size && std::fabs(x - y) > kFar * std::max(std::fabs(x), std::fabs(y))) leapt = true;
         }
+        // a rigid first matrix (a skinned mesh's first bone) turned far is blended as a rotation (BlendRigid): only a
+        // matrix that is not, with its view and projection in it, stays at its step's turn. Fight Night Round 2's
+        // boxers: some pieces of a body taken as turning and left at the step while the rest blended, torn apart
+        if (turned && Rigid(was.vsc, 0) && Rigid(r.vsc, 0)) turned = false;
         matched++;
         if (leapt) {  // a different draw, alike in all but place
             jumped++;
