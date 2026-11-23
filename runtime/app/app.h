@@ -297,6 +297,10 @@ struct GameInfo {
     // the title's 3D sound positions have +x to the left (DirectSound's is to the right): Project Gotham Racing's head relative
     // ones do, so a car passing on the right was heard on the left
     bool sound_x_left = false;
+    // the mixed output levelled (xdk/dsound.cpp): a compressor on its smoothed level, then a soft limit in place of the
+    // hard clip, for a title whose sounds run from quiet scenes to bursts that clip (50 Cent: Bulletproof's mission
+    // starts: its effects some 10 dB over its music and speech). XBE_LEVEL_OUTPUT=0 turns it off to compare
+    bool level_output = false;
     // a fixed-function stage with no texture reads (0,0,0,0) as its texture, as the hardware's stage with texture mode NONE
     // does, not white: True Crime clears its shadow map's border with untextured lines that select the texture
     bool unbound_texture_zero = false;

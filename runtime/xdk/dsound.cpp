@@ -431,6 +431,37 @@ bool DsoundLog() {
     return on;
 }
 
+// GameInfo::level_output: the mix levelled. A stereo linked compressor on the mix's RMS level (10 ms rising, 300 ms
+// falling): 3 to 1 above -20 dBFS, 7 dB of make-up gain after; then a soft limit (linear to 0.8, easing to 1.0) in
+// place of the hard clip. Measured on Bulletproof's route: quiet scenes -18 dB RMS rise to about -15, bursts of -7 dB
+// fall to about -12, nothing clips.
+void Level(float* out, uint32_t frames) {
+    static const bool off = [] {
+        const char* e = std::getenv("XBE_LEVEL_OUTPUT");
+        return e && *e == '0';
+    }();
+    if (off) return;
+    constexpr float kThreshold = 0.01f;          // -20 dBFS as a mean square (0.1 squared)
+    constexpr float kRatio = 3.0f, kMakeup = 2.239f;  // +7 dB
+    static const float rise = 1.0f - std::exp(-1.0f / (0.010f * audio::kRate));
+    static const float fall = 1.0f - std::exp(-1.0f / (0.300f * audio::kRate));
+    static float env = 0;  // the mean square, smoothed
+    for (uint32_t i = 0; i < frames; i++) {
+        float& l = out[i * 2];
+        float& r = out[i * 2 + 1];
+        const float ms = 0.5f * (l * l + r * r);
+        env += (ms - env) * (ms > env ? rise : fall);
+        float gain = kMakeup;
+        if (env > kThreshold) gain *= std::pow(env / kThreshold, 0.5f * (1.0f / kRatio - 1.0f));  // over in dB / ratio
+        for (float* x : {&l, &r}) {
+            float y = *x * gain;
+            const float a = std::fabs(y);
+            if (a > 0.8f) y = std::copysign(0.8f + 0.2f * std::tanh((a - 0.8f) / 0.2f), y);
+            *x = y;
+        }
+    }
+}
+
 void Render(float* out, uint32_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
@@ -555,6 +586,7 @@ void Render(float* out, uint32_t frames) {
             v.pos += step;
         }
     }
+    if (app::kGame.level_output) Level(out, frames);
     for (uint32_t i = 0; i < frames * 2; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
 }
 
