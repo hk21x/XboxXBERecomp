@@ -223,6 +223,10 @@ struct GameInfo {
     // ultrawide: an untextured fill ending on the frame's left or right edge (EoN's sniper scope) keeps that edge (gpu::
     // DrawSpan); off, it is squeezed with the rest of the 2D (PGR2's HUD backdrops behind the times and the speed)
     bool edge_fills = true;
+    // ultrawide: 2D reaching from one edge of the frame to its middle, half of a full screen overlay drawn in two (Fight
+    // Night Round 2's knockdown vignette), keeps its edge (gpu::DrawSpan); off, each half is squeezed with the rest of
+    // the 2D and the overlay covers only the middle
+    bool edge_halves = false;
     // the textures 2D draws use (pretransformed or as above; swizzled, up to 512 texels) are enlarged two or four times
     // with sharp edges (gpu::Sharpen2D, a background thread) and drawn so: text and HUD pictures stay crisp at high
     // resolutions (Settings::sharp_2d turns it off)

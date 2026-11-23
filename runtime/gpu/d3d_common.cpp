@@ -1155,6 +1155,12 @@ Span DrawSpan(const State& s, const Assembled& a, float width) {
     // radar's tiles) do not (GameInfo::edge_fills)
     if (app::kGame.edge_fills && !s.textures[0] && lo >= -kEdgeSlack && hi <= width + kEdgeSlack && (lo <= 0.5f || hi >= width - 0.5f))
         return kSpanFrame;
+    // half of a full screen overlay: from one edge to the middle (Fight Night Round 2's knockdown vignette, top and
+    // bottom bands each drawn as a left and a right half, -107 to 320 and 320 to 747 of an 854 wide layout its matrix
+    // maps onto the screen): keeps its edge, so the two halves span the frame (GameInfo::edge_halves)
+    if (app::kGame.edge_halves && lo >= -kEdgeSlack && hi <= width + kEdgeSlack &&
+        ((lo <= kEdgeNear && hi >= width * 0.5f - kEdgeNear) || (hi >= width - kEdgeNear && lo <= width * 0.5f + kEdgeNear)))
+        return kSpanFrame;
     // a textured bar the viewport's full height so (GameInfo::edge_bars)
     if (app::kGame.edge_bars && s.textures[0] && k < 0 && lo >= -kEdgeSlack && hi <= width + kEdgeSlack &&
         (lo <= 0.5f || hi >= width - 0.5f) && top <= s.viewport.y + 0.5f && bottom >= s.viewport.y + s.viewport.h - 0.5f)
