@@ -563,6 +563,20 @@ void ToQuat(const Regs& m, uint32_t k, double q[4]) {
 }
 }  // namespace
 
+// the largest turn of a rigid group between two steps, degrees (0 when none is rigid in both)
+float MostTurn(const Regs& from, const Regs& to) {
+    float most = 0;
+    for (uint32_t k = 0; k + 3 < 192; k += 4) {
+        if (!Rigid(from, k) || !Rigid(to, k)) continue;
+        double a[4], b[4];
+        ToQuat(from, k, a);
+        ToQuat(to, k, b);
+        const double dot = std::min(1.0, std::fabs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]));
+        most = std::max(most, float(2 * std::acos(dot) * 180 / 3.14159265358979));
+    }
+    return most;
+}
+
 void BlendRigid(const Regs& from, const Regs& to, float alpha, Regs& out) {
     for (uint32_t k = 0; k + 3 < 192; k += 4) {
         if (!Rigid(from, k) || !Rigid(to, k)) continue;
@@ -890,6 +904,30 @@ bool Interpolating::Match() {
             if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a named draw %s (%u so far)", why, held);
             return false;
         }
+    }
+    // XBE_INTERP_BONE_HOLD=degrees: a step in which a matched draw's rigid group (a bone) turns further is shown as
+    // drawn; the turns of each step are counted for the log either way
+    {
+        static const float hold = [] {
+            const char* e = std::getenv("XBE_INTERP_BONE_HOLD");
+            const float v = e && *e ? float(std::atof(e)) : 0;
+            if (v > 0) LOGR("gpu: in-between frames: a bone turning more than %.0f degrees in a step holds it", v);
+            return v;
+        }();
+        float most = 0;
+        for (size_t i = 0; i < count_; i++)
+            if (now_[i].kind == Rec::Draw && now_[i].prev >= 0) most = std::max(most, MostTurn(before_[size_t(now_[i].prev)].vsc, now_[i].vsc));
+        static uint32_t buckets[6] = {}, steps = 0;
+        constexpr float kEdges[5] = {10, 30, 60, 90, 135};
+        int b = 0;
+        while (b < 5 && most >= kEdges[b]) b++;
+        buckets[b]++;
+        if (++steps % 500 == 0) {
+            LOGR("gpu: in-between frames: most bone turn a step: <10 %u, 10-30 %u, 30-60 %u, 60-90 %u, 90-135 %u, 135+ %u",
+                 buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5]);
+            std::fill(std::begin(buckets), std::end(buckets), 0u);
+        }
+        if (hold > 0 && most > hold) return false;
     }
     if (!moved || !(matched - jumped)) return false;
     if (jumped * 2 > matched) return false;  // a camera cut
