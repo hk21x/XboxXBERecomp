@@ -269,6 +269,10 @@ struct GameInfo {
     // ...and one within this view depth of the camera counts as at the near plane: close by, a small error in the
     // camera's move read off the scene moves it far across the screen (XBE_INTERP_NEAR_W overrides)
     float interp_near_margin = 0;
+    // ...and where those draws' programs keep their transform (projection, view and world: four registers, 0 the
+    // first of c-96): by the program's code hash, -1 for the first four (or the four a program transforms v0 by alone).
+    // Fight Night Round 2's Staples Center ropes are skinned: bones first, the transform at c84 (register 180)
+    int (*interp_named_transform)(uint64_t program_hash) = nullptr;
     // ...and one whose box would move more than this across the screen (of its half width) between the two steps by
     // the camera's move read off the scene: that move is not right for it, and blended it sweeps across the view
     // (XBE_INTERP_NEAR_JUMP overrides; 0 off)

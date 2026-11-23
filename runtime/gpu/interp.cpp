@@ -53,13 +53,17 @@ float g_nearest_w = 1e30f;
 
 // GameInfo::interp_near_hold names a draw by its vertex program's code (its handle is an address the title allocates,
 // which moves between runs: Fight Night Round 2's rope program was B0003131 in one, B0103131 in another)
-bool NearHoldNames(const State& s, uint32_t count) {
-    uint64_t hash = 0;
-    if ((s.vs_handle & 1) && s.vs && !s.vs->program.empty()) {
-        if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
-        hash = s.vs->hash;
-    }
-    return app::kGame.interp_near_hold(hash, s.textures[0], count);
+uint64_t ProgramHash(const State& s) {
+    if (!(s.vs_handle & 1) || !s.vs || s.vs->program.empty()) return 0;
+    if (!s.vs->hash) s.vs->hash = Hash(s.vs->program.data(), s.vs->program.size() * 4) | 1;
+    return s.vs->hash;
+}
+bool NearHoldNames(const State& s, uint32_t count) { return app::kGame.interp_near_hold(ProgramHash(s), s.textures[0], count); }
+// GameInfo::interp_named_transform: the first of the four registers a named draw's program keeps its transform in;
+// -1 when the program only transforms v0 by four constants (gpu::MatrixProgram), else the first four
+int NamedTransform(const State& s) {
+    const int k = app::kGame.interp_named_transform ? app::kGame.interp_named_transform(ProgramHash(s)) : -1;
+    return k >= 0 && k + 3 < 192 ? k : -1;
 }
 constexpr int kFreshShare = 4;                                // matched draws of a program to each new one, for it to be scenery
 constexpr double kLate = 1.2;                                 // of the usual step
@@ -103,6 +107,7 @@ struct Rec {
     bool near_clipped = false;  // GameInfo::interp_near_hold: a vertex at or behind the near plane this step
     bool named = false;         // GameInfo::interp_near_hold names it: not matched, moved by the camera's move alone
     int camera_moved = -1;      // named: 1 when the camera's move was given to it
+    uint32_t xf = 0;            // the first of the registers holding its transform (GameInfo::interp_named_transform)
     bool offscreen = false;     // named: drawn into a target that is not a frame buffer
     float box[6] = {};          // named: v0's bounds (min x y z, max x y z), for the camera's earlier place
     bool has_box = false;
@@ -172,7 +177,9 @@ public:
         if (app::kGame.interp_near_hold && NearHoldNames(s, count)) {
             r.named = true;
             r.offscreen = !Presented(s.rt.data);
-            r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices, r.box, r.has_box);
+            const int xf = NamedTransform(s);
+            r.xf = xf >= 0 ? uint32_t(xf) : 0;
+            r.near_clipped = !r.offscreen && NearClipped(s, start, count, indices, r.box, r.has_box, xf);
             if (RopeCheck())
                 for (const Rec::Kept& kp : r.kept) {
                     const uint32_t va = mem::VirtualFromPhysical(kernel::R32(s.streams[kp.stream].vb + 4));
@@ -261,6 +268,7 @@ private:
         r.near_clipped = false;
         r.named = false;
         r.camera_moved = -1;
+        r.xf = 0;
         r.offscreen = false;
         r.has_box = false;
         r.peer = -1;
@@ -292,10 +300,11 @@ private:
     // a vertex of the draw at or behind the near plane (clip z < 0 or w <= 0) through the program's position matrix (one
     // that only transforms v0 by four constants: gpu::MatrixProgram); v0 as FLOAT3, FLOAT4 or SHORT3 (D3DVSDT 0x32, 0x42,
     // 0x35) in its stream. False when it cannot be read
-    static bool NearClipped(const State& s, uint32_t start, uint32_t count, const uint8_t* indices, float box[6], bool& has_box) {
+    static bool NearClipped(const State& s, uint32_t start, uint32_t count, const uint8_t* indices, float box[6], bool& has_box,
+                            int given = -1) {
         if (!(s.vs_handle & 1) || !s.vs) return false;
         if (s.vs->matrix == -2) s.vs->matrix = MatrixProgram(s.vs->program);
-        const int k = s.vs->matrix;
+        const int k = given >= 0 ? given : s.vs->matrix;
         const auto& in = s.vs->inputs[0];
         if (k < 0 || in.stream < 0 || (in.type != 0x32 && in.type != 0x42 && in.type != 0x35)) return false;
         const auto& st = s.streams[size_t(in.stream)];
@@ -340,7 +349,7 @@ private:
     }
     // GameInfo::interp_near_jump: a box corner (in front in both) whose place on screen moves more than this (of the
     // screen's half width) from the earlier matrix to this step's: the camera's move given it is not the camera's
-    static bool BoxJumped(const float box[6], const float was[4][4], const std::array<std::array<float, 4>, 192>& now) {
+    static bool BoxJumped(const float box[6], const float was[4][4], const std::array<std::array<float, 4>, 192>& vsc, uint32_t xf) {
         static const float most = [] {
             const char* e = std::getenv("XBE_INTERP_NEAR_JUMP");
             const float v = e && *e ? float(std::atof(e)) : app::kGame.interp_near_jump;
@@ -353,10 +362,46 @@ private:
             float a[4], b[4];
             for (int r = 0; r < 4; r++) {
                 a[r] = was[r][0] * p[0] + was[r][1] * p[1] + was[r][2] * p[2] + was[r][3];
-                b[r] = now[r][0] * p[0] + now[r][1] * p[1] + now[r][2] * p[2] + now[r][3];
+                const auto& n = vsc[xf + r];
+                b[r] = n[0] * p[0] + n[1] * p[1] + n[2] * p[2] + n[3];
             }
             if (a[3] <= 0 || b[3] <= 0) continue;
             if (std::fabs(a[0] / a[3] - b[0] / b[3]) > most || std::fabs(a[1] / a[3] - b[1] / b[3]) > most) return true;
+        }
+        return false;
+    }
+    // GameInfo::interp_near_hold's draw, given the camera's move: a kept vertex clipped by the near plane (w at most the
+    // margin, or z below 0) through one of the step before's matrix (was) and this step's, not both. True when it
+    // cannot be read: held as before
+    bool Crosses(const Rec& r) const {
+        const State& s = *r.s;
+        if (!(s.vs_handle & 1) || !s.vs) return true;
+        const auto& in = s.vs->inputs[0];
+        if (in.stream < 0 || (in.type != 0x32 && in.type != 0x42 && in.type != 0x35)) return true;
+        const uint32_t stride = s.streams[size_t(in.stream)].stride;
+        const Rec::Kept* kept = nullptr;
+        for (const Rec::Kept& k : r.kept)
+            if (k.stream == uint32_t(in.stream)) kept = &k;
+        if (!kept || !stride) return true;
+        const float m = NearMargin();
+        const auto& now = r.vsc;
+        for (uint32_t v = 0; v + 1 <= kept->bytes / stride; v++) {
+            const uint8_t* at = kept_bytes_.data() + kept->offset + size_t(v) * stride + in.offset;
+            if (size_t(at - kept_bytes_.data()) + 12 > kept_bytes_.size()) break;
+            float p[3];
+            if (in.type == 0x35) {
+                int16_t q[3];
+                std::memcpy(q, at, 6);
+                p[0] = q[0], p[1] = q[1], p[2] = q[2];
+            } else {
+                std::memcpy(p, at, 12);
+            }
+            const auto& z1 = now[r.xf + 2];
+            const auto& w1 = now[r.xf + 3];
+            const bool a = r.was[3][0] * p[0] + r.was[3][1] * p[1] + r.was[3][2] * p[2] + r.was[3][3] <= m ||
+                           r.was[2][0] * p[0] + r.was[2][1] * p[1] + r.was[2][2] * p[2] + r.was[2][3] < 0;
+            const bool b = w1[0] * p[0] + w1[1] * p[1] + w1[2] * p[2] + w1[3] <= m || z1[0] * p[0] + z1[1] * p[1] + z1[2] * p[2] + z1[3] < 0;
+            if (a != b) return true;
         }
         return false;
     }
@@ -737,13 +782,15 @@ bool Interpolating::Match() {
         // camera's move (step before = move * now), so a rope moves as one with the scene around it
         for (size_t i = 0; i < count_; i++) {
             Rec& r = now_[i];
-            if (r.kind != Rec::Draw || !r.named || r.offscreen || flat(r.vsc)) continue;
+            if (r.kind != Rec::Draw || !r.named || r.offscreen) continue;
+            const auto& w = r.vsc[r.xf + 3];  // a screen's 2D has no perspective row
+            if (std::fabs(w[0]) + std::fabs(w[1]) + std::fabs(w[2]) < 1e-6f) continue;
             const Move* camera = camera_of(r.s->rt.data);
             if (!camera || camera->votes < kLeastVotes) continue;
             for (int a = 0; a < 4; a++)
                 for (int b = 0; b < 4; b++) {
                     double t = 0;
-                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[size_t(c)][size_t(b)];
+                    for (int c = 0; c < 4; c++) t += camera->d[a][c] * r.vsc[r.xf + size_t(c)][size_t(b)];
                     r.was[a][b] = float(t);
                 }
             r.derived = true;
@@ -759,12 +806,15 @@ bool Interpolating::Match() {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw) continue;
         if (!NearHoldNames(*r.s, r.c)) continue;
-        // one of them at the near plane, or on screen with no camera move to give it
-        const char* why = r.near_clipped                                          ? "at the near plane"
-                          : r.camera_moved < 0 && !r.offscreen                      ? "without the camera's move"
-                          : r.camera_moved > 0 && r.has_box && BoxClipped(r.box, r.was) ? "at the camera's earlier near plane"
-                          : r.camera_moved > 0 && r.has_box && BoxJumped(r.box, r.was, r.vsc) ? "moved too far by the camera's move"
-                                                                                     : nullptr;
+        // given the camera's move: one of its vertices on one side of the near plane in this step and on the other in the
+        // step before (one behind the camera in both stays behind it in between, the blend being linear, and is clipped as
+        // the title's own is: a ring's ropes always run behind the camera somewhere); without it, at the near plane now
+        const char* why = r.camera_moved > 0 ? (Crosses(r) ? "crossing the near plane"
+                                                 : r.has_box && BoxJumped(r.box, r.was, r.vsc, r.xf) ? "moved too far by the camera's move"
+                                                                                                     : nullptr)
+                          : r.near_clipped               ? "at the near plane"
+                          : !r.offscreen                 ? "without the camera's move"
+                                                         : nullptr;
         if (why) {
             static uint32_t held = 0;
             if (held++ % 50 == 0) LOGR("gpu: in-between frames: a step held, a named draw %s (%u so far)", why, held);
@@ -874,7 +924,8 @@ void Interpolating::Replay(float alpha) {
                 } else if (r.derived && alpha != 1 && !at_step) {
                     d.vsc = r.vsc;
                     for (uint32_t k = 0; k < kMatrixRegisters; k++)
-                        for (uint32_t c = 0; c < 4; c++) d.vsc[k][c] = r.was[k][c] + (r.vsc[k][c] - r.was[k][c]) * alpha;
+                        for (uint32_t c = 0; c < 4; c++)
+                            d.vsc[r.xf + k][c] = r.was[k][c] + (r.vsc[r.xf + k][c] - r.was[k][c]) * alpha;
                 } else if (r.peer >= 0 && alpha != 1 && !at_step) {
                     const Rec& q = now_[size_t(r.peer)];
                     const Rec& p = before_[size_t(q.prev)];
