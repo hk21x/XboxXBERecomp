@@ -338,6 +338,28 @@ private:
         has_box = true;
         return clipped;
     }
+    // GameInfo::interp_near_jump: a box corner (in front in both) whose place on screen moves more than this (of the
+    // screen's half width) from the earlier matrix to this step's: the camera's move given it is not the camera's
+    static bool BoxJumped(const float box[6], const float was[4][4], const std::array<std::array<float, 4>, 192>& now) {
+        static const float most = [] {
+            const char* e = std::getenv("XBE_INTERP_NEAR_JUMP");
+            const float v = e && *e ? float(std::atof(e)) : app::kGame.interp_near_jump;
+            if (v > 0) LOGR("gpu: in-between frames: a named draw moving more than %.2f of the screen in a step holds it", v);
+            return v;
+        }();
+        if (most <= 0) return false;
+        for (int i = 0; i < 8; i++) {
+            const float p[4] = {box[(i & 1) ? 3 : 0], box[(i & 2) ? 4 : 1], box[(i & 4) ? 5 : 2], 1};
+            float a[4], b[4];
+            for (int r = 0; r < 4; r++) {
+                a[r] = was[r][0] * p[0] + was[r][1] * p[1] + was[r][2] * p[2] + was[r][3];
+                b[r] = now[r][0] * p[0] + now[r][1] * p[1] + now[r][2] * p[2] + now[r][3];
+            }
+            if (a[3] <= 0 || b[3] <= 0) continue;
+            if (std::fabs(a[0] / a[3] - b[0] / b[3]) > most || std::fabs(a[1] / a[3] - b[1] / b[3]) > most) return true;
+        }
+        return false;
+    }
     // a box's corners through a matrix's z and w rows (rows 2 and 3): any at or behind the near plane
     static bool BoxClipped(const float box[6], const float m[4][4]) {
         for (int i = 0; i < 8; i++) {
@@ -741,6 +763,7 @@ bool Interpolating::Match() {
         const char* why = r.near_clipped                                          ? "at the near plane"
                           : r.camera_moved < 0 && !r.offscreen                      ? "without the camera's move"
                           : r.camera_moved > 0 && r.has_box && BoxClipped(r.box, r.was) ? "at the camera's earlier near plane"
+                          : r.camera_moved > 0 && r.has_box && BoxJumped(r.box, r.was, r.vsc) ? "moved too far by the camera's move"
                                                                                      : nullptr;
         if (why) {
             static uint32_t held = 0;

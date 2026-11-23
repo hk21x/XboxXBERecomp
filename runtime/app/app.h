@@ -269,6 +269,10 @@ struct GameInfo {
     // ...and one within this view depth of the camera counts as at the near plane: close by, a small error in the
     // camera's move read off the scene moves it far across the screen (XBE_INTERP_NEAR_W overrides)
     float interp_near_margin = 0;
+    // ...and one whose box would move more than this across the screen (of its half width) between the two steps by
+    // the camera's move read off the scene: that move is not right for it, and blended it sweeps across the view
+    // (XBE_INTERP_NEAR_JUMP overrides; 0 off)
+    float interp_near_jump = 0;
     // a vertex stream over a target the GPU drew takes its newest finished copy (a frame or so old) instead of waiting for the GPU
     // (EoN's driving draws a 128x128 target each frame and draws vertices from it: read back at once, the title waited about 7 ms
     // a frame behind the in-between frames, and lost the second). Off, it is read back at once (NightFire's scope)
