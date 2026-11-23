@@ -706,7 +706,11 @@ bool Interpolating::Match() {
         // a rigid first matrix (a skinned mesh's first bone) turned far is blended as a rotation (BlendRigid): only a
         // matrix that is not, with its view and projection in it, stays at its step's turn. Fight Night Round 2's
         // boxers: some pieces of a body taken as turning and left at the step while the rest blended, torn apart
-        if (turned && Rigid(was.vsc, 0) && Rigid(r.vsc, 0)) turned = false;
+        // and moved far: a skinned body's first bone carries it, steadily several units a step as the camera swings
+        // round or the boxer leans (measured: 4 to 10). Taken for a different draw, a whole body was drawn at its step's
+        // pose while its head and the scene blended: the body flickered against them. Its key (program, piece, texture)
+        // already says which it is
+        if (Rigid(was.vsc, 0) && Rigid(r.vsc, 0)) turned = false, leapt = false;
         matched++;
         if (leapt) {  // a different draw, alike in all but place
             jumped++;
