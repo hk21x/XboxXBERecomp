@@ -568,9 +568,10 @@ bool Builder::BuildPackage(std::string& error) {
                    id = sha;
                    fs::create_directories(downloads, ec);
                    zip = downloads / package;
-                   // already unpacked: a build stopped after this point carries on
+                   // already unpacked in play\.next: a build stopped after this point carries on. Not play's own stamp:
+                   // the zip is removed once unpacked, so building the installed version again downloads it again
                    std::string have;
-                   if (ReadAll(PlayDir() / "package.stamp", have) && have == id) return true;
+                   if (ReadAll(PlayDir() / ".next" / "package.stamp", have) && have == id) return true;
                    Say("Downloading the game's package", {}, 0);
                    return Download(http_, url, zip, sha, size, [&](uint64_t done, uint64_t) {
                            Say("Downloading the game's package", Megabytes(done) + " of " + Megabytes(size), size ? double(done) / double(size) : -1);
