@@ -38,6 +38,19 @@ constexpr uint32_t kLeastVertices = 24;
 
 bool RopeCheck();  // XBE_INTERP_ROPE_CHECK, below
 
+// GameInfo::interp_near_margin: a named draw this close to the camera (its w, the view depth) counts as at the near
+// plane; XBE_INTERP_NEAR_W overrides. The nearest named vertex of each step is kept for the log
+float NearMargin() {
+    static const float m = [] {
+        const char* e = std::getenv("XBE_INTERP_NEAR_W");
+        const float v = e && *e ? float(std::atof(e)) : app::kGame.interp_near_margin;
+        if (v > 0) LOGR("gpu: in-between frames: a named draw within %.1f of the camera holds its step", v);
+        return v;
+    }();
+    return m;
+}
+float g_nearest_w = 1e30f;
+
 // GameInfo::interp_near_hold names a draw by its vertex program's code (its handle is an address the title allocates,
 // which moves between runs: Fight Night Round 2's rope program was B0003131 in one, B0103131 in another)
 bool NearHoldNames(const State& s, uint32_t count) {
@@ -318,8 +331,9 @@ private:
                 std::memcpy(p, at, 12);
             }
             for (int c = 0; c < 3; c++) box[c] = std::min(box[c], p[c]), box[3 + c] = std::max(box[3 + c], p[c]);
-            if (w[0] * p[0] + w[1] * p[1] + w[2] * p[2] + w[3] <= 0 || z[0] * p[0] + z[1] * p[1] + z[2] * p[2] + z[3] < 0)
-                clipped = true;
+            const float vw = w[0] * p[0] + w[1] * p[1] + w[2] * p[2] + w[3];
+            g_nearest_w = std::min(g_nearest_w, vw);
+            if (vw <= NearMargin() || z[0] * p[0] + z[1] * p[1] + z[2] * p[2] + z[3] < 0) clipped = true;
         }
         has_box = true;
         return clipped;
@@ -330,7 +344,7 @@ private:
             const float p[3] = {box[(i & 1) ? 3 : 0], box[(i & 2) ? 4 : 1], box[(i & 4) ? 5 : 2]};
             const float z = m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3];
             const float w = m[3][0] * p[0] + m[3][1] * p[1] + m[3][2] * p[2] + m[3][3];
-            if (w <= 0 || z < 0) return true;
+            if (w <= NearMargin() || z < 0) return true;
         }
         return false;
     }
@@ -1031,6 +1045,26 @@ void Interpolating::Present(const Surface& front) {
         replays_ = 0;
     }
     if (own) inner_->WaitFence(own);
+    {
+        // the nearest named vertex's view depth each step, over 10 s (for GameInfo::interp_near_margin)
+        static uint32_t buckets[8] = {}, steps = 0;
+        static Clock::time_point since = Clock::now();
+        constexpr float kEdges[7] = {0, 25, 50, 100, 200, 400, 800};
+        if (g_nearest_w < 1e29f) {
+            int b = 0;
+            while (b < 7 && g_nearest_w >= kEdges[b]) b++;
+            buckets[b]++, steps++;
+        }
+        g_nearest_w = 1e30f;
+        if (Clock::now() - since > std::chrono::seconds(10) && steps) {
+            LOGR("gpu: in-between frames: nearest named w per step: <0 %u, 0-25 %u, 25-50 %u, 50-100 %u, 100-200 %u, 200-400 %u, "
+                 "400-800 %u, 800+ %u",
+                 buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5], buckets[6], buckets[7]);
+            std::fill(std::begin(buckets), std::end(buckets), 0u);
+            steps = 0;
+            since = Clock::now();
+        }
+    }
     now_.swap(before_);
     before_count_ = count_;
     count_ = 0;
