@@ -429,6 +429,14 @@ private:
 
     std::unique_ptr<Backend> inner_;
     std::vector<Rec> now_, before_;
+    // skinned draws' four-register groups this step (bones, the camera), by their value now: their value the step
+    // before, read off the matched draws; a key seen with two different values is left out (bone_bad_)
+    std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_prev_;
+    std::unordered_map<uint64_t, bool> bone_bad_;
+    std::unordered_map<uint64_t, std::vector<std::pair<std::array<std::array<float, 4>, 4>, int>>> bone_votes_;
+    std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> seen_blend_;  // this replay's blended groups (a check)
+    uint64_t skin_absent_unmatched_ = 0, skin_absent_matched_ = 0, skin_bad_ = 0, bad_keys_ = 0;
+    uint64_t skin_draws_ = 0, skin_from_table_ = 0, skin_missing_ = 0, skin_unmatched_ = 0, skin_seams_ = 0;
     size_t count_ = 0, before_count_ = 0;
     std::vector<uint8_t> kept_bytes_;           // this step's kept vertices
     uint32_t kept_count_ = 0;
@@ -590,27 +598,48 @@ float MostTurn(const Regs& from, const Regs& to) {
     return most;
 }
 
+void BlendRigidGroup(const Regs& from, const Regs& to, uint32_t k, float alpha, Regs& out) {
+    float sa, sb;
+    if (!Rigid(from, k, &sa) || !Rigid(to, k, &sb)) return;
+    double a[4], b[4], q[4];
+    ToQuat(from, k, a, sa);
+    ToQuat(to, k, b, sb);
+    const double scale = sa + (sb - sa) * alpha;
+    const double dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    const double sign = dot < 0 ? -1 : 1;
+    double n = 0;
+    for (int c = 0; c < 4; c++) q[c] = a[c] + (sign * b[c] - a[c]) * alpha, n += q[c] * q[c];
+    if (n < 1e-12) return;
+    n = 1 / std::sqrt(n);
+    const double x = q[0] * n, y = q[1] * n, z = q[2] * n, w = q[3] * n;
+    const double r[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
+                            {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
+                            {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}};
+    for (int i = 0; i < 3; i++)
+        for (int c = 0; c < 3; c++) out[k + i][c] = float(r[i][c] * scale);  // the fourth column, the position, as blended
+}
 void BlendRigid(const Regs& from, const Regs& to, float alpha, Regs& out) {
-    for (uint32_t k = 0; k + 3 < 192; k += 4) {
-        float sa, sb;
-        if (!Rigid(from, k, &sa) || !Rigid(to, k, &sb)) continue;
-        double a[4], b[4], q[4];
-        ToQuat(from, k, a, sa);
-        ToQuat(to, k, b, sb);
-        const double scale = sa + (sb - sa) * alpha;
-        const double dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-        const double sign = dot < 0 ? -1 : 1;
-        double n = 0;
-        for (int c = 0; c < 4; c++) q[c] = a[c] + (sign * b[c] - a[c]) * alpha, n += q[c] * q[c];
-        if (n < 1e-12) continue;
-        n = 1 / std::sqrt(n);
-        const double x = q[0] * n, y = q[1] * n, z = q[2] * n, w = q[3] * n;
-        const double r[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
-                                {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
-                                {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}};
-        for (int i = 0; i < 3; i++)
-            for (int c = 0; c < 3; c++) out[k + i][c] = float(r[i][c] * scale);  // the fourth column, the position, as blended
-    }
+    for (uint32_t k = 0; k + 3 < 192; k += 4) BlendRigidGroup(from, to, k, alpha, out);
+}
+
+// one four-register group of a skinned draw, blended from its step-before value: linearly, then, where it is a rotation
+// times a scale in both, its first three rows as a rotation (quaternion) and a scale (as BlendRigid does)
+using Group = std::array<std::array<float, 4>, 4>;
+Group BlendGroup(const Group& from, const Group& to, float alpha) {
+    Regs a{}, b{}, o{};
+    for (int i = 0; i < 4; i++) a[size_t(i)] = from[size_t(i)], b[size_t(i)] = to[size_t(i)];
+    for (int i = 0; i < 4; i++)
+        for (int c = 0; c < 4; c++) o[size_t(i)][size_t(c)] = a[size_t(i)][size_t(c)] + (b[size_t(i)][size_t(c)] - a[size_t(i)][size_t(c)]) * alpha;
+    BlendRigidGroup(a, b, 0, alpha, o);  // a rigid group's rotation; otherwise the linear blend stands
+    Group g;
+    for (int i = 0; i < 4; i++) g[size_t(i)] = o[size_t(i)];
+    return g;
+}
+uint64_t GroupKey(const std::array<std::array<float, 4>, 192>& v, uint32_t k) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    const auto* b = reinterpret_cast<const uint8_t*>(&v[k]);
+    for (size_t i = 0; i < sizeof(v[0]) * 4; i++) h = (h ^ b[i]) * 0x100000001B3ull;
+    return h;
 }
 
 bool Invert(const double m[4][4], double out[4][4]) {
@@ -735,6 +764,43 @@ bool Interpolating::Match() {
         r.prev = candidate;
         if (std::memcmp(before_[size_t(r.prev)].vsc.data(), r.vsc.data(), sizeof r.vsc)) moved++;
     }
+    // GameInfo-free: every skinned draw (its first group a rotation and scale) shares its bones with the other pieces
+    // of its body, each piece matched on its own. One piece blended and its neighbour not, or matched elsewhere, put a
+    // bone two places at once and the skin tore at the seam (Fight Night Round 2's boxers, again and again). So each
+    // group's step-before value is taken from the matched draws, by its value now, and every skinned draw takes its
+    // groups from that table in Replay: a bone shared by pieces is blended once, the same in all of them
+    bone_prev_.clear();
+    bone_bad_.clear();
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind != Rec::Draw || r.prev < 0 || r.named) continue;
+        const Rec& p = before_[size_t(r.prev)];
+        if (!Rigid(r.vsc, 0) || !Rigid(p.vsc, 0)) continue;
+        for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
+            const uint64_t key = GroupKey(r.vsc, k);
+            std::array<std::array<float, 4>, 4> was;
+            for (uint32_t j = 0; j < 4; j++) was[j] = p.vsc[k + j];
+            auto& c = bone_votes_[key];
+            bool found = false;
+            for (auto& [v, n] : c)
+                if (!std::memcmp(v.data(), was.data(), sizeof was)) n++, found = true;
+            if (!found) c.push_back({was, 1});
+        }
+    }
+    // a bone given two step-before values (a piece matched to the wrong piece of the step before) takes the one most of
+    // its pieces agree on; a tie is left out
+    for (auto& [key, c] : bone_votes_) {
+        size_t best = 0;
+        bool tie = false;
+        for (size_t i = 1; i < c.size(); i++) {
+            if (c[i].second > c[best].second) best = i, tie = false;
+            else if (c[i].second == c[best].second) tie = true;
+        }
+        if (c.size() > 1) bad_keys_++;
+        if (tie) bone_bad_[key] = true;
+        else bone_prev_.emplace(key, c[best].first);
+    }
+    bone_votes_.clear();
     // the world's pieces come and go between steps. One left at the step's own place, among others blended, is that much out of
     // line with them, its texture seen sliding: it goes with any of the same matrix that has a match
     std::unordered_map<uint64_t, int> peers;
@@ -960,6 +1026,7 @@ bool Interpolating::Match() {
 
 void Interpolating::Replay(float alpha) {
     const auto began = Clock::now();
+    seen_blend_.clear();
     // diagnosis: a file named interp_table in the working folder (the run folder headless) logs the next 8 replays' draws and how
     // each was blended, to pair with the reference renderer's probes (PROBES, which name each writing draw's program, count and
     // textures) on a pixel that flickers
@@ -1086,6 +1153,38 @@ void Interpolating::Replay(float alpha) {
                         auto& m = d.transforms[kFixed[i]];
                         fixed_was[i] = m;
                         for (uint32_t e = 0; e < 16; e++) m[e] = p.transforms[kFixed[i]][e] + (m[e] - p.transforms[kFixed[i]][e]) * alpha;
+                    }
+                }
+                // skinned: every group from the step's table (the same blend wherever a bone is shared)
+                if (alpha != 1 && !at_step && !r.named && !bone_prev_.empty() && Rigid(r.vsc, 0)) {
+                    uint32_t from_table = 0, missing = 0;
+                    for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
+                        const uint64_t key = GroupKey(r.vsc, k);
+                        const auto it = bone_prev_.find(key);
+                        if (it == bone_prev_.end() || bone_bad_.count(key)) {
+                            missing++;
+                            (it == bone_prev_.end() ? (r.prev < 0 ? skin_absent_unmatched_ : skin_absent_matched_) : skin_bad_)++;
+                            // no agreed step-before value: the step's own, in every piece alike (no seam)
+                            for (uint32_t j = 0; j < 4; j++) d.vsc[k + j] = r.vsc[k + j];
+                            continue;
+                        }
+                        Group now;
+                        for (uint32_t j = 0; j < 4; j++) now[j] = r.vsc[k + j];
+                        const Group g = BlendGroup(it->second, now, alpha);
+                        for (uint32_t j = 0; j < 4; j++) d.vsc[k + j] = g[j];
+                        from_table++;
+                    }
+                    skin_draws_++, skin_from_table_ += from_table, skin_missing_ += missing;
+                    if (r.prev < 0) skin_unmatched_++;
+                }
+                // a check: a group with one value now blended to two different values in this frame is a seam
+                if (alpha != 1 && !r.named && Rigid(r.vsc, 0)) {
+                    for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
+                        const uint64_t key = GroupKey(r.vsc, k);
+                        Group g;
+                        for (uint32_t j = 0; j < 4; j++) g[j] = d.vsc[k + j];
+                        auto [it, fresh] = seen_blend_.try_emplace(key, g);
+                        if (!fresh && std::memcmp(it->second.data(), g.data(), sizeof g)) skin_seams_++;
                     }
                 }
                 UseAsDrawn(r, d);
@@ -1249,6 +1348,14 @@ void Interpolating::Present(const Surface& front) {
                  sum_drawing_ / b * 1000, sum_prepare_ / std::max(1u, steps_) * 1000, sum_replay_ / std::max(1u, replays_) * 1000,
                  replays_, sum_planned_ / b, sum_limit_ / b);
             LOGR("gpu: in-between frames: late steps: %u after our frames ran over, %u the title's own", late_ours_, late_title_);
+            LOGR("gpu: in-between frames: skinned draws %llu (unmatched %llu), groups from the table %llu, not in it %llu, "
+                 "seams (one bone blended two ways) %llu", (unsigned long long)skin_draws_, (unsigned long long)skin_unmatched_,
+                 (unsigned long long)skin_from_table_, (unsigned long long)skin_missing_, (unsigned long long)skin_seams_);
+            LOGR("gpu: in-between frames: groups not in the table: in unmatched draws %llu, in matched draws %llu, two values %llu "
+                 "(keys with two values %llu)", (unsigned long long)skin_absent_unmatched_, (unsigned long long)skin_absent_matched_,
+                 (unsigned long long)skin_bad_, (unsigned long long)bad_keys_);
+            skin_absent_unmatched_ = skin_absent_matched_ = skin_bad_ = bad_keys_ = 0;
+            skin_draws_ = skin_from_table_ = skin_missing_ = skin_unmatched_ = skin_seams_ = 0;
         }
         reported_ = t;
         shown_ = steps_ = blended_steps_ = 0;
