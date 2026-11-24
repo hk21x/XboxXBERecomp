@@ -1193,7 +1193,13 @@ void Interpolating::Replay(float alpha) {
                 // every group shared through the step's table: a value now that the matched draws agree came from one value
                 // before is blended from that, in every draw that has it (a body's pieces, its passes, the camera); others keep
                 // their own blend, or, unmatched, the step's value
-                if (alpha != 1 && !at_step && !r.named && !r.snap && !bone_prev_.empty()) {
+                static const bool no_table = [] {
+                    const char* e = std::getenv("XBE_INTERP_NO_TABLE");
+                    const bool v = e && *e == '1';
+                    if (v) LOGR("gpu: in-between frames: XBE_INTERP_NO_TABLE=1, each draw blends its own groups");
+                    return v;
+                }();
+                if (!no_table && alpha != 1 && !at_step && !r.named && !r.snap && !bone_prev_.empty()) {
                     const bool skinned = Rigid(r.vsc, 0);
                     uint32_t from_table = 0, missing = 0, changed = 0;
                     for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
