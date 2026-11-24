@@ -491,6 +491,10 @@ private:
     // skinned draws' four-register groups this step (bones, the camera), by their value now: their value the step
     // before, read off the matched draws; a key seen with two different values is left out (bone_bad_)
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_prev_;
+    // vertex programs that drew a skinned draw (a rigid first bone) this step: a draw by one of them with its first bone
+    // squashed (a piece of cloth, a hit) is skinned too (SkinnedDraw)
+    std::vector<uint32_t> skinned_programs_;
+    bool SkinnedDraw(const Rec& r) const;
     std::unordered_map<uint64_t, bool> bone_bad_;
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_now_;
     float table_turn_ = 0;
@@ -649,6 +653,14 @@ bool Rigid(const Regs& m, uint32_t k, float* scale = nullptr) {
     if (scale) *scale = l;
     return true;
 }
+}  // namespace
+bool Interpolating::SkinnedDraw(const Rec& r) const {
+    if (Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0))) return true;
+    const auto& w = r.vsc[3];
+    if (!r.s || !(r.s->vs_handle & 1) || w[0] != 0 || w[1] != 0 || w[2] != 0 || w[3] != 1) return false;
+    return std::find(skinned_programs_.begin(), skinned_programs_.end(), r.s->vs_handle) != skinned_programs_.end();
+}
+namespace {
 // rows of a rotation (divided by the group's scale) to (x y z w)
 void ToQuat(const Regs& m, uint32_t k, double q[4], float scale = 1) {
     const double u = 1.0 / scale;
@@ -822,6 +834,13 @@ bool Interpolating::Match() {
     for (size_t i = before_count_; i-- > 0;)
         if (before_[i].kind == Rec::Draw) found[KeyOf(before_[i])].push_back(int(i));  // popped from the back: in order
     const auto every = found;  // all of them, for a skinned piece whose own was taken
+    skinned_programs_.clear();
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind == Rec::Draw && r.s && (r.s->vs_handle & 1) && Rigid(r.vsc, 0) &&
+            std::find(skinned_programs_.begin(), skinned_programs_.end(), r.s->vs_handle) == skinned_programs_.end())
+            skinned_programs_.push_back(r.s->vs_handle);
+    }
     uint32_t draws = 0, matched = 0, moved = 0, jumped = 0;
     for (size_t i = 0; i < count_; i++) {
         Rec& r = now_[i];
@@ -1341,7 +1360,12 @@ void Interpolating::Replay(float alpha) {
                     if (v) LOGR("gpu: in-between frames: XBE_INTERP_NO_TABLE=1, each draw blends its own groups");
                     return v;
                 }();
-                const bool skinned_draw = Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0));
+                // GameInfo::interp_bones_at_step: by its program too (SkinnedDraw), a piece with its first bone squashed in
+                // both steps (Winky's shorts): blended on its own, from a turn, a leap or the other boxer's like piece, its
+                // camera (and 164-167, a boxer's own) was not the body's, and it stood apart from the held body
+                const bool skinned_draw = app::kGame.interp_bones_at_step
+                                              ? SkinnedDraw(r)
+                                              : Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0));
                 if (!no_table && skinned_draw && alpha != 1 && !at_step && !r.named && !r.snap && !bone_prev_.empty()) {
                     const bool skinned = true;
                     uint32_t from_table = 0, missing = 0, changed = 0;
@@ -1402,8 +1426,9 @@ void Interpolating::Replay(float alpha) {
                 // step but a perspective one (the camera: a last row not 0 0 0 1, Fight Night Round 2's 164-187), blended.
                 // Not "bones at their step": a bone squashed for a hit is no rotation, was blended beside its neighbours
                 // held, and the body tore between them (GPU-VM, 2026-11-24)
-                if (app::kGame.interp_bones_at_step && alpha != 1 && !r.named &&
-                    (Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0))))
+                // A draw counts by its program too: Winky's shorts, a piece's first bone squashed in both steps, was blended
+                // whole beside held legs and tore (GPU-VM, 2026-11-24)
+                if (app::kGame.interp_bones_at_step && alpha != 1 && !r.named && SkinnedDraw(r))
                     for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
                         const auto& w = r.vsc[k + 3];
                         const bool perspective = std::fabs(w[0]) + std::fabs(w[1]) + std::fabs(w[2]) > 1e-3f;
@@ -1476,8 +1501,7 @@ void Interpolating::DumpRecordStep(bool blended) {
     for (size_t i = 0; i < count_; i++) {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw || !(r.s->vs_handle & 1) || !r.s->vs) continue;
-        const bool skinned = Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0));
-        if (!skinned) continue;
+        if (!SkinnedDraw(r)) continue;
         DumpDraw dd{};
         dd.index = uint32_t(i), dd.vs_handle = r.s->vs_handle, dd.prim = r.a, dd.start = r.b, dd.count = r.c;
         dd.base_vertex = r.s->base_vertex;
