@@ -40,6 +40,17 @@ constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
 
 bool RopeCheck();  // XBE_INTERP_ROPE_CHECK, below
+// the first register group a rotation and scale with (0 0 0 1) last: a skinned draw's first bone (as Rigid, below)
+bool SkinnedFirst(const std::array<std::array<float, 4>, 192>& m) {
+    if (m[3][0] != 0 || m[3][1] != 0 || m[3][2] != 0 || m[3][3] != 1) return false;
+    float len[3];
+    for (int i = 0; i < 3; i++) len[i] = std::sqrt(m[size_t(i)][0] * m[size_t(i)][0] + m[size_t(i)][1] * m[size_t(i)][1] + m[size_t(i)][2] * m[size_t(i)][2]);
+    const float l = (len[0] + len[1] + len[2]) / 3;
+    if (l < 0.25f || l > 4) return false;
+    for (int i = 0; i < 3; i++)
+        if (std::fabs(len[i] / l - 1) > 0.02f) return false;
+    return true;
+}
 std::atomic<bool> g_dump_asked{false};  // RequestInterpDump
 
 // GameInfo::interp_near_margin: a named draw this close to the camera (its w, the view depth) counts as at the near
@@ -180,6 +191,16 @@ public:
         for (const auto& stream : s.streams) AddHeader(r, stream.vb);
         for (uint32_t t : s.textures) AddHeader(r, t);
         KeepVertices(r, s, start, count, indices);
+        if (RopeCheck() && SkinnedFirst(s.vsc)) {
+            for (uint32_t t : s.textures) {
+                TextureDesc td;
+                if (!t || !Describe(t, td)) continue;
+                const uint32_t n = LevelSize(td, 0);
+                if (!n || n > (4u << 20) || !mem::IsCommitted(td.data) || !mem::IsCommitted(td.data + n - 1)) continue;
+                const auto* p = static_cast<const uint8_t*>(kernel::HostPtr(td.data));
+                tex_now_.push_back({td.data, std::vector<uint8_t>(p, p + n)});
+            }
+        }
         if (app::kGame.interp_near_hold && NearHoldNames(s, count)) {
             r.named = true;
             r.offscreen = !Presented(s.rt.data);
@@ -488,6 +509,7 @@ private:
     uint32_t kept_count_ = 0;
     bool kept_full_ = false;
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> rope_now_, rope_before_;  // XBE_INTERP_ROPE_CHECK
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> tex_now_, tex_before_;    // and the named draws' textures
     float marked_alpha_ = -1;  // XBE_INTERP_MARK: the replay just drawn, -1 the title's own picture
     void Show(const Surface& front);
     void CheckRopeMemory();
@@ -520,6 +542,26 @@ bool RopeCheck() {
 
 void Interpolating::CheckRopeMemory() {
     if (!RopeCheck()) return;
+    {
+        static uint32_t steps = 0, changed_all = 0, total_all = 0;
+        std::unordered_map<uint32_t, bool> seen;
+        for (const auto& [va, bytes] : tex_before_) {
+            if (seen[va]) continue;
+            seen[va] = true;
+            total_all++;
+            if (std::memcmp(kernel::HostPtr(va), bytes.data(), bytes.size())) {
+                changed_all++;
+                static int told = 0;
+                if (told++ < 10) LOGR("gpu: in-between frames: texture %08X (%zu bytes) rewritten by the next step", va, bytes.size());
+            }
+        }
+        if (++steps % 100 == 0) {
+            LOGR("gpu: in-between frames: texture check, %u of %u named textures rewritten by the next step's first draw (last 100 steps)",
+                 changed_all, total_all);
+            changed_all = total_all = 0;
+        }
+        tex_before_.clear();
+    }
     uint32_t changed = 0, total = 0;
     for (const auto& [va, bytes] : rope_before_) {
         total++;
@@ -535,9 +577,6 @@ void Interpolating::CheckRopeMemory() {
     rope_before_.clear();
 }
 
-namespace {
-bool Rigid(const std::array<std::array<float, 4>, 192>& m, uint32_t k, float* scale = nullptr);
-}
 void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
     uint32_t vertices = start + count;
     if (indices) {
@@ -592,7 +631,7 @@ namespace {
 using Regs = std::array<std::array<float, 4>, 192>;
 // a rotation times one scale (a boxer's size: Fight Night Round 2's skinned heads and limbs are 0.98), rows
 // perpendicular and of one length; that length in scale
-bool Rigid(const Regs& m, uint32_t k, float* scale) {
+bool Rigid(const Regs& m, uint32_t k, float* scale = nullptr) {
     const auto& w = m[k + 3];
     if (w[0] != 0 || w[1] != 0 || w[2] != 0 || w[3] != 1) return false;
     float len[3];
@@ -1677,6 +1716,8 @@ void Interpolating::Present(const Surface& front) {
     kept_full_ = false;
     rope_before_.swap(rope_now_);
     rope_now_.clear();
+    tex_before_.swap(tex_now_);
+    tex_now_.clear();
 }
 }  // namespace
 
