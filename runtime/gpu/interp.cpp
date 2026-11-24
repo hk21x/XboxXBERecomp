@@ -434,6 +434,8 @@ private:
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_prev_;
     std::unordered_map<uint64_t, bool> bone_bad_;
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_now_;
+    float table_turn_ = 0;
+    uint32_t held_bone_ = 0, held_still_ = 0, held_cut_ = 0;  // the largest turn among the step's table groups, degrees
     std::unordered_map<uint64_t, std::vector<std::pair<std::array<std::array<float, 4>, 4>, int>>> bone_votes_;
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> seen_blend_;  // this replay's blended groups (a check)
     uint64_t skin_absent_unmatched_ = 0, skin_absent_matched_ = 0, skin_bad_ = 0, bad_keys_ = 0;
@@ -641,8 +643,14 @@ Group BlendGroup(const Group& from, const Group& to, float alpha) {
     for (int i = 0; i < 4; i++) g[size_t(i)] = o[size_t(i)];
     return g;
 }
+bool RigidGroup(const std::array<std::array<float, 4>, 4>& g) {
+    Regs r{};
+    for (int i = 0; i < 4; i++) r[size_t(i)] = g[size_t(i)];
+    return Rigid(r, 0);
+}
+// a group's value and its register: an identity in one draw's texture transform is not a bone in another's
 uint64_t GroupKey(const std::array<std::array<float, 4>, 192>& v, uint32_t k) {
-    uint64_t h = 0xCBF29CE484222325ull;
+    uint64_t h = 0xCBF29CE484222325ull ^ (uint64_t(k) * 0x9E3779B97F4A7C15ull);
     const auto* b = reinterpret_cast<const uint8_t*>(&v[k]);
     for (size_t i = 0; i < sizeof(v[0]) * 4; i++) h = (h ^ b[i]) * 0x100000001B3ull;
     return h;
@@ -803,6 +811,7 @@ bool Interpolating::Match() {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw || r.prev < 0 || r.named || r.turning) continue;
         const Rec& p = before_[size_t(r.prev)];
+        if (!Rigid(r.vsc, 0) && !Rigid(p.vsc, 0)) continue;  // skinned draws only, in either step (a squashed first bone)
         for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
             const uint64_t key = GroupKey(r.vsc, k);
             std::array<std::array<float, 4>, 4> was;
@@ -835,8 +844,32 @@ bool Interpolating::Match() {
         if (c.size() > 1) bad_keys_++;
         bone_prev_.emplace(key, c[best].first);
     }
-    bone_now_.clear();
     bone_votes_.clear();
+    // the bone hold on what is blended: each table group, a turn from its step-before value to its value now, rows
+    // normalised (a squashed bone too); further than GameInfo::interp_bone_hold, linearly blended it would collapse
+    // and drag its skin into a spike (Harry's recording, 2026-11-24: shoulders while leaning and hit)
+    table_turn_ = 0;
+    for (const auto& [key, was] : bone_prev_) {
+        const auto itn = bone_now_.find(key);
+        if (itn == bone_now_.end()) continue;
+        const auto& now = itn->second;
+        if (was[3][0] != 0 || was[3][1] != 0 || was[3][2] != 0 || was[3][3] != 1 || now[3][0] != 0 || now[3][1] != 0 ||
+            now[3][2] != 0 || now[3][3] != 1)
+            continue;
+        // the smallest of the three rows' angles' cosines: a turn of the frame
+        float worst = 1;
+        bool ok = true;
+        for (int i = 0; i < 3 && ok; i++) {
+            float la = 0, lb = 0, dot = 0;
+            for (int c = 0; c < 3; c++) la += was[i][c] * was[i][c], lb += now[i][c] * now[i][c], dot += was[i][c] * now[i][c];
+            if (la < 1e-6f || lb < 1e-6f) ok = false;
+            else worst = std::min(worst, dot / std::sqrt(la * lb));
+        }
+        if (!ok) continue;
+        const float turn = std::acos(std::clamp(worst, -1.0f, 1.0f)) * 57.29578f;
+        table_turn_ = std::max(table_turn_, turn);
+    }
+    bone_now_.clear();
     // the world's pieces come and go between steps. One left at the step's own place, among others blended, is that much out of
     // line with them, its texture seen sliding: it goes with any of the same matrix that has a match
     std::unordered_map<uint64_t, int> peers;
@@ -1053,10 +1086,20 @@ bool Interpolating::Match() {
                  buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5]);
             std::fill(std::begin(buckets), std::end(buckets), 0u);
         }
-        if (hold > 0 && most > hold) return false;
+        most = std::max(most, table_turn_);
+        if (hold > 0 && most > hold) {
+            held_bone_++;
+            return false;
+        }
     }
-    if (!moved || !(matched - jumped)) return false;
-    if (jumped * 2 > matched) return false;  // a camera cut
+    if (!moved || !(matched - jumped)) {
+        held_still_++;
+        return false;
+    }
+    if (jumped * 2 > matched) {  // a camera cut
+        held_cut_++;
+        return false;
+    }
     return true;
 }
 
@@ -1199,8 +1242,9 @@ void Interpolating::Replay(float alpha) {
                     if (v) LOGR("gpu: in-between frames: XBE_INTERP_NO_TABLE=1, each draw blends its own groups");
                     return v;
                 }();
-                if (!no_table && alpha != 1 && !at_step && !r.named && !r.snap && !bone_prev_.empty()) {
-                    const bool skinned = Rigid(r.vsc, 0);
+                const bool skinned_draw = Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0));
+                if (!no_table && skinned_draw && alpha != 1 && !at_step && !r.named && !r.snap && !bone_prev_.empty()) {
+                    const bool skinned = true;
                     uint32_t from_table = 0, missing = 0, changed = 0;
                     for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
                         const uint64_t key = GroupKey(r.vsc, k);
@@ -1403,6 +1447,8 @@ void Interpolating::Present(const Surface& front) {
                  "table corrected %llu (keys with two values %llu)", (unsigned long long)skin_absent_unmatched_, (unsigned long long)skin_absent_matched_,
                  (unsigned long long)skin_bad_, (unsigned long long)bad_keys_);
             LOGR("gpu: in-between frames: skinned pieces sharing a like of the step before %llu", (unsigned long long)shared_);
+            LOGR("gpu: in-between frames: steps held: a bone's turn %u, nothing moved %u, a camera cut %u", held_bone_, held_still_, held_cut_);
+            held_bone_ = held_still_ = held_cut_ = 0;
             skin_absent_unmatched_ = skin_absent_matched_ = skin_bad_ = bad_keys_ = shared_ = 0;
             skin_draws_ = skin_from_table_ = skin_missing_ = skin_unmatched_ = skin_seams_ = 0;
         }
