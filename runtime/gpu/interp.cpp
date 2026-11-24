@@ -1354,6 +1354,13 @@ void Interpolating::Replay(float alpha) {
                         }
                         Group now;
                         for (uint32_t j = 0; j < 4; j++) now[j] = r.vsc[k + j];
+                        // GameInfo::interp_bones_at_step: a bone (a rotation and scale) at its step; the rest (the camera,
+                        // the lights) blended, so the body moves with the scene and poses at the title's rate
+                        if (app::kGame.interp_bones_at_step && Rigid(r.vsc, k)) {
+                            for (uint32_t j = 0; j < 4; j++) d.vsc[k + j] = r.vsc[k + j];
+                            from_table++;
+                            continue;
+                        }
                         // a check: the table's step-before value far from this piece's own (its matched draw's): a bone
                         // put somewhere it never was, its skin dragged into a spike in between
                         if (r.prev >= 0 && k >= 4) {
@@ -1398,6 +1405,12 @@ void Interpolating::Replay(float alpha) {
                         if (!fresh && std::memcmp(it->second.data(), g.data(), sizeof g)) skin_seams_++;
                     }
                 }
+                // GameInfo::interp_bones_at_step, whichever way the draw was blended: a skinned draw's bones at its step
+                if (app::kGame.interp_bones_at_step && alpha != 1 && !r.named &&
+                    (Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0))))
+                    for (uint32_t k = 0; k + 3 < kRegisters; k += 4)
+                        if (Rigid(r.vsc, k))
+                            for (uint32_t j = 0; j < 4; j++) d.vsc[k + j] = r.vsc[k + j];
                 if (alpha != 1 && !dump_.empty() && !dump_.back().replays.empty() && dump_index_.count(uint32_t(i)))
                     dump_.back().replays.back().draws.push_back({uint32_t(i), d.vsc});
                 // XBE_INTERP_STEP_PROGRAMS="35B1 3671": draws by programs whose handles end so drawn as their step drew them

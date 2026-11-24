@@ -277,6 +277,10 @@ struct GameInfo {
     // many degrees is shown as drawn, with none in between; 0 never. Fight Night Round 2's boxers, a punch landing: a
     // body's bones snap round in one step and its skin, weighted between them, tore in between (XBE_INTERP_BONE_HOLD)
     float interp_bone_hold = 0;
+    // in-between frames: skinned draws' bones (rigid register groups) shown at their step, everything else (the camera,
+    // the lights) blended: bodies move smoothly with the scene and pose at the title's rate (Fight Night Round 2: the
+    // blended bones flickered on Harry's AMD card, correct on the CPU and on an Intel one)
+    bool interp_bones_at_step = false;
     // ...and where those draws' programs keep their transform (projection, view and world: four registers, 0 the
     // first of c-96): by the program's code hash, -1 for the first four (or the four a program transforms v0 by alone).
     // Fight Night Round 2's Staples Center ropes are skinned: bones first, the transform at c84 (register 180)
