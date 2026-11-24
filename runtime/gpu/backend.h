@@ -93,6 +93,8 @@ std::unique_ptr<Backend> CreateFallbackBackend();
 std::unique_ptr<Backend> CreateThreadedBackend(std::unique_ptr<Backend> inner);
 // in-between frames for a title drawing one frame a step (GameInfo::step_interpolation)
 std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner);
+// the last steps of in-between frames written to a file beside the exe (interp.cpp)
+void RequestInterpDump();
 
 // perf diagnostic: the title's thread recording for the render thread, and waiting on it
 inline std::atomic<uint64_t> g_perf_capture_ns{0}, g_perf_wait_ns{0}, g_perf_waits{0};

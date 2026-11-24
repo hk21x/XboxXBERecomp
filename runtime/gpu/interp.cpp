@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <deque>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
@@ -37,6 +40,7 @@ constexpr size_t kSampleDraws = 192, kMostMoves = 24;
 constexpr uint32_t kLeastVertices = 24;
 
 bool RopeCheck();  // XBE_INTERP_ROPE_CHECK, below
+std::atomic<bool> g_dump_asked{false};  // RequestInterpDump
 
 // GameInfo::interp_near_margin: a named draw this close to the camera (its w, the view depth) counts as at the near
 // plane; XBE_INTERP_NEAR_W overrides. The nearest named vertex of each step is kept for the log
@@ -429,6 +433,40 @@ private:
 
     std::unique_ptr<Backend> inner_;
     std::vector<Rec> now_, before_;
+    // RequestInterpDump: the last kDumpSteps steps' skinned draws (their inputs once each, their registers each step)
+    // and every replay's registers for them, written to a file on asking (the skin flicker seen on one PC only)
+    static constexpr size_t kDumpSteps = 75;
+    struct DumpDraw {
+        uint32_t index, vs_handle, prim, start, count, base_vertex;
+        uint64_t program, mesh;  // the program's hash; the mesh's (its kept inputs and indices)
+        int32_t prev;
+        std::array<std::array<float, 4>, 192> vsc;
+    };
+    struct DumpReplay {
+        float alpha;
+        double t;
+        std::vector<std::pair<uint32_t, std::array<std::array<float, 4>, 192>>> draws;  // index, registers drawn
+    };
+    struct DumpStep {
+        uint64_t step;
+        double t;
+        bool blended;
+        std::vector<DumpDraw> draws;
+        std::vector<DumpReplay> replays;
+    };
+    struct DumpMesh {
+        std::vector<uint32_t> program;
+        std::array<VertexShader::Input, 16> inputs;
+        std::array<uint32_t, 16> strides;
+        std::vector<std::pair<uint8_t, std::vector<uint8_t>>> streams;  // stream, kept bytes
+        std::vector<uint8_t> indices;
+    };
+    std::deque<DumpStep> dump_;
+    std::unordered_map<uint64_t, DumpMesh> dump_meshes_;
+    std::unordered_map<uint32_t, size_t> dump_index_;  // a draw's index this step -> its place in dump_.back().draws
+    uint64_t dump_step_ = 0;
+    void DumpRecordStep(bool blended);
+    void DumpWrite();
     // skinned draws' four-register groups this step (bones, the camera), by their value now: their value the step
     // before, read off the matched draws; a key seen with two different values is left out (bone_bad_)
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_prev_;
@@ -497,6 +535,9 @@ void Interpolating::CheckRopeMemory() {
     rope_before_.clear();
 }
 
+namespace {
+bool Rigid(const std::array<std::array<float, 4>, 192>& m, uint32_t k, float* scale = nullptr);
+}
 void Interpolating::KeepVertices(Rec& r, const State& s, uint32_t start, uint32_t count, const uint8_t* indices) {
     uint32_t vertices = start + count;
     if (indices) {
@@ -551,7 +592,7 @@ namespace {
 using Regs = std::array<std::array<float, 4>, 192>;
 // a rotation times one scale (a boxer's size: Fight Night Round 2's skinned heads and limbs are 0.98), rows
 // perpendicular and of one length; that length in scale
-bool Rigid(const Regs& m, uint32_t k, float* scale = nullptr) {
+bool Rigid(const Regs& m, uint32_t k, float* scale) {
     const auto& w = m[k + 3];
     if (w[0] != 0 || w[1] != 0 || w[2] != 0 || w[3] != 1) return false;
     float len[3];
@@ -1123,6 +1164,8 @@ bool Interpolating::Match() {
 void Interpolating::Replay(float alpha) {
     const auto began = Clock::now();
     seen_blend_.clear();
+    if (alpha != 1 && !dump_.empty())
+        dump_.back().replays.push_back({alpha, std::chrono::duration<double>(began.time_since_epoch()).count(), {}});
     // diagnosis: a file named interp_table in the working folder (the run folder headless) logs the next 8 replays' draws and how
     // each was blended, to pair with the reference renderer's probes (PROBES, which name each writing draw's program, count and
     // textures) on a pixel that flickers
@@ -1316,6 +1359,8 @@ void Interpolating::Replay(float alpha) {
                         if (!fresh && std::memcmp(it->second.data(), g.data(), sizeof g)) skin_seams_++;
                     }
                 }
+                if (alpha != 1 && !dump_.empty() && !dump_.back().replays.empty() && dump_index_.count(uint32_t(i)))
+                    dump_.back().replays.back().draws.push_back({uint32_t(i), d.vsc});
                 UseAsDrawn(r, d);
                 inner_->Draw(d, r.a, r.b, r.c, indices);
                 if (fixed)
@@ -1351,6 +1396,99 @@ void Interpolating::Show(const Surface& front) {
     inner_->Present(front);
 }
 
+void Interpolating::DumpRecordStep(bool blended) {
+    DumpStep st;
+    st.step = dump_step_++;
+    st.t = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+    st.blended = blended;
+    dump_index_.clear();
+    for (size_t i = 0; i < count_; i++) {
+        const Rec& r = now_[i];
+        if (r.kind != Rec::Draw || !(r.s->vs_handle & 1) || !r.s->vs) continue;
+        const bool skinned = Rigid(r.vsc, 0) || (r.prev >= 0 && Rigid(before_[size_t(r.prev)].vsc, 0));
+        if (!skinned) continue;
+        DumpDraw dd{};
+        dd.index = uint32_t(i), dd.vs_handle = r.s->vs_handle, dd.prim = r.a, dd.start = r.b, dd.count = r.c;
+        dd.base_vertex = r.s->base_vertex;
+        dd.program = ProgramHash(*r.s);
+        dd.prev = r.prev;
+        dd.vsc = r.vsc;
+        // the mesh: its kept inputs and indices, once
+        uint64_t h = 0xCBF29CE484222325ull ^ dd.program;
+        const auto mix = [&](const uint8_t* p, size_t n) { for (size_t k = 0; k < n; k++) h = (h ^ p[k]) * 0x100000001B3ull; };
+        for (const Rec::Kept& kp : r.kept) mix(kept_bytes_.data() + kp.offset, kp.bytes);
+        if (r.has_bytes) mix(r.bytes.data(), r.bytes.size());
+        dd.mesh = h;
+        if (!dump_meshes_.count(h)) {
+            DumpMesh m;
+            m.program = r.s->vs->program;
+            m.inputs = r.s->vs->inputs;
+            for (size_t k = 0; k < 16; k++) m.strides[k] = r.s->streams[k].stride;
+            for (const Rec::Kept& kp : r.kept)
+                m.streams.push_back({kp.stream, std::vector<uint8_t>(kept_bytes_.begin() + kp.offset, kept_bytes_.begin() + kp.offset + kp.bytes)});
+            if (r.has_bytes) m.indices = r.bytes;
+            dump_meshes_.emplace(h, std::move(m));
+        }
+        dump_index_[uint32_t(i)] = st.draws.size();
+        st.draws.push_back(dd);
+    }
+    dump_.push_back(std::move(st));
+    while (dump_.size() > kDumpSteps) dump_.pop_front();
+    if (dump_meshes_.size() > 4096) {  // meshes no step refers to any more
+        std::unordered_map<uint64_t, bool> used;
+        for (const DumpStep& d : dump_)
+            for (const DumpDraw& dd : d.draws) used[dd.mesh] = true;
+        for (auto it = dump_meshes_.begin(); it != dump_meshes_.end();) it = used.count(it->first) ? std::next(it) : dump_meshes_.erase(it);
+    }
+}
+
+// the file: "FN2INTERPDUMP1", then little-endian records (see sdk/tools/interp_dump.py)
+void Interpolating::DumpWrite() {
+    const auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    char name[64];
+    std::strftime(name, sizeof name, "interp_dump_%Y%m%d_%H%M%S.bin", std::localtime(&t));
+    const auto path = app::ExeDir() / name;
+    std::FILE* f = std::fopen(path.string().c_str(), "wb");
+    if (!f) {
+        LOGR("gpu: in-between frames: could not write %s", path.string().c_str());
+        return;
+    }
+    const auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+    const auto u64 = [&](uint64_t v) { std::fwrite(&v, 8, 1, f); };
+    const auto f64 = [&](double v) { std::fwrite(&v, 8, 1, f); };
+    const auto f32 = [&](float v) { std::fwrite(&v, 4, 1, f); };
+    const auto blob = [&](const void* p, size_t n) { u32(uint32_t(n)); if (n) std::fwrite(p, 1, n, f); };
+    std::fwrite("FN2INTERPDUMP1", 1, 14, f);
+    u32(uint32_t(dump_meshes_.size()));
+    for (const auto& [h, m] : dump_meshes_) {
+        u64(h);
+        blob(m.program.data(), m.program.size() * 4);
+        for (const auto& in : m.inputs) u32(uint32_t(in.stream)), u32(in.offset), u32(in.type);
+        for (uint32_t st : m.strides) u32(st);
+        u32(uint32_t(m.streams.size()));
+        for (const auto& [k, b] : m.streams) u32(k), blob(b.data(), b.size());
+        blob(m.indices.data(), m.indices.size());
+    }
+    u32(uint32_t(dump_.size()));
+    for (const DumpStep& st : dump_) {
+        u64(st.step), f64(st.t), u32(st.blended ? 1 : 0);
+        u32(uint32_t(st.draws.size()));
+        for (const DumpDraw& d : st.draws) {
+            u32(d.index), u32(d.vs_handle), u32(d.prim), u32(d.start), u32(d.count), u32(d.base_vertex);
+            u64(d.program), u64(d.mesh), u32(uint32_t(d.prev));
+            std::fwrite(d.vsc.data(), 4, 192 * 4, f);
+        }
+        u32(uint32_t(st.replays.size()));
+        for (const DumpReplay& rp : st.replays) {
+            f32(rp.alpha), f64(rp.t);
+            u32(uint32_t(rp.draws.size()));
+            for (const auto& [i, v] : rp.draws) u32(i), std::fwrite(v.data(), 4, 192 * 4, f);
+        }
+    }
+    std::fclose(f);
+    LOGR("gpu: in-between frames: the last %zu steps written to %s (%zu meshes)", dump_.size(), path.string().c_str(), dump_meshes_.size());
+}
+
 void Interpolating::Present(const Surface& front) {
     presents_seen_++, steps_total_++;
     NotePresented(front.data);
@@ -1365,6 +1503,7 @@ void Interpolating::Present(const Surface& front) {
     if (kept_full_) LOG_FIRST(4, "gpu: in-between frames: a step of %zu draws has more vertices than are kept, drawn as it is", count_);
     const auto prepare_began = Clock::now();
     const bool blend = On() && count_ && !kept_full_ && Match() && UploadKept();
+    if (On() && count_) DumpRecordStep(blend);
     sum_prepare_ += std::chrono::duration<double>(Clock::now() - prepare_began).count();
     static const bool test_paced = std::getenv("XBE_INTERP_TEST_PACED") != nullptr;
     if (Test() && blend && test_paced) {
@@ -1502,6 +1641,13 @@ void Interpolating::Present(const Surface& front) {
         sum_drawing_ = sum_prepare_ = sum_replay_ = sum_planned_ = sum_limit_ = 0;
         replays_ = 0;
     }
+    if (steps_total_ % 25 == 0)
+        if (std::FILE* t = std::fopen("interp_dump", "rb")) {  // a file asks too (headless)
+            std::fclose(t);
+            std::remove("interp_dump");
+            g_dump_asked = true;
+        }
+    if (g_dump_asked.exchange(false)) DumpWrite();
     if (own) inner_->WaitFence(own);
     {
         // the nearest named vertex's view depth each step, over 10 s (for GameInfo::interp_near_margin)
@@ -1533,6 +1679,12 @@ void Interpolating::Present(const Surface& front) {
     rope_now_.clear();
 }
 }  // namespace
+
+// the last steps of in-between frames to a file beside the exe (a key: GameInfo's message hook; a file: interp_dump)
+void RequestInterpDump() {
+    g_dump_asked = true;
+    LOGR("gpu: in-between frames: a dump asked for");
+}
 
 std::unique_ptr<Backend> CreateInterpolating(std::unique_ptr<Backend> inner) { return std::make_unique<Interpolating>(std::move(inner)); }
 }  // namespace gpu
