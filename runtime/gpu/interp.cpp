@@ -435,7 +435,11 @@ private:
     std::unordered_map<uint64_t, bool> bone_bad_;
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> bone_now_;
     float table_turn_ = 0;
-    uint32_t held_bone_ = 0, held_still_ = 0, held_cut_ = 0;  // the largest turn among the step's table groups, degrees
+    uint32_t held_bone_ = 0, held_still_ = 0, held_cut_ = 0;
+    uint64_t spike_bones_ = 0;
+    float spike_most_ = 0;
+    uint64_t presents_seen_ = 0, steps_total_ = 0, last_spike_step_ = ~0ull;
+    uint32_t spike_steps_ = 0;  // steps with a bone put more than 0.5 from the piece's own  // table groups far from the piece's own step-before value (a check)  // the largest turn among the step's table groups, degrees
     std::unordered_map<uint64_t, std::vector<std::pair<std::array<std::array<float, 4>, 4>, int>>> bone_votes_;
     std::unordered_map<uint64_t, std::array<std::array<float, 4>, 4>> seen_blend_;  // this replay's blended groups (a check)
     uint64_t skin_absent_unmatched_ = 0, skin_absent_matched_ = 0, skin_bad_ = 0, bad_keys_ = 0;
@@ -648,9 +652,19 @@ bool RigidGroup(const std::array<std::array<float, 4>, 4>& g) {
     for (int i = 0; i < 4; i++) r[size_t(i)] = g[size_t(i)];
     return Rigid(r, 0);
 }
+// XBE_INTERP_TABLE_ALL=1 (a test): the table as before 5d71a67, every matched draw voting, keys by value alone
+bool TableAll() {
+    static const bool on = [] {
+        const char* e = std::getenv("XBE_INTERP_TABLE_ALL");
+        const bool v = e && *e == '1';
+        if (v) LOGR("gpu: in-between frames: XBE_INTERP_TABLE_ALL=1, the old table (every draw votes, keys by value)");
+        return v;
+    }();
+    return on;
+}
 // a group's value and its register: an identity in one draw's texture transform is not a bone in another's
 uint64_t GroupKey(const std::array<std::array<float, 4>, 192>& v, uint32_t k) {
-    uint64_t h = 0xCBF29CE484222325ull ^ (uint64_t(k) * 0x9E3779B97F4A7C15ull);
+    uint64_t h = 0xCBF29CE484222325ull ^ (TableAll() ? 0 : uint64_t(k) * 0x9E3779B97F4A7C15ull);
     const auto* b = reinterpret_cast<const uint8_t*>(&v[k]);
     for (size_t i = 0; i < sizeof(v[0]) * 4; i++) h = (h ^ b[i]) * 0x100000001B3ull;
     return h;
@@ -811,7 +825,7 @@ bool Interpolating::Match() {
         const Rec& r = now_[i];
         if (r.kind != Rec::Draw || r.prev < 0 || r.named || r.turning) continue;
         const Rec& p = before_[size_t(r.prev)];
-        if (!Rigid(r.vsc, 0) && !Rigid(p.vsc, 0)) continue;  // skinned draws only, in either step (a squashed first bone)
+        if (!TableAll() && !Rigid(r.vsc, 0) && !Rigid(p.vsc, 0)) continue;  // skinned draws only, in either step (a squashed first bone)
         for (uint32_t k = 0; k + 3 < kRegisters; k += 4) {
             const uint64_t key = GroupKey(r.vsc, k);
             std::array<std::array<float, 4>, 4> was;
@@ -839,8 +853,11 @@ bool Interpolating::Match() {
             return d;
         };
         size_t best = 0;
+        // the nearest to its value now: a bone moves on from where it was; a piece matched to the wrong piece brings a
+        // value from elsewhere, further, whether its piece is one of many or few (a majority of pieces drawn with a
+        // shared bone outvoted the right value, 2 units off: GPU-free headless, a leaning fight)
         for (size_t i = 1; i < c.size(); i++)
-            if (c[i].second > c[best].second || (c[i].second == c[best].second && distance(c[i].first) < distance(c[best].first))) best = i;
+            if (distance(c[i].first) < distance(c[best].first)) best = i;
         if (c.size() > 1) bad_keys_++;
         bone_prev_.emplace(key, c[best].first);
     }
@@ -1086,7 +1103,7 @@ bool Interpolating::Match() {
                  buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5]);
             std::fill(std::begin(buckets), std::end(buckets), 0u);
         }
-        most = std::max(most, table_turn_);
+        if (!TableAll()) most = std::max(most, table_turn_);
         if (hold > 0 && most > hold) {
             held_bone_++;
             return false;
@@ -1255,6 +1272,26 @@ void Interpolating::Replay(float alpha) {
                         }
                         Group now;
                         for (uint32_t j = 0; j < 4; j++) now[j] = r.vsc[k + j];
+                        // a check: the table's step-before value far from this piece's own (its matched draw's): a bone
+                        // put somewhere it never was, its skin dragged into a spike in between
+                        if (r.prev >= 0 && k >= 4) {
+                            const auto& own = before_[size_t(r.prev)].vsc;
+                            float d = 0, size = 0;
+                            for (uint32_t j = 0; j < 3; j++)
+                                for (uint32_t c = 0; c < 4; c++) {
+                                    d = std::max(d, std::fabs(it->second[j][c] - own[k + j][c]));
+                                    size = std::max(size, std::fabs(own[k + j][c]));
+                                }
+                            if (d > 1e-3f * std::max(size, 1.0f)) spike_bones_++;
+                            spike_most_ = std::max(spike_most_, d);
+                            if (d > 0.5f) {
+                                if (last_spike_step_ != steps_total_) last_spike_step_ = steps_total_, spike_steps_++;
+                                static int told = 0;
+                                if (told++ < 20)
+                                    LOGR("gpu: in-between frames: a spike bone, %.2f off, vs %08X count %u register %u, at present %llu",
+                                         d, r.s->vs_handle, r.c, k, (unsigned long long)presents_seen_);
+                            }
+                        }
                         const Group g = BlendGroup(it->second, now, alpha);
                         for (uint32_t j = 0; j < 4; j++) {
                             if (std::memcmp(d.vsc[k + j].data(), g[j].data(), sizeof g[j])) changed++;
@@ -1315,6 +1352,7 @@ void Interpolating::Show(const Surface& front) {
 }
 
 void Interpolating::Present(const Surface& front) {
+    presents_seen_++, steps_total_++;
     NotePresented(front.data);
     // the step's own draws, up to here: the renderer reads their vertices when it comes to them, and the title writes some
     // in place for its next step without locking them (Fight Night Round 2's ring ropes: one stream in five of them
@@ -1448,7 +1486,13 @@ void Interpolating::Present(const Surface& front) {
                  (unsigned long long)skin_bad_, (unsigned long long)bad_keys_);
             LOGR("gpu: in-between frames: skinned pieces sharing a like of the step before %llu", (unsigned long long)shared_);
             LOGR("gpu: in-between frames: steps held: a bone's turn %u, nothing moved %u, a camera cut %u", held_bone_, held_still_, held_cut_);
+            LOGR("gpu: in-between frames: spike bones (blended from a value not the piece's own) %llu, the furthest %.3f",
+                 (unsigned long long)spike_bones_, spike_most_);
+            LOGR("gpu: in-between frames: steps with a bone put more than 0.5 from its own %u", spike_steps_);
+            spike_steps_ = 0;
+            spike_most_ = 0;
             held_bone_ = held_still_ = held_cut_ = 0;
+            spike_bones_ = 0;
             skin_absent_unmatched_ = skin_absent_matched_ = skin_bad_ = bad_keys_ = shared_ = 0;
             skin_draws_ = skin_from_table_ = skin_missing_ = skin_unmatched_ = skin_seams_ = 0;
         }
