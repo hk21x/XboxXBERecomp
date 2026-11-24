@@ -1400,6 +1400,26 @@ void Interpolating::Replay(float alpha) {
                 }
                 if (alpha != 1 && !dump_.empty() && !dump_.back().replays.empty() && dump_index_.count(uint32_t(i)))
                     dump_.back().replays.back().draws.push_back({uint32_t(i), d.vsc});
+                // XBE_INTERP_STEP_PROGRAMS="35B1 3671": draws by programs whose handles end so drawn as their step drew them
+                // (a test, to find which draws a flicker is in)
+                {
+                    static const std::vector<uint32_t> at_step_programs = [] {
+                        std::vector<uint32_t> v;
+                        if (const char* e = std::getenv("XBE_INTERP_STEP_PROGRAMS"))
+                            for (const char* p = e; *p;) {
+                                char* end = nullptr;
+                                const unsigned long h = std::strtoul(p, &end, 16);
+                                if (end == p) { p++; continue; }
+                                v.push_back(uint32_t(h) & 0xFFFF);
+                                p = end;
+                            }
+                        if (!v.empty()) LOGR("gpu: in-between frames: XBE_INTERP_STEP_PROGRAMS, %zu programs drawn at their step", v.size());
+                        return v;
+                    }();
+                    if (alpha != 1 && !at_step_programs.empty() &&
+                        std::find(at_step_programs.begin(), at_step_programs.end(), r.s->vs_handle & 0xFFFF) != at_step_programs.end())
+                        d.vsc = r.vsc;
+                }
                 UseAsDrawn(r, d);
                 inner_->Draw(d, r.a, r.b, r.c, indices);
                 if (fixed)
