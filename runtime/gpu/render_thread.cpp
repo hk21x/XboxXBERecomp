@@ -228,7 +228,9 @@ public:
         g_perf_capture_ns += Ns(t);
     }
 
-    // rects and points are taken now; the copy itself, CPU or GPU, runs in order like the console's
+    // rects and points are taken now; the copy itself, CPU or GPU, runs in order like the console's. A source the GPU
+    // has not drawn is copied from guest memory as it is then, and the title may write the next picture there as soon
+    // as this returns (50 Cent: Bulletproof's menu picture): that copy is waited for
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override {
         auto t = Clock::now();
         Cmd c{Op::Copy};
@@ -239,11 +241,13 @@ public:
         c.s1.header = Header(src.header);
         c.s2 = dst;
         c.s2.header = Header(dst.header);
+        const bool cpu_made = src.header && !written_.count(mem::VirtualFromPhysical(src.data));
         cur_->cmds.push_back(c);
         Use(src.header);
         Use(dst.header);
         Written(dst);
         g_perf_capture_ns += Ns(t);
+        if (cpu_made) Wait(Submit(), WaitFor::Copy, "copy from memory");
     }
 
     void Present(const Surface& front) override {
