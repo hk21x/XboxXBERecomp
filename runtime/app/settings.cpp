@@ -11,6 +11,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <atomic>
+#include <chrono>
+#include <cmath>
+#include <mutex>
 #include <fstream>
 #include <sstream>
 
@@ -510,6 +513,31 @@ float FrameAspect() {
     // filling the screen at once; 4:3 stays for the next start (16:9 meanwhile)
     if (!FillsWide(kGame.fill_follows_live ? Get().aspect % 4 : a)) return 16.0f / 9.0f;
     return std::max(16.0f / 9.0f, ScreenAspect());
+}
+
+// GameInfo::widen_ms: from the shape shown when the frame widened to its new one, eased; narrower at once
+float ShownAspect() {
+    const float a = FrameAspect();
+    if (!kGame.widen_ms) return a;
+    using Clock = std::chrono::steady_clock;
+    static std::mutex lock;
+    static float from = 0, to = 0;
+    static Clock::time_point t0;
+    std::lock_guard<std::mutex> hold(lock);
+    const auto now = Clock::now();
+    auto at = [&] {
+        float k = std::chrono::duration<float, std::milli>(now - t0).count() / float(kGame.widen_ms);
+        k = std::clamp(k, 0.0f, 1.0f);
+        k = k * k * (3 - 2 * k);
+        return from + (to - from) * k;
+    };
+    if (to == 0) from = to = a;
+    if (std::fabs(a - to) > 1e-4f) {
+        from = a > to ? at() : a;
+        to = a;
+        t0 = now;
+    }
+    return std::min(at(), a);
 }
 
 float HudAspect() { return Widescreen() ? kGame.hud_aspect : std::min(kGame.hud_aspect, 4.0f / 3.0f); }

@@ -130,6 +130,7 @@ struct BlitOptions {
     uint32_t taps = 1;     // n x n box filter per pixel
     bool over = false;     // premultiplied over the target, which keeps its alpha
     bool final = false;    // the finished frame: psfinal with the settings' FXAA and sharpening (taps, alpha unused)
+    float mul = 1;         // colour scale
 };
 
 // a full screen triangle that writes a colour or a depth, for clears of part of a target
@@ -313,6 +314,10 @@ private:
     void DropMs(Target& t);
     ComPtr<ID3D11Texture2D> PrepareCopySource(Target& t);  // guest sized BGRA: the target, or a shrunk copy
     ComPtr<ID3D11Texture2D> Shrink(Target& t, uint32_t w, uint32_t h);
+    // GameInfo::bars_backdrop: the frame, small and dimmed, behind the bars
+    ComPtr<ID3D11Texture2D> backdrop_;
+    ComPtr<ID3D11RenderTargetView> backdrop_rtv_;
+    ComPtr<ID3D11ShaderResourceView> backdrop_srv_;
     // the cube faces' shrunk copies, one kept per size with its view: the context orders the copy before the next shrink
     // draws over it (a new texture per face per frame cost PGR2's races 1.5 ms a frame on Direct3D 12)
     struct CubeShrink {
@@ -1071,7 +1076,7 @@ void D3D11Backend::Blit(ID3D11ShaderResourceView* src, const float uvrect[4], co
     ID3D11PixelShader* ps = PixelShader(Compile(kBlitHlsl, final ? "psfinal" : "psmain", "ps_5_0", h), h);
     if (!ps && final) ps = PixelShader(Compile(kBlitHlsl, "psmain", "ps_5_0", h), h);  // a shader that failed: plain
     float c[12] = {uvrect[0], uvrect[1], uvrect[2], uvrect[3], o.gamma ? 1.0f : 0.0f, o.alpha ? 1.0f : 0.0f,
-                  float(o.taps), 1.0f};
+                  float(o.taps), o.mul};
     if (final) c[5] = float((st.fxaa && !st.smaa ? 1 : 0) | (st.scale_filter ? 2 : 0)), c[6] = float(std::min<uint32_t>(st.sharpen, 100)) / 100.0f,
                c[8] = float(std::min<uint32_t>(st.crt, 100)) / 100.0f, c[9] = kCrtLines;
     ID3D11ShaderResourceView* srv[2] = {src, lut_srv_.Get()};
@@ -2076,15 +2081,17 @@ ID3D11ShaderResourceView* D3D11Backend::SmaaFrame(Target& t) {
 }
 
 void D3D11Backend::BlitFrame(ID3D11ShaderResourceView* frame) {
-    float aspect = app::FrameAspect();
+    // widening (GameInfo::widen_ms): the frame's middle at the shape shown, its sides opening out
+    float aspect = app::FrameAspect(), shown = app::ShownAspect();
     float w = float(bb_w_), h = float(bb_h_);
-    float vw = std::min(w, h * aspect);
-    float vh = vw / aspect;
+    float vw = std::min(w, h * shown);
+    float vh = vw / shown;
     D3D11_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
     D3D11_RECT sc{0, 0, LONG(bb_w_), LONG(bb_h_)};
     ctx_->RSSetViewports(1, &vp);
     ctx_->RSSetScissorRects(1, &sc);
-    float uv[4] = {0, 0, 1, 1};
+    float part = std::min(1.0f, shown / aspect);
+    float uv[4] = {(1 - part) / 2, 0, part, 1};
     Blit(frame, uv, {.gamma = gamma_, .final = true});
 }
 
@@ -2136,6 +2143,26 @@ void D3D11Backend::Present(const Surface& front) {
         if (ID3D11ShaderResourceView* smoothed = SmaaFrame(*t)) frame = smoothed;
     float black[4] = {0, 0, 0, 1};
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
+    // GameInfo::bars_backdrop (and a frame widening): the frame shrunk to 64x36, box filtered and dimmed, stretched
+    // across the window behind it, as the D3D12 renderer's
+    const bool widening = app::ShownAspect() < app::FrameAspect() - 1e-3f;
+    if (frame && ((app::kGame.bars_backdrop && app::kGame.bars_backdrop()) || widening) && bb_h_ &&
+        app::ShownAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
+        if (!backdrop_) {
+            D3D11_TEXTURE2D_DESC td = Texture2DDesc(kBgra, 64, 36, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+            if (FAILED(dev_->CreateTexture2D(&td, nullptr, &backdrop_)) ||
+                FAILED(dev_->CreateRenderTargetView(backdrop_.Get(), nullptr, &backdrop_rtv_)) ||
+                FAILED(dev_->CreateShaderResourceView(backdrop_.Get(), nullptr, &backdrop_srv_)))
+                backdrop_.Reset(), backdrop_rtv_.Reset(), backdrop_srv_.Reset();
+        }
+        if (backdrop_srv_) {
+            float all[4] = {0, 0, 1, 1};
+            SetPassTarget(backdrop_rtv_.Get(), nullptr, 64, 36);
+            Blit(frame, all, {.taps = 8, .mul = 0.45f});
+            SetPassTarget(bb_rtv_.Get(), nullptr, bb_w_, bb_h_);
+            Blit(backdrop_srv_.Get(), all, {.gamma = gamma_});
+        }
+    }
     SetPassTarget(bb_rtv_.Get(), nullptr, bb_w_, bb_h_);
     if (frame) BlitFrame(frame);
     // F12: the frame as shown, before the interface

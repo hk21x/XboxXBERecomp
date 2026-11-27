@@ -128,6 +128,9 @@ bool Widescreen();
 // the shape the frame is shown at: 4:3, 16:9, or the screen's when the aspect setting fills it (never under 16:9, but
 // for a title filling a screen between 4:3 and 16:9: 16:10 shows the title's 4:3 mode widened, not 16:9 letterboxed)
 float FrameAspect();
+// the shape the frame is shown at this present: FrameAspect, but a frame that widened (GameInfo::widen_ms) shown
+// widening over that time, cropped at its sides from the shape it had; narrower at once
+float ShownAspect();
 // a title holding the frame at a shape for a while, the aspect setting's choice set aside (50 Cent's cutscenes at 4:3
 // on any frame, with GameInfo::aspect_live; Fight Night Round 2's at 16:9 on an ultrawide screen, without); 0 lets the
 // setting have it again
@@ -313,6 +316,10 @@ struct GameInfo {
     // while true, the bars beside a frame narrower than the window show a small, dimmed copy of the frame stretched
     // across it (blurred by its size) instead of black: Juiced's 4:3 menus on an ultrawide screen (Harry, 2026-11-17)
     bool (*bars_backdrop)() = nullptr;
+    // a frame widening (Fight Night Round 2's 16:9 menus to its fights at an ultrawide screen's shape) is shown
+    // widening over this many ms, its sides cropped and opening out, the bars beside it the dimmed copy; 0 at once.
+    // Narrowing is at once (the narrower frame has nothing at its sides). Harry, 2026-11-27: no snap from 16:9
+    uint32_t widen_ms = 0;
     // while frames run late (slower than 120 a second), each face of a cube map the GPU draws (a car's reflections) is
     // drawn at most this often a second and keeps its last picture in between; frames on time draw every face. 0 draws
     // them every frame always. XBE_CUBE_FACE_HZ overrides it

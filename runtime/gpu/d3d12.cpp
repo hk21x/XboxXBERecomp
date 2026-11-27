@@ -4189,12 +4189,14 @@ bool D3D12Backend::SmaaFrame(Target& t) {
 
 void D3D12Backend::BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt) {
     // 16:9 when the console reports a widescreen display, else 4:3; ultrawide the screen's shape
-    float aspect = app::FrameAspect();
+    // widening (GameInfo::widen_ms): the frame's middle at the shape shown, its sides opening out
+    float aspect = app::FrameAspect(), shown = app::ShownAspect();
     float w = float(bb_w_);
     float h = float(bb_h_);
-    float vw = std::min(w, h * aspect);
-    float vh = vw / aspect;
-    float uv[4] = {0, 0, 1, 1};
+    float vw = std::min(w, h * shown);
+    float vh = vw / shown;
+    float part = std::min(1.0f, shown / aspect);
+    float uv[4] = {(1 - part) / 2, 0, part, 1};
     D3D12_VIEWPORT vp{(w - vw) / 2, (h - vh) / 2, vw, vh, 0, 1};
     D3D12_RECT scissor{0, 0, LONG(bb_w_), LONG(bb_h_)};
     ForgetDrawState();
@@ -4279,8 +4281,9 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     }
     // GameInfo::bars_backdrop: the frame shrunk to a few dozen pixels and dimmed, for the bars beside it
     bool backdrop = false;
-    if (frame && app::kGame.bars_backdrop && app::kGame.bars_backdrop() && bb_h_ &&
-        app::FrameAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
+    const bool widening = app::ShownAspect() < app::FrameAspect() - 1e-3f;
+    if (frame && ((app::kGame.bars_backdrop && app::kGame.bars_backdrop()) || widening) && bb_h_ &&
+        app::ShownAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
         D3D12_RESOURCE_STATES fs = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         ComPtr<ID3D12Resource> shrunk = Shrink(frame, fs, frame_fmt, 64, 36, {.taps = 8, .into = backdrop_.Get(), .into_state = backdrop_state_, .mul = 0.45f});
         if (shrunk) {
