@@ -58,10 +58,24 @@ bool Widescreen() { return kGame.aspect_live || (!FillsNarrow() && Desktop().wid
 // setting changed in play)
 namespace {
 std::atomic<float> g_held{0};
+std::atomic<float> g_latched{0};  // LatchFrameAspect, as on Windows
+float LiveFrameAspect();
 }  // namespace
 void HoldAspect(float aspect) { g_held.store(aspect); }
 
 float FrameAspect() {
+    if (kGame.widen_ms)
+        if (const float l = g_latched.load(); l > 0) return l;
+    return LiveFrameAspect();
+}
+float LatchFrameAspect() {
+    const float a = LiveFrameAspect();
+    g_latched.store(a);
+    return a;
+}
+
+namespace {
+float LiveFrameAspect() {
     if (const float held = g_held.load(); held > 0) return held;  // as on Windows: any title
     static float forced = float(harness::Env("FRAME_ASPECT_X100")) / 100;
     static uint32_t asked = 0;
@@ -76,6 +90,7 @@ float FrameAspect() {
     if (FillsNarrow()) return float(Desktop().width) / float(Desktop().height);
     return Widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
 }
+}  // namespace
 float HudAspect() { return Widescreen() ? kGame.hud_aspect : std::min(kGame.hud_aspect, 4.0f / 3.0f); }
 
 std::filesystem::path ExeDir() {

@@ -264,6 +264,11 @@ struct State {
     // pretransformed vertices have w scaled by zscale * inv_wfar (0x1C0FC0 folds it into the matrix, 0x1C0300 into
     // the pass-through program's c0.w); a vertex program's w is its own
     float inv_wfar = 1.0f;
+    // GameInfo::widen_ms: the frame's shape this draw was made for (app::LatchFrameAspect at the present before it; 0 not
+    // given). The renderers reshape their targets on the first draw of a new shape and show a frame at its own, not at
+    // the shape decided since: behind the title by a frame (the render thread) or a step (in-between frames), a frame
+    // drawn at 16:9 was cropped as the new 2.39:1 and the targets reshaped under the last 16:9 draws, a pop at each change
+    float frame_aspect = 0;
 };
 
 // Xbox point sprites (D3DRS_POINTSPRITEENABLE) give their coordinates to texture stage 3 alone, and a title drawing

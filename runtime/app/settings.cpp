@@ -484,10 +484,25 @@ bool Widescreen() {
 
 namespace {
 std::atomic<float> g_held{0};
+std::atomic<float> g_latched{0};  // LatchFrameAspect
+float LiveFrameAspect();
 }  // namespace
 void HoldAspect(float aspect) { g_held.store(aspect); }
 
 float FrameAspect() {
+    if (kGame.widen_ms)
+        if (const float l = g_latched.load(); l > 0) return l;
+    return LiveFrameAspect();
+}
+
+float LatchFrameAspect() {
+    const float a = LiveFrameAspect();
+    g_latched.store(a);
+    return a;
+}
+
+namespace {
+float LiveFrameAspect() {
     // a shape the title holds (HoldAspect) is the frame's whatever the setting: aspect_live or not (Fight Night Round 2's
     // in-engine cutscenes at 16:9 on an ultrawide screen, its play filling it)
     if (const float held = g_held.load(); held > 0) return held;
@@ -514,6 +529,7 @@ float FrameAspect() {
     if (!FillsWide(kGame.fill_follows_live ? Get().aspect % 4 : a)) return 16.0f / 9.0f;
     return std::max(16.0f / 9.0f, ScreenAspect());
 }
+}  // namespace
 
 // GameInfo::widen_ms: from the shape shown when the frame widened to its new one, eased; narrower at once
 float ShownAspect() {

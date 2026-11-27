@@ -288,6 +288,10 @@ private:
     void CountFps();
     void ApplySettings();
     void RescaleTargets();
+    void FollowShape(const State& s);
+    // the shape of the frame shown: the targets' (the draws', State::frame_aspect) when they give one, else FrameAspect
+    float DrawnAspect() const { return shape_by_draws_ ? aspect_ : app::FrameAspect(); }
+    bool shape_by_draws_ = false;  // a draw has given its frame's shape (State::frame_aspect)
     // targets
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
     Target* FindTarget(const Surface& s, bool depth);
@@ -1150,8 +1154,19 @@ void D3D11Backend::ClearRects(Target& t, const std::vector<RECT>& rs, uint32_t f
     Unbind();
 }
 
+// State::frame_aspect: the targets take the shape a frame's draws were made for at its first draw, not at the present
+// after the title decided it (the render thread a frame behind, in-between frames a step)
+void D3D11Backend::FollowShape(const State& s) {
+    if (s.frame_aspect <= 0) return;
+    shape_by_draws_ = true;
+    if (std::fabs(s.frame_aspect - aspect_) <= 1e-4f) return;
+    aspect_ = s.frame_aspect;
+    RescaleTargets();
+}
+
 void D3D11Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    FollowShape(s);
     Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false) : nullptr;
     Target* ds = (flags & (kClearZ | kClearStencil)) ? DepthTarget(s) : nullptr;
     std::vector<RECT> rs;
@@ -1834,6 +1849,7 @@ void D3D11Backend::DrawGeometry(const Assembled& a) {
 }
 
 void D3D11Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    FollowShape(s);
     if (const State* sprites = PointSpriteStages(s, prim)) return Draw(*sprites, prim, start, count, indices);
     if (s.blank_format && s.textures[0] && (::kernel::R32(s.textures[0] + 12) >> 8 & 0xFF) == s.blank_format) {
         Clear(s, 0, nullptr, kClearTarget, 0xFF000000u, 0, 0);  // a black clear in its place (State::blank_format)
@@ -2082,7 +2098,7 @@ ID3D11ShaderResourceView* D3D11Backend::SmaaFrame(Target& t) {
 
 void D3D11Backend::BlitFrame(ID3D11ShaderResourceView* frame) {
     // widening (GameInfo::widen_ms): the frame's middle at the shape shown, its sides opening out
-    float aspect = app::FrameAspect(), shown = app::ShownAspect();
+    float aspect = DrawnAspect(), shown = std::min(app::ShownAspect(), aspect);
     float w = float(bb_w_), h = float(bb_h_);
     float vw = std::min(w, h * shown);
     float vh = vw / shown;
@@ -2145,9 +2161,10 @@ void D3D11Backend::Present(const Surface& front) {
     ctx_->ClearRenderTargetView(bb_rtv_.Get(), black);
     // GameInfo::bars_backdrop (and a frame widening): the frame shrunk to 64x36, box filtered and dimmed, stretched
     // across the window behind it, as the D3D12 renderer's
-    const bool widening = app::ShownAspect() < app::FrameAspect() - 1e-3f;
+    const float shown = std::min(app::ShownAspect(), DrawnAspect());
+    const bool widening = shown < DrawnAspect() - 1e-3f;
     if (frame && ((app::kGame.bars_backdrop && app::kGame.bars_backdrop()) || widening) && bb_h_ &&
-        app::ShownAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
+        shown < float(bb_w_) / float(bb_h_) - 0.01f) {
         if (!backdrop_) {
             D3D11_TEXTURE2D_DESC td = Texture2DDesc(kBgra, 64, 36, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
             if (FAILED(dev_->CreateTexture2D(&td, nullptr, &backdrop_)) ||
@@ -2208,7 +2225,7 @@ void D3D11Backend::ApplySettings() {
         LOGR("d3d11: MSAA %ux", msaa_);
     }
     float aspect = app::FrameAspect();
-    if (std::fabs(aspect - aspect_) > 1e-4f) {
+    if (!shape_by_draws_ && std::fabs(aspect - aspect_) > 1e-4f) {
         aspect_ = aspect;
         RescaleTargets();
     }

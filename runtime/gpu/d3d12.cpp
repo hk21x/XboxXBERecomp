@@ -617,6 +617,10 @@ private:
     void CountFps();
     void ApplySettings();
     void RescaleTargets();
+    void FollowShape(const State& s);
+    // the shape of the frame shown: the targets' (the draws', State::frame_aspect) when they give one, else FrameAspect
+    float DrawnAspect() const { return shape_by_draws_ ? aspect_ : app::FrameAspect(); }
+    bool shape_by_draws_ = false;  // a draw has given its frame's shape (State::frame_aspect)
     // per draw uploads and descriptor tables made earlier in the same ring generation are used again; the generation
     // moves on whenever the upload or descriptor ring starts over
     std::atomic<uint64_t> ring_gen_{1};  // record moves it on too (a views' wrap in AllocSrvSlots)
@@ -3342,6 +3346,7 @@ void D3D12Backend::TakeDecided() {
 
 
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+    FollowShape(s);
     // the top level draw is decided into packet_: its commands go to the packet until it is handed to record, and a
     // draw left out on the way leaves them (barriers already tracked) to record all the same
     struct DecideScope {
@@ -3846,8 +3851,21 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
     bound_rt_ = bound_ds_ = nullptr;
 }
 
+// State::frame_aspect: the targets take the shape a frame's draws were made for at its first draw, not at the present
+// after the title decided it (the render thread a frame behind, in-between frames a step); as ApplySettings does
+void D3D12Backend::FollowShape(const State& s) {
+    if (s.frame_aspect <= 0 || ext_) return;
+    shape_by_draws_ = true;
+    if (std::fabs(s.frame_aspect - aspect_) <= 1e-4f) return;
+    Flush();
+    aspect_ = s.frame_aspect;
+    RescaleTargets();
+    bound_rt_ = bound_ds_ = nullptr;
+}
+
 void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, uint32_t flags, uint32_t color, float z,
                          uint32_t stencil) {
+    FollowShape(s);
     // decided like a draw: its barriers and clears go into a packet record writes in order (one packet for each top
     // level clear; a clear in a draw's place, State::blank_format, goes with that draw's)
     struct DecideScope {
@@ -4190,7 +4208,7 @@ bool D3D12Backend::SmaaFrame(Target& t) {
 void D3D12Backend::BlitFrame(ID3D12Resource* frame, DXGI_FORMAT fmt) {
     // 16:9 when the console reports a widescreen display, else 4:3; ultrawide the screen's shape
     // widening (GameInfo::widen_ms): the frame's middle at the shape shown, its sides opening out
-    float aspect = app::FrameAspect(), shown = app::ShownAspect();
+    float aspect = DrawnAspect(), shown = std::min(app::ShownAspect(), aspect);
     float w = float(bb_w_);
     float h = float(bb_h_);
     float vw = std::min(w, h * shown);
@@ -4281,9 +4299,10 @@ void D3D12Backend::DrawFrame(Target* t, uint32_t bi) {
     }
     // GameInfo::bars_backdrop: the frame shrunk to a few dozen pixels and dimmed, for the bars beside it
     bool backdrop = false;
-    const bool widening = app::ShownAspect() < app::FrameAspect() - 1e-3f;
+    const float shown = std::min(app::ShownAspect(), DrawnAspect());
+    const bool widening = shown < DrawnAspect() - 1e-3f;
     if (frame && ((app::kGame.bars_backdrop && app::kGame.bars_backdrop()) || widening) && bb_h_ &&
-        app::ShownAspect() < float(bb_w_) / float(bb_h_) - 0.01f) {
+        shown < float(bb_w_) / float(bb_h_) - 0.01f) {
         D3D12_RESOURCE_STATES fs = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         ComPtr<ID3D12Resource> shrunk = Shrink(frame, fs, frame_fmt, 64, 36, {.taps = 8, .into = backdrop_.Get(), .into_state = backdrop_state_, .mul = 0.45f});
         if (shrunk) {
@@ -4862,7 +4881,7 @@ void D3D12Backend::ApplySettings() {
     float want = app::RenderScale(guest_h_);
     bool remake = ext_ && ext_->Settings();
     float aspect = app::FrameAspect();
-    if (std::fabs(aspect - aspect_) > 1e-4f && !ext_) {
+    if (!shape_by_draws_ && std::fabs(aspect - aspect_) > 1e-4f && !ext_) {
         Flush();
         aspect_ = aspect;
         RescaleTargets();

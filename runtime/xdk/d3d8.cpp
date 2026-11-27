@@ -1032,6 +1032,8 @@ uint32_t SwapFrame(X86Context& ctx, uint32_t swap_flags) {
         front.blend_new = g_frame_blend_new.exchange(false);
         g_backend->Present(front);
     }
+    // the next frame's shape, taken now for all of it (app::LatchFrameAspect, gpu::State::frame_aspect)
+    if (app::kGame.widen_ms) g_state.frame_aspect = app::LatchFrameAspect();
     achievements::Frame();
     app::Pace(PresentVblanks());
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
@@ -2344,6 +2346,7 @@ void ReplayPushBuffer(uint32_t pb, uint32_t fixup, PbRecording& r) {
         s.pillar_fit = g_state.pillar_fit;
         s.hud_layout = g_state.hud_layout;
         s.blank_format = g_state.blank_format;
+        s.frame_aspect = g_state.frame_aspect;
         if (!g_backend) continue;
         if (!d->up.empty()) {
             s.streams[0] = {UpVertices(d->up.data(), uint32_t(d->up.size())), d->up_stride};

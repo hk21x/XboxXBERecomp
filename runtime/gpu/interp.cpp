@@ -829,6 +829,13 @@ void Interpolating::LogJumps() {
 
 bool Interpolating::Match() {
     if (!before_count_) return false;
+    // a step at another frame shape than the one before (State::frame_aspect): shown as drawn, nothing blended across
+    auto shape = [](const std::vector<Rec>& v, size_t n) {
+        for (size_t i = 0; i < n; i++)
+            if (v[i].s) return v[i].s->frame_aspect;
+        return 0.0f;
+    };
+    if (shape(now_, count_) != shape(before_, before_count_)) return false;
     std::unordered_map<uint64_t, std::vector<int>> found;
     found.reserve(before_count_);
     for (size_t i = before_count_; i-- > 0;)

@@ -128,6 +128,10 @@ bool Widescreen();
 // the shape the frame is shown at: 4:3, 16:9, or the screen's when the aspect setting fills it (never under 16:9, but
 // for a title filling a screen between 4:3 and 16:9: 16:10 shows the title's 4:3 mode widened, not 16:9 letterboxed)
 float FrameAspect();
+// GameInfo::widen_ms: FrameAspect taken once a frame, at the title's present (xdk/d3d8.cpp), so a frame's views, its
+// draws (gpu::State::frame_aspect) and the targets they go into agree on one shape; returns it. Between presents
+// FrameAspect gives the shape taken, a change decided in the middle of a frame waiting for the next
+float LatchFrameAspect();
 // the shape the frame is shown at this present: FrameAspect, but a frame that widened (GameInfo::widen_ms) shown
 // widening over that time, cropped at its sides from the shape it had; narrower at once
 float ShownAspect();
